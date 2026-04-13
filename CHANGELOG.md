@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Shared diary persistence helper so hook-written session summaries and diary tool entries use the same append-only write path
+- Runtime QA coverage for bootstrap races, malformed bootstrap state recovery, CLI `init -> mine -> serve -> hook` smoke flows, malformed stdio protocol handling, failed re-mine recovery, and migration corruption/idempotency scenarios
+- `IRONMEM_EMBED_MODE=noop` for process-level tests and controlled local smoke runs without the ONNX model
+- `IRONMEM_DISABLE_MIGRATION=1` to explicitly disable first-run mempalace migration
+- Hidden-path mining coverage, including tests for default exclusion and explicit opt-in behavior
+
+### Changed
+
+- Bootstrap no longer infers a workspace from `cwd`; explicit workspace roots are required for auto-mining
+- `serve` now fails closed on bootstrap errors instead of starting with partial or skipped initialization
+- Re-mining replaces a file's drawers transactionally after embeddings are computed, so transient failures do not delete previously indexed content
+- Migration from ChromaDB now imports drawers and knowledge-graph data transactionally and no longer falls back to a home-directory KG when migrating from an explicit external store
+- Hook session summaries now land in the same readable diary stream as normal diary writes
+- Benchmark/docs wording now reflects current reality: `mine` and `hook` are implemented, and file-mining is excluded from the benchmark harness by design rather than because the feature is missing
+- Search and graph comments now describe KG score adjustment and substring matching plainly instead of implying novelty or fuzzy matching
+- Mining now skips hidden files and directories by default; set `IRONMEM_MINE_HIDDEN=1` to opt in to indexing dot-paths
+
+### Fixed
+
+- Sanitized `cwd` and `transcript_path` values before hook diary persistence to prevent path-shaped content injection into durable summaries
+- Rejected system directory prefixes for mining and migration inputs, and canonicalized mining roots before traversal
+- Removed `.env` from the mining allowlist to reduce accidental credential ingestion
+- Added bounded SQLite busy retries during startup schema work
+- Serialized env-var-mutating bootstrap tests to prevent `HOME` / migration detection races from importing a real mempalace store into test databases
+- Encapsulated direct database connection access behind `Database` methods to keep graph and migration code on supported transaction boundaries
+
+### Removed
+
+- `properties` field from the `entities` table and `Entity` struct — the column was never populated with meaningful data, never queried, and never surfaced through any tool; `upsert_entity` now uses `ON CONFLICT DO NOTHING` since there is no mutable entity state left to update
+
 ## [0.1.0] - 2026-04-13
 
 ### Added
