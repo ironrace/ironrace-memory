@@ -51,7 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Drawer CRUD — add, delete, list wings/rooms, full taxonomy
 - Incremental workspace mining (`ironmem mine`) with SHA-256 manifest cache
 - ChromaDB/mempalace migration (`ironmem migrate --from <path>`)
-- Auto-bootstrap on first `serve` or `hook` — migrate-or-init + initial mine
+- Auto-bootstrap on first `serve` or `hook` — migrate-or-init + initial mine; disable with `IRONMEM_AUTO_BOOTSTRAP=0`
+- `IRONMEM_WORKSPACE_ROOT` to pin the auto-mine target without passing it on the command line
+- `IRONMEM_MIGRATE_FROM` to point migration at a custom ChromaDB store path
+- `IRONMEM_DB_PATH`, `IRONMEM_MODEL_DIR`, `IRONMEM_MCP_MODE` for runtime config overrides
 - Hook support for Claude Code and Codex: `session-start`, `stop`, `precompact`
 - Three MCP access modes: `trusted`, `read-only`, `restricted`
 - Input sanitization and content length limits on all write paths
