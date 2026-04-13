@@ -93,7 +93,7 @@ pub fn traverse(
     let mut queue: VecDeque<(String, usize)> = VecDeque::new();
     let mut max_reached = 0;
 
-    // Find the start room (fuzzy: substring match)
+    // Find the start room with a best-effort substring match.
     let start = graph
         .room_wings
         .keys()

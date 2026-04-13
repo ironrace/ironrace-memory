@@ -64,7 +64,7 @@ pub fn mine_directory(app: &App, path: &str) -> Result<(), MemoryError> {
 
     let manifest_path = manifest_path_for_root(&app.config.state_dir, &root);
     let mut manifest = load_manifest(&manifest_path, &root)?;
-    let current_files = collect_candidate_files(&root)?;
+    let current_files = collect_candidate_files(&root, include_hidden_paths())?;
     let current_paths: HashSet<String> = current_files
         .iter()
         .map(|file| file.absolute_path.display().to_string())
@@ -153,10 +153,24 @@ pub fn mine_directory(app: &App, path: &str) -> Result<(), MemoryError> {
     Ok(())
 }
 
-fn collect_candidate_files(root: &Path) -> Result<Vec<CandidateFile>, MemoryError> {
+fn include_hidden_paths() -> bool {
+    std::env::var("IRONMEM_MINE_HIDDEN")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn collect_candidate_files(
+    root: &Path,
+    include_hidden: bool,
+) -> Result<Vec<CandidateFile>, MemoryError> {
     let walker = WalkBuilder::new(root)
-        .hidden(false)
-        .standard_filters(true)
+        .standard_filters(!include_hidden)
+        .hidden(!include_hidden)
         .git_ignore(true)
         .git_exclude(true)
         .filter_entry(|entry| !should_skip_entry(entry.path()))
@@ -426,5 +440,43 @@ mod tests {
         let path = temp.path().join("blob.bin");
         std::fs::write(&path, [0u8, 1, 2]).unwrap();
         assert!(!is_candidate_file(&path));
+    }
+
+    #[test]
+    fn collect_candidate_files_skips_hidden_paths_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("visible.md"), "visible").unwrap();
+        std::fs::create_dir_all(temp.path().join(".codex")).unwrap();
+        std::fs::write(temp.path().join(".secret.md"), "secret").unwrap();
+        std::fs::write(temp.path().join(".codex").join("notes.md"), "hidden notes").unwrap();
+
+        let files = collect_candidate_files(temp.path(), false).unwrap();
+        let paths: Vec<String> = files
+            .iter()
+            .map(|file| file.absolute_path.display().to_string())
+            .collect();
+
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].ends_with("visible.md"));
+    }
+
+    #[test]
+    fn collect_candidate_files_can_include_hidden_paths_when_opted_in() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("visible.md"), "visible").unwrap();
+        std::fs::create_dir_all(temp.path().join(".codex")).unwrap();
+        std::fs::write(temp.path().join(".secret.md"), "secret").unwrap();
+        std::fs::write(temp.path().join(".codex").join("notes.md"), "hidden notes").unwrap();
+
+        let files = collect_candidate_files(temp.path(), true).unwrap();
+        let paths: Vec<String> = files
+            .iter()
+            .map(|file| file.absolute_path.display().to_string())
+            .collect();
+
+        assert_eq!(paths.len(), 3);
+        assert!(paths.iter().any(|path| path.ends_with("visible.md")));
+        assert!(paths.iter().any(|path| path.ends_with(".secret.md")));
+        assert!(paths.iter().any(|path| path.ends_with(".codex/notes.md")));
     }
 }

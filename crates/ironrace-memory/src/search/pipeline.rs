@@ -1,7 +1,6 @@
 //! Search pipeline: sanitize → embed → HNSW → metadata filter → KG boost → rank.
 //!
-//! The KG boost is the key architectural improvement over the Python version:
-//! entity relationships from the knowledge graph inform retrieval ranking.
+//! Knowledge-graph relationships can adjust retrieval ranking after vector search.
 
 use std::collections::HashSet;
 
@@ -90,7 +89,7 @@ pub fn search(
         }
     }
 
-    // Step 5: KG boosting — the novel integration
+    // Step 5: KG score adjustment from entity relationships
     let kg = KnowledgeGraph::new(&app.db);
     kg_boost(&mut scored, &sanitized.clean_query, &kg)?;
 

@@ -67,6 +67,7 @@ After registering the MCP server, validate the basics:
 - `IRONMEM_MCP_MODE=trusted` enables writes.
 - `IRONMEM_MCP_MODE=read-only` disables write tools.
 - `IRONMEM_MCP_MODE=restricted` disables writes and redacts sensitive returned content.
+- Mining skips hidden files and directories by default. Set `IRONMEM_MINE_HIDDEN=1` only when you explicitly want dot-paths indexed.
 
 ## Codex Packaging Gap
 
@@ -153,11 +154,11 @@ Defaults:
 - `ironrace-memory` uses a Rust ONNX embedding path
 - `mempalace` uses its own Python and Chroma stack
 - First-run model/bootstrap costs may dominate small workloads
-- File mining is not compared because `ironrace-memory` does not implement it yet
+- File mining is implemented in `ironrace-memory`, but this harness still avoids file-level comparisons because the mining pipelines differ and the tool-driven benchmark is more controlled
 
 ## Recommended Next Work
 
-1. Implement `hook`
-2. Implement `mine`
-3. Add `.codex-plugin/`
-4. Add MCP smoke tests in CI
+1. Make env-sensitive runtime tests safe under parallel execution
+2. Add MCP smoke tests in CI
+3. Extend benchmark coverage with larger datasets and repeated warm-cache runs
+4. Tighten mining defaults for sensitive local config surfaces

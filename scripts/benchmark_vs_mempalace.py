@@ -10,8 +10,10 @@ This harness focuses on surfaces both systems already expose in common:
 - taxonomy
 - delete drawer
 
-It deliberately avoids file-mining comparisons because ironrace-memory does
-not implement `mine` yet.
+It deliberately avoids file-mining comparisons even though ironrace-memory
+implements `mine`, because the two projects have meaningfully different
+mining pipelines and this harness is intended to compare common MCP tool
+surfaces.
 """
 
 from __future__ import annotations
