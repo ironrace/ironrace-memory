@@ -1,0 +1,412 @@
+//! Ingestion pipeline — mine files into memory with incremental updates.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use ignore::WalkBuilder;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::bootstrap::record_workspace_mine;
+use crate::error::MemoryError;
+use crate::mcp::app::App;
+
+const MAX_FILE_BYTES: u64 = 512 * 1024;
+const MAX_CHUNK_CHARS: usize = 2_400;
+const CHUNK_OVERLAP_CHARS: usize = 240;
+const MANIFEST_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct MineManifest {
+    version: u32,
+    root: String,
+    files: HashMap<String, MineManifestEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MineManifestEntry {
+    content_hash: String,
+    chunk_count: usize,
+    updated_at: String,
+}
+
+struct CandidateFile {
+    absolute_path: PathBuf,
+    content: String,
+    content_hash: String,
+}
+
+pub fn mine_directory(app: &App, path: &str) -> Result<(), MemoryError> {
+    let root = PathBuf::from(path);
+    if !root.is_dir() {
+        return Err(MemoryError::NotFound(format!(
+            "Directory not found for mining: {path}"
+        )));
+    }
+
+    let manifest_path = manifest_path_for_root(&app.config.state_dir, &root);
+    let mut manifest = load_manifest(&manifest_path, &root)?;
+    let current_files = collect_candidate_files(&root)?;
+    let current_paths: HashSet<String> = current_files
+        .iter()
+        .map(|file| file.absolute_path.display().to_string())
+        .collect();
+
+    for removed in manifest
+        .files
+        .keys()
+        .filter(|path| !current_paths.contains(path.as_str()))
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        app.db.delete_drawers_by_source_file(&removed)?;
+        manifest.files.remove(&removed);
+    }
+
+    let root_has_git = root.join(".git").exists();
+
+    for file in current_files {
+        let source_file = file.absolute_path.display().to_string();
+        let unchanged = manifest
+            .files
+            .get(&source_file)
+            .map(|entry| entry.content_hash == file.content_hash)
+            .unwrap_or(false);
+        if unchanged {
+            continue;
+        }
+
+        let (wing, room) = derive_location(&root, &file.absolute_path, root_has_git)?;
+        let chunks = chunk_text(&file.content);
+
+        app.db.delete_drawers_by_source_file(&source_file)?;
+
+        if chunks.is_empty() {
+            manifest.files.remove(&source_file);
+            continue;
+        }
+
+        let embeddings = {
+            let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+            let mut embedder = app
+                .embedder
+                .write()
+                .map_err(|e| MemoryError::Lock(format!("Embedder lock poisoned: {e}")))?;
+            embedder
+                .embed_batch(&chunk_refs)
+                .map_err(MemoryError::Embed)?
+        };
+
+        app.db.with_transaction(|tx| {
+            for (chunk_index, chunk) in chunks.iter().enumerate() {
+                let start = chunk_index * ironrace_embed::embedder::EMBED_DIM;
+                let end = start + ironrace_embed::embedder::EMBED_DIM;
+                let embedding = embeddings.get(start..end).ok_or_else(|| {
+                    MemoryError::Validation("Embedding batch length mismatch during mining".into())
+                })?;
+                let id = mined_drawer_id(chunk, &wing, &room, &source_file, chunk_index);
+                crate::db::schema::Database::insert_drawer_tx(
+                    tx,
+                    &id,
+                    chunk,
+                    embedding,
+                    &wing,
+                    &room,
+                    &source_file,
+                    "mine",
+                )?;
+            }
+            Ok(())
+        })?;
+
+        manifest.files.insert(
+            source_file,
+            MineManifestEntry {
+                content_hash: file.content_hash,
+                chunk_count: chunks.len(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            },
+        );
+        app.mark_dirty();
+    }
+
+    save_manifest(&manifest_path, &manifest)?;
+    record_workspace_mine(&app.config, &root)?;
+    Ok(())
+}
+
+fn collect_candidate_files(root: &Path) -> Result<Vec<CandidateFile>, MemoryError> {
+    let walker = WalkBuilder::new(root)
+        .hidden(false)
+        .standard_filters(true)
+        .git_ignore(true)
+        .git_exclude(true)
+        .filter_entry(|entry| !should_skip_entry(entry.path()))
+        .build();
+
+    let mut files = Vec::new();
+    for entry in walker {
+        let entry = entry.map_err(|err| MemoryError::Io(std::io::Error::other(err.to_string())))?;
+        let path = entry.path();
+        if !path.is_file() || !is_candidate_file(path) {
+            continue;
+        }
+        let bytes = std::fs::read(path)?;
+        if bytes.contains(&0) {
+            continue;
+        }
+        let content = match String::from_utf8(bytes) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(trimmed.as_bytes());
+        files.push(CandidateFile {
+            absolute_path: path.to_path_buf(),
+            content: trimmed.to_string(),
+            content_hash: format!("{:x}", hasher.finalize()),
+        });
+    }
+    Ok(files)
+}
+
+fn should_skip_entry(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    matches!(
+        name,
+        ".git"
+            | "node_modules"
+            | "target"
+            | "build"
+            | ".build"
+            | "dist"
+            | ".venv"
+            | "venv"
+            | "__pycache__"
+            | ".pytest_cache"
+            | ".ruff_cache"
+            | ".idea"
+            | ".swiftpm"
+            | "DerivedData"
+    )
+}
+
+fn is_candidate_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if metadata.len() == 0 || metadata.len() > MAX_FILE_BYTES {
+        return false;
+    }
+
+    let allowed = [
+        "md", "txt", "rst", "py", "toml", "json", "yaml", "yml", "swift", "kt", "java", "js", "ts",
+        "tsx", "jsx", "go", "rs", "sql", "html", "css", "sh", "env",
+    ];
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|ext| allowed.contains(&ext))
+        .unwrap_or_else(|| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .map(|name| {
+                    matches!(
+                        name,
+                        "README" | "README.md" | "TASKS.md" | "IMPLEMENTATION_PLAN.md"
+                    )
+                })
+                .unwrap_or(false)
+        })
+}
+
+fn derive_location(
+    root: &Path,
+    file_path: &Path,
+    root_has_git: bool,
+) -> Result<(String, String), MemoryError> {
+    let root_name = sanitize_segment(
+        root.file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("workspace"),
+        "workspace",
+    );
+    let relative = file_path.strip_prefix(root).map_err(|_| {
+        MemoryError::Validation("Failed to compute relative path during mining".into())
+    })?;
+    let parents: Vec<String> = relative
+        .parent()
+        .map(|parent| {
+            parent
+                .components()
+                .filter_map(|component| component.as_os_str().to_str())
+                .map(|part| sanitize_segment(part, "general"))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let (wing, room) = if root_has_git {
+        (
+            root_name,
+            parents
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "general".to_string()),
+        )
+    } else {
+        match parents.as_slice() {
+            [] => (root_name, "general".to_string()),
+            [wing] => (wing.clone(), "general".to_string()),
+            [wing, room, ..] => (wing.clone(), room.clone()),
+        }
+    };
+
+    Ok((
+        crate::sanitize::sanitize_name(&wing, "wing")?,
+        crate::sanitize::sanitize_name(&room, "room")?,
+    ))
+}
+
+fn chunk_text(content: &str) -> Vec<String> {
+    let chars: Vec<char> = content.chars().collect();
+    if chars.len() <= MAX_CHUNK_CHARS {
+        return vec![content.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    while start < chars.len() {
+        let end = (start + MAX_CHUNK_CHARS).min(chars.len());
+        let chunk: String = chars[start..end].iter().collect();
+        let trimmed = chunk.trim();
+        if !trimmed.is_empty() {
+            chunks.push(trimmed.to_string());
+        }
+        if end == chars.len() {
+            break;
+        }
+        start = end.saturating_sub(CHUNK_OVERLAP_CHARS);
+    }
+    chunks
+}
+
+fn mined_drawer_id(
+    content: &str,
+    wing: &str,
+    room: &str,
+    source_file: &str,
+    chunk_index: usize,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    hasher.update(wing.as_bytes());
+    hasher.update(room.as_bytes());
+    hasher.update(source_file.as_bytes());
+    hasher.update(chunk_index.to_le_bytes());
+    format!("{:x}", hasher.finalize())[..32].to_string()
+}
+
+fn manifest_path_for_root(state_dir: &Path, root: &Path) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(root.to_string_lossy().as_bytes());
+    let key = format!("{:x}", hasher.finalize());
+    state_dir
+        .join("mine_manifests")
+        .join(format!("{}.json", &key[..16]))
+}
+
+fn load_manifest(path: &Path, root: &Path) -> Result<MineManifest, MemoryError> {
+    if !path.is_file() {
+        return Ok(MineManifest {
+            version: MANIFEST_VERSION,
+            root: root.display().to_string(),
+            files: HashMap::new(),
+        });
+    }
+    let raw = std::fs::read_to_string(path)?;
+    let mut manifest: MineManifest = serde_json::from_str(&raw)?;
+    if manifest.version == 0 {
+        manifest.version = MANIFEST_VERSION;
+    }
+    if manifest.root.is_empty() {
+        manifest.root = root.display().to_string();
+    }
+    Ok(manifest)
+}
+
+fn save_manifest(path: &Path, manifest: &MineManifest) -> Result<(), MemoryError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(manifest)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+fn sanitize_segment(raw: &str, fallback: &str) -> String {
+    let mut sanitized = raw
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ' ' | '\'') {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    sanitized = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if sanitized.is_empty() {
+        fallback.to_string()
+    } else {
+        sanitized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_text_splits_large_content() {
+        let content = "a".repeat(MAX_CHUNK_CHARS + 500);
+        let chunks = chunk_text(&content);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].len() >= MAX_CHUNK_CHARS - 10);
+    }
+
+    #[test]
+    fn derive_location_for_single_repo_uses_root_name_as_wing() {
+        let root = Path::new("/tmp/glp1-companion-backend");
+        let file = root.join("app/models.py");
+        let (wing, room) = derive_location(root, &file, true).unwrap();
+        assert_eq!(wing, "glp1-companion-backend");
+        assert_eq!(room, "app");
+    }
+
+    #[test]
+    fn derive_location_for_workspace_uses_first_component_as_wing() {
+        let root = Path::new("/tmp/jcagentszero");
+        let file = root.join("glp1-companion-frontend/Views/Home/HomeView.swift");
+        let (wing, room) = derive_location(root, &file, false).unwrap();
+        assert_eq!(wing, "glp1-companion-frontend");
+        assert_eq!(room, "Views");
+    }
+
+    #[test]
+    fn candidate_file_filter_rejects_large_or_binary_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("blob.bin");
+        std::fs::write(&path, [0u8, 1, 2]).unwrap();
+        assert!(!is_candidate_file(&path));
+    }
+}

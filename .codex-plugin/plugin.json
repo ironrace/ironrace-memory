@@ -1,0 +1,46 @@
+{
+  "name": "ironrace-memory",
+  "version": "0.1.0",
+  "description": "Rust MCP memory backend for Codex with semantic search, knowledge graph, automatic migrate-or-init bootstrap, and incremental workspace mining.",
+  "author": {
+    "name": "Jeffrey Crum"
+  },
+  "license": "Apache-2.0",
+  "hooks": "./hooks.json",
+  "mcpServers": {
+    "ironrace-memory": {
+      "command": "bash",
+      "args": [
+        "-lc",
+        "\"${CODEX_PLUGIN_ROOT}/bin/ironmem-mcp.sh\" serve"
+      ]
+    }
+  },
+  "keywords": [
+    "memory",
+    "mcp",
+    "semantic-search",
+    "knowledge-graph",
+    "codex",
+    "claude"
+  ],
+  "repository": "https://github.com/jcagentszero/ironrace-memory",
+  "interface": {
+    "displayName": "ironrace-memory",
+    "shortDescription": "Persistent workspace memory for Codex",
+    "longDescription": "Local Rust memory backend with semantic search, KG lookups, mempalace migration, initial auto-mine, and incremental updates on hooks.",
+    "developerName": "Jeffrey Crum",
+    "category": "Coding",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Before answering questions about prior work, decisions, project history, or people, call ironmem_search or KG tools first.",
+      "After important progress or decisions, write durable summaries back into ironrace-memory.",
+      "Use ironmem_status at session start to load memory overview and protocol guidance."
+    ],
+    "brandColor": "#1C5D6B"
+  }
+}

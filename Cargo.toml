@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/ironrace-core",
+    "crates/ironrace-embed",
+    "crates/ironrace-memory",
+]
+resolver = "2"

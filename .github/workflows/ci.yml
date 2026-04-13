@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Format & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  build:
+    name: Build Binary
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo build
+        run: cargo build -p ironrace-memory --bin ironmem
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ironmem-linux
+          path: target/debug/ironmem
+
+  plugin-metadata:
+    name: Plugin Metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate JSON syntax
+        run: |
+          for f in .codex-plugin/plugin.json .codex-plugin/hooks.json \
+                   .claude-plugin/plugin.json .claude-plugin/.mcp.json; do
+            echo "Validating $f"
+            python3 -m json.tool "$f" > /dev/null
+          done
+
+      - name: Check version consistency
+        run: |
+          CARGO_VERSION=$(grep '^version' crates/ironrace-memory/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "Cargo.toml version: $CARGO_VERSION"
+          for f in .codex-plugin/plugin.json .claude-plugin/plugin.json; do
+            PLUGIN_VERSION=$(python3 -c "import json; print(json.load(open('$f'))['version'])")
+            echo "$f version: $PLUGIN_VERSION"
+            if [ "$CARGO_VERSION" != "$PLUGIN_VERSION" ]; then
+              echo "ERROR: $f version ($PLUGIN_VERSION) does not match Cargo.toml ($CARGO_VERSION)"
+              exit 1
+            fi
+          done
+          echo "All plugin versions match Cargo.toml."

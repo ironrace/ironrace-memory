@@ -1,0 +1,9 @@
+{
+  "ironrace-memory": {
+    "command": "bash",
+    "args": [
+      "-lc",
+      "\"${CLAUDE_PLUGIN_ROOT}/bin/ironmem-mcp.sh\" serve"
+    ]
+  }
+}

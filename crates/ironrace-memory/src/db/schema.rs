@@ -1,0 +1,164 @@
+use std::path::Path;
+
+use rusqlite::{Connection, Transaction};
+
+use crate::error::MemoryError;
+use ironrace_embed::embedder::EMBED_DIM;
+
+const SCHEMA_SQL: &str = include_str!("../../../../migrations/001_init.sql");
+
+/// Database wrapper around a SQLite connection.
+pub struct Database {
+    pub(crate) conn: Connection,
+}
+
+impl Database {
+    /// Open (or create) the database at the given path.
+    pub fn open(path: &Path) -> Result<Self, MemoryError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let conn = Connection::open(path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+
+        // Restrict database file permissions to owner-only
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+
+        Ok(Self { conn })
+    }
+
+    /// Open an in-memory database (for testing and integration tests).
+    pub fn open_in_memory() -> Result<Self, MemoryError> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        let db = Self { conn };
+        db.migrate()?;
+        Ok(db)
+    }
+
+    /// Run schema migrations.
+    pub fn migrate(&self) -> Result<(), MemoryError> {
+        self.conn.execute_batch(SCHEMA_SQL)?;
+        Ok(())
+    }
+
+    /// Execute a closure inside a SQLite transaction and commit on success.
+    pub fn with_transaction<T>(
+        &self,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, MemoryError>,
+    ) -> Result<T, MemoryError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let result = f(&tx)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Load all vectors from the drawers table for HNSW index building.
+    /// Returns (id, embedding) pairs.
+    pub fn load_all_vectors(&self) -> Result<Vec<(String, Vec<f32>)>, MemoryError> {
+        let mut stmt = self.conn.prepare("SELECT id, embedding FROM drawers")?;
+
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            if !blob.len().is_multiple_of(std::mem::size_of::<f32>()) {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    blob.len(),
+                    rusqlite::types::Type::Blob,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "Drawer {id} has invalid embedding blob length {}",
+                            blob.len()
+                        ),
+                    )),
+                ));
+            }
+            let embedding: Vec<f32> = blob
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect();
+            if embedding.len() != EMBED_DIM {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    embedding.len(),
+                    rusqlite::types::Type::Blob,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "Drawer {id} embedding dimension {} does not match expected {}",
+                            embedding.len(),
+                            EMBED_DIM
+                        ),
+                    )),
+                ));
+            }
+            Ok((id, embedding))
+        })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(row?);
+        }
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Database;
+
+    #[test]
+    fn test_load_all_vectors_rejects_corrupt_blob_length() {
+        let db = Database::open_in_memory().unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO drawers (id, content, embedding, wing, room, source_file, added_by)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    "badblob000000000000000000000001",
+                    "bad",
+                    vec![1u8, 2, 3],
+                    "w",
+                    "r",
+                    "",
+                    "test"
+                ],
+            )
+            .unwrap();
+
+        let err = db.load_all_vectors().unwrap_err().to_string();
+        assert!(err.contains("invalid embedding blob length"));
+    }
+
+    #[test]
+    fn test_load_all_vectors_rejects_wrong_dimension() {
+        let db = Database::open_in_memory().unwrap();
+        let blob: Vec<u8> = [1.0f32, 2.0, 3.0]
+            .into_iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        db.conn
+            .execute(
+                "INSERT INTO drawers (id, content, embedding, wing, room, source_file, added_by)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    "baddim0000000000000000000000002",
+                    "bad",
+                    blob,
+                    "w",
+                    "r",
+                    "",
+                    "test"
+                ],
+            )
+            .unwrap();
+
+        let err = db.load_all_vectors().unwrap_err().to_string();
+        assert!(err.contains("embedding dimension"));
+    }
+}

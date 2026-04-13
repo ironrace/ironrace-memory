@@ -1,0 +1,28 @@
+{
+  "name": "ironrace-memory",
+  "version": "0.1.0",
+  "description": "Rust MCP memory backend for Claude Code with semantic search, knowledge graph, automatic migrate-or-init bootstrap, and incremental workspace mining.",
+  "author": {
+    "name": "Jeffrey Crum"
+  },
+  "license": "Apache-2.0",
+  "commands": [],
+  "mcpServers": {
+    "ironrace-memory": {
+      "command": "bash",
+      "args": [
+        "-lc",
+        "\"${CLAUDE_PLUGIN_ROOT}/bin/ironmem-mcp.sh\" serve"
+      ]
+    }
+  },
+  "keywords": [
+    "memory",
+    "mcp",
+    "semantic-search",
+    "knowledge-graph",
+    "claude-code",
+    "codex"
+  ],
+  "repository": "https://github.com/jcagentszero/ironrace-memory"
+}

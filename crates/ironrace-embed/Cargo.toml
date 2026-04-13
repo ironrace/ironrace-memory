@@ -1,0 +1,15 @@
+[package]
+name = "ironrace-embed"
+version = "0.1.0"
+edition = "2021"
+description = "ONNX sentence embeddings — pure Rust, no Python"
+license = "Apache-2.0"
+
+[dependencies]
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "download-binaries", "tls-rustls", "copy-dylibs"] }
+ndarray = "0.17"
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+hf-hub = { version = "0.4", default-features = false, features = ["ureq", "rustls-tls"] }
+dirs = "6"
+anyhow = "1"
+sha2 = "0.10"

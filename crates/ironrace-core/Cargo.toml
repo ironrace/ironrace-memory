@@ -1,0 +1,10 @@
+[package]
+name = "ironrace-core"
+version = "0.1.0"
+edition = "2021"
+description = "Shared HNSW vector index for ironrace"
+license = "Apache-2.0"
+
+[dependencies]
+hnsw_rs = "=0.3.4"
+rayon = "1.10"
