@@ -583,9 +583,7 @@ mod tests {
             "// See secret_key_field_name for details\n"
         ));
         // Function call: `_key` appears but is followed by `)`, not ` =` or `=`
-        assert!(!file_contains_secrets(
-            "let value = get_key();\n"
-        ));
+        assert!(!file_contains_secrets("let value = get_key();\n"));
     }
 
     #[test]
