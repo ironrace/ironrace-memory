@@ -112,8 +112,9 @@ Embedding-dependent tools (`ironmem_search`, `ironmem_add_drawer`, diary writes)
 
 ## Operational Notes
 
-- `IRONMEM_MCP_MODE=trusted` enables writes.
-- `IRONMEM_MCP_MODE=read-only` disables write tools.
+- The binary default is `read-only` — running `ironmem serve` without setting `IRONMEM_MCP_MODE` disables all write tools. The plugin wrapper scripts default to `trusted` so plugin users are unaffected.
+- `IRONMEM_MCP_MODE=trusted` enables writes (required for normal plugin use).
+- `IRONMEM_MCP_MODE=read-only` disables write tools (binary default).
 - `IRONMEM_MCP_MODE=restricted` disables writes and redacts sensitive returned content.
 - Mining skips hidden files and directories by default. Set `IRONMEM_MINE_HIDDEN=1` only when you explicitly want dot-paths indexed.
 - `IRONMEM_EMBED_MODE=noop` disables the ONNX embedder entirely (useful for process-level tests or smoke runs without the model).

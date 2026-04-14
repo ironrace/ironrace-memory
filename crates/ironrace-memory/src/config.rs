@@ -92,7 +92,7 @@ impl Config {
         let state_dir = base_dir.join("hook_state");
         let mcp_access_mode = match std::env::var("IRONMEM_MCP_MODE") {
             Ok(mode) => McpAccessMode::parse(&mode)?,
-            Err(_) => McpAccessMode::Trusted,
+            Err(_) => McpAccessMode::ReadOnly,
         };
         let embed_mode = match std::env::var("IRONMEM_EMBED_MODE") {
             Ok(mode) => EmbedMode::parse(&mode)?,

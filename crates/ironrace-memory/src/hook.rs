@@ -9,7 +9,7 @@ use crate::diary;
 use crate::error::MemoryError;
 use crate::ingest::mine_directory;
 use crate::mcp::app::App;
-use crate::sanitize::sanitize_session_id;
+use crate::sanitize::{sanitize_harness, sanitize_session_id};
 
 #[derive(Debug, Serialize)]
 pub struct HookResponse {
@@ -137,7 +137,9 @@ fn session_summary(
     }
 
     Some(format!(
-        "Hook {hook_name} ran for harness {harness}. session_id={} cwd={} transcript_path={}",
+        "Hook {} ran for harness {}. session_id={} cwd={} transcript_path={}",
+        sanitize_harness(hook_name),
+        sanitize_harness(harness),
         session_id.unwrap_or("unknown"),
         sanitize_path_for_log(cwd),
         sanitize_path_for_log(transcript_path),

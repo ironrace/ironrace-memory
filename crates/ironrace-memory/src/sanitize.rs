@@ -76,6 +76,25 @@ pub fn sanitize_content(value: &str, max_length: usize) -> Result<&str, MemoryEr
     Ok(value)
 }
 
+/// Sanitize a harness or hook name for safe inclusion in diary entries.
+///
+/// Keeps only `[a-zA-Z0-9_-]`, truncates to 64 characters, and returns
+/// `"unknown"` if the result would be empty — preventing shell metacharacter
+/// injection into durable diary content.
+pub fn sanitize_harness(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .take(64)
+        .collect();
+
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
 /// Sanitize a session ID to prevent path traversal.
 pub fn sanitize_session_id(session_id: &str) -> String {
     let sanitized: String = session_id
@@ -174,5 +193,32 @@ mod tests {
         assert_eq!(sanitize_session_id("abc-123_def"), "abc-123_def");
         assert_eq!(sanitize_session_id("../../../etc"), "etc");
         assert_eq!(sanitize_session_id(""), "unknown");
+    }
+
+    #[test]
+    fn sanitize_harness_passes_valid_values_unchanged() {
+        assert_eq!(sanitize_harness("claude-code"), "claude-code");
+        assert_eq!(sanitize_harness("codex"), "codex");
+        assert_eq!(sanitize_harness("claude_code_2"), "claude_code_2");
+    }
+
+    #[test]
+    fn sanitize_harness_strips_metacharacters() {
+        // `-` is allowed (needed for "claude-code"); spaces, semicolons, slashes are stripped
+        assert_eq!(sanitize_harness("codex; rm -rf /"), "codexrm-rf");
+        assert_eq!(sanitize_harness("$(evil)"), "evil");
+        assert_eq!(sanitize_harness("a&b|c`d"), "abcd");
+    }
+
+    #[test]
+    fn sanitize_harness_truncates_to_64_chars() {
+        let long = "a".repeat(100);
+        assert_eq!(sanitize_harness(&long).len(), 64);
+    }
+
+    #[test]
+    fn sanitize_harness_returns_unknown_for_empty_result() {
+        assert_eq!(sanitize_harness(""), "unknown");
+        assert_eq!(sanitize_harness(";;;"), "unknown");
     }
 }
