@@ -183,17 +183,24 @@ impl App {
         }
     }
 
-    /// Rebuild the HNSW index if dirty. Called before search.
-    /// Also triggers a one-time embedder reload + index rebuild when background
-    /// memory init completes — the serving App starts with a Noop embedder and
-    /// must swap in the real model before it can embed queries correctly.
-    pub fn ensure_index_fresh(&self) -> Result<(), MemoryError> {
+    /// If background init just completed, swap in the real embedder.
+    /// Must be called before any embed operation (add, diary write, search).
+    /// Idempotent: the swap happens at most once per server lifetime.
+    pub fn ensure_embedder_ready(&self) -> Result<(), MemoryError> {
         if self.memory_ready.load(Ordering::Acquire)
             && !self.memory_ready_rebuilt.swap(true, Ordering::AcqRel)
         {
             self.reload_embedder()?;
+            // Mark dirty so the HNSW index is rebuilt on the next search, picking
+            // up all drawers written by the background bootstrap.
             self.dirty.store(true, Ordering::Release);
         }
+        Ok(())
+    }
+
+    /// Rebuild the HNSW index if dirty. Called before search.
+    pub fn ensure_index_fresh(&self) -> Result<(), MemoryError> {
+        self.ensure_embedder_ready()?;
         if self.dirty.load(Ordering::Acquire) {
             self.rebuild_index()?;
         }

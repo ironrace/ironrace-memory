@@ -70,15 +70,35 @@ class McpProcessError(RuntimeError):
 
 
 class JsonRpcClient:
-    def __init__(self, name: str, cmd: list[str], cwd: Path | None, env: dict[str, str]) -> None:
+    def __init__(self, name: str, cmd: list[str], cwd: Path | None, env: dict[str, str], log_stderr: bool = False) -> None:
         self.name = name
         self.cmd = cmd
         self.cwd = cwd
         self.env = env
+        self.log_stderr = log_stderr
         self.proc: subprocess.Popen[str] | None = None
         self._request_id = 0
+        self._stderr_file: Any = None
 
-    def start(self) -> float:
+    def start(self, warmup_tool: str | None = None, warmup_timeout: float = 120.0) -> float:
+        """Start the server and return ms to initialize response.
+
+        If warmup_tool is provided, polls that tool until warming_up is False
+        (or the field is absent). Time-to-ready is tracked separately in
+        self.warmup_ms so callers can report it without conflating it with
+        connection latency.
+        """
+        if self.log_stderr:
+            import tempfile
+            self._stderr_file = tempfile.NamedTemporaryFile(
+                mode="w", prefix=f"ironmem-{self.name}-stderr-", suffix=".log",
+                delete=False, dir="/tmp",
+            )
+            stderr_dest = self._stderr_file
+            print(f"  [debug] server stderr → {self._stderr_file.name}", file=sys.stderr)
+        else:
+            stderr_dest = subprocess.DEVNULL
+
         started = time.perf_counter()
         self.proc = subprocess.Popen(
             self.cmd,
@@ -86,12 +106,28 @@ class JsonRpcClient:
             env=self.env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=stderr_dest,
             text=True,
             bufsize=1,
         )
         self.call("initialize", {})
-        return (time.perf_counter() - started) * 1000
+        connect_ms = (time.perf_counter() - started) * 1000
+
+        self.warmup_ms: float = 0.0
+        if warmup_tool:
+            warmup_start = time.perf_counter()
+            deadline = warmup_start + warmup_timeout
+            while time.perf_counter() < deadline:
+                try:
+                    result = self.call_tool(warmup_tool, {})
+                    if not result.get("warming_up", False):
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            self.warmup_ms = (time.perf_counter() - warmup_start) * 1000
+
+        return connect_ms
 
     def stop(self) -> None:
         if not self.proc:
@@ -106,6 +142,10 @@ class JsonRpcClient:
             self.proc.wait(timeout=5)
         finally:
             self.proc = None
+            if self._stderr_file:
+                self._stderr_file.flush()
+                self._stderr_file.close()
+                self._stderr_file = None
 
     def call(self, method: str, params: dict[str, Any]) -> Any:
         if not self.proc or not self.proc.stdin or not self.proc.stdout:
@@ -201,6 +241,26 @@ def dir_size_bytes(path: Path) -> int:
     return total
 
 
+def _truncate_sqlite_wal(storage_dir: Path) -> None:
+    """Force a WAL TRUNCATE checkpoint on any SQLite databases in the dir.
+
+    SQLite WAL files aren't deleted when the last connection closes; they stay
+    at their full size even after all frames are checkpointed. A TRUNCATE
+    checkpoint rewrites the WAL to zero length, giving a fair storage comparison.
+    Requires the `sqlite3` CLI to be on PATH; silently skips if unavailable.
+    """
+    try:
+        for db_path in storage_dir.rglob("*.sqlite3"):
+            subprocess.run(
+                ["sqlite3", str(db_path), "PRAGMA wal_checkpoint(TRUNCATE);"],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # sqlite3 CLI not available — leave WAL as-is
+
+
 def summarize_latencies(values: list[float]) -> dict[str, float]:
     return {
         "count": len(values),
@@ -240,6 +300,7 @@ def benchmark_backend(
     runs: int,
 ) -> dict[str, Any]:
     startup_samples: list[float] = []
+    warmup_samples: list[float] = []
     add_samples: list[float] = []
     search_samples: list[float] = []
     delete_samples: list[float] = []
@@ -254,8 +315,11 @@ def benchmark_backend(
             shutil.rmtree(storage_path)
         storage_path.mkdir(parents=True, exist_ok=True)
 
-        startup_ms = client.start()
+        warmup_tool = tool_names.get("status") if name == "ironrace-memory" else None
+        startup_ms = client.start(warmup_tool=warmup_tool)
         startup_samples.append(startup_ms)
+        if hasattr(client, "warmup_ms"):
+            warmup_samples.append(client.warmup_ms)
 
         created_ids: list[str] = []
         for doc in documents:
@@ -300,10 +364,17 @@ def benchmark_backend(
             )
             delete_samples.append(elapsed_ms)
 
+        # Stop server BEFORE measuring storage so SQLite WAL is checkpointed.
         client.stop()
+        # SQLite WAL files aren't truncated on last connection close; force a
+        # TRUNCATE checkpoint so the storage measurement reflects actual data size.
+        if name == "ironrace-memory":
+            _truncate_sqlite_wal(storage_path)
+        final_storage_bytes = dir_size_bytes(storage_path)
 
     return {
         "startup": summarize_latencies(startup_samples),
+        "warmup": summarize_latencies(warmup_samples) if warmup_samples else None,
         "add_drawer": summarize_latencies(add_samples),
         "search": summarize_latencies(search_samples),
         "delete_drawer": summarize_latencies(delete_samples),
@@ -311,7 +382,7 @@ def benchmark_backend(
         "list_wings": summarize_latencies(wings_samples),
         "taxonomy": summarize_latencies(taxonomy_samples),
         "search_hit_rate": round(search_hit_count / max(total_searches, 1), 3),
-        "storage_bytes": dir_size_bytes(storage_path),
+        "storage_bytes": final_storage_bytes,
         "documents": len(documents),
         "queries": min(query_count, len(documents)) * runs,
     }
@@ -327,6 +398,10 @@ def make_ironmem_client(args, storage_root: Path) -> JsonRpcClient:
     env = os.environ.copy()
     env["IRONMEM_DB_PATH"] = str(storage_root / "ironmem.sqlite3")
     env["IRONMEM_MCP_MODE"] = "trusted"
+    # Disable auto-migration and workspace mining — benchmark measures raw search/add perf,
+    # not one-time bootstrap cost. Background thread still loads the embedder (real warmup).
+    env["IRONMEM_AUTO_BOOTSTRAP"] = "0"
+    env["IRONMEM_DISABLE_MIGRATION"] = "1"
     if args.ironmem_model_dir:
         env["IRONMEM_MODEL_DIR"] = str(Path(args.ironmem_model_dir).expanduser().resolve())
 
@@ -334,13 +409,14 @@ def make_ironmem_client(args, storage_root: Path) -> JsonRpcClient:
         [str(binary), "setup"],
         env=env,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         check=False,
         text=True,
     )
     if setup.returncode != 0:
         raise SystemExit(
-            "ironmem setup failed. Ensure the embedding model is available or that downloads are allowed."
+            f"ironmem setup failed (stderr: {setup.stderr.strip()!r}). "
+            "Ensure the embedding model is available."
         )
 
     return JsonRpcClient(
@@ -348,6 +424,7 @@ def make_ironmem_client(args, storage_root: Path) -> JsonRpcClient:
         cmd=[str(binary), "serve", "--db", str(storage_root / "ironmem.sqlite3")],
         cwd=Path(args.ironmem_repo).expanduser().resolve(),
         env=env,
+        log_stderr=getattr(args, "debug_stderr", False),
     )
 
 
@@ -369,22 +446,34 @@ def make_mempalace_client(args, storage_root: Path) -> JsonRpcClient:
     )
 
 
+def format_bytes(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
 def print_summary(results: dict[str, Any]) -> None:
+    cfg = results.get("config", {})
     print()
     print("Benchmark Summary")
     print("=================")
+    print(f"documents: {cfg.get('documents')}  queries: {cfg.get('queries')}  runs: {cfg.get('runs')}  seed: {cfg.get('seed')}")
     for backend_name, metrics in results["backends"].items():
         print()
         print(backend_name)
         print("-" * len(backend_name))
-        print(f"startup p50:    {metrics['startup']['p50_ms']} ms")
-        print(f"add p50:        {metrics['add_drawer']['p50_ms']} ms")
-        print(f"search p50:     {metrics['search']['p50_ms']} ms")
+        print(f"startup p50:    {metrics['startup']['p50_ms']} ms  (connect only)")
+        if metrics.get("warmup"):
+            print(f"ready p50:      {metrics['warmup']['p50_ms']} ms  (model load + bootstrap)")
+        print(f"add p50:        {metrics['add_drawer']['p50_ms']} ms  (p95: {metrics['add_drawer']['p95_ms']} ms)")
+        print(f"search p50:     {metrics['search']['p50_ms']} ms  (p95: {metrics['search']['p95_ms']} ms)")
         print(f"status p50:     {metrics['status']['p50_ms']} ms")
         print(f"taxonomy p50:   {metrics['taxonomy']['p50_ms']} ms")
         print(f"delete p50:     {metrics['delete_drawer']['p50_ms']} ms")
         print(f"search hit rate:{metrics['search_hit_rate']}")
-        print(f"storage bytes:  {metrics['storage_bytes']}")
+        print(f"storage:        {format_bytes(metrics['storage_bytes'])}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -437,6 +526,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep the temporary benchmark workspace instead of deleting it",
     )
+    parser.add_argument(
+        "--debug-stderr",
+        action="store_true",
+        help="Redirect server stderr to /tmp log files for debugging",
+    )
+    parser.add_argument(
+        "--ironmem-only",
+        action="store_true",
+        help="Skip mempalace benchmark (ironrace-memory only)",
+    )
     return parser.parse_args()
 
 
@@ -449,7 +548,7 @@ def main() -> int:
     mempal_storage = temp_dir / "mempalace-store"
 
     iron_client = make_ironmem_client(args, iron_storage)
-    mempal_client = make_mempalace_client(args, mempal_storage)
+    mempal_client = None if args.ironmem_only else make_mempalace_client(args, mempal_storage)
 
     results = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -458,7 +557,6 @@ def main() -> int:
             "queries": args.queries,
             "runs": args.runs,
             "seed": args.seed,
-            "temp_dir": str(temp_dir),
         },
         "backends": {},
     }
@@ -481,25 +579,27 @@ def main() -> int:
             runs=args.runs,
         )
 
-        results["backends"]["mempalace"] = benchmark_backend(
-            name="mempalace",
-            client=mempal_client,
-            tool_names={
-                "status": "mempalace_status",
-                "list_wings": "mempalace_list_wings",
-                "taxonomy": "mempalace_get_taxonomy",
-                "search": "mempalace_search",
-                "add_drawer": "mempalace_add_drawer",
-                "delete_drawer": "mempalace_delete_drawer",
-            },
-            documents=documents,
-            query_count=args.queries,
-            storage_path=mempal_storage,
-            runs=args.runs,
-        )
+        if mempal_client is not None:
+            results["backends"]["mempalace"] = benchmark_backend(
+                name="mempalace",
+                client=mempal_client,
+                tool_names={
+                    "status": "mempalace_status",
+                    "list_wings": "mempalace_list_wings",
+                    "taxonomy": "mempalace_get_taxonomy",
+                    "search": "mempalace_search",
+                    "add_drawer": "mempalace_add_drawer",
+                    "delete_drawer": "mempalace_delete_drawer",
+                },
+                documents=documents,
+                query_count=args.queries,
+                storage_path=mempal_storage,
+                runs=args.runs,
+            )
     finally:
         iron_client.stop()
-        mempal_client.stop()
+        if mempal_client is not None:
+            mempal_client.stop()
         if not args.keep_temp:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

@@ -334,6 +334,9 @@ fn handle_add_drawer(app: &App, args: &Value) -> Result<Value, MemoryError> {
 
     let id = crate::db::drawers::generate_id(content, &wing, &room);
 
+    // Ensure real embedder is loaded before embedding (no-op after first call).
+    app.ensure_embedder_ready()?;
+
     // Embed the content
     let embedding = {
         let mut emb = app
@@ -604,6 +607,7 @@ fn handle_diary_write(app: &App, args: &Value) -> Result<Value, MemoryError> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| MemoryError::Validation("content is required".into()))?;
     let wing = args.get("wing").and_then(|v| v.as_str()).unwrap_or("diary");
+    app.ensure_embedder_ready()?;
     let entry = diary::write_entry(app, content, wing, "diary", 100_000)?;
     app.db.wal_log(
         "diary_write",

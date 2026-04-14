@@ -56,7 +56,10 @@ pub fn search(
     };
 
     // Step 3+4: HNSW search + id_map lookup under a single read lock (no TOCTOU)
-    let overfetch = limit.saturating_mul(3).min(MAX_OVERFETCH);
+    // Fetch at least 5x the requested limit, with a floor of 30 candidates
+    // so short-content documents (where needle is diluted by other context)
+    // aren't dropped before the relevance re-rank step.
+    let overfetch = limit.saturating_mul(5).max(30).min(MAX_OVERFETCH);
     let state = app
         .index_state
         .read()
