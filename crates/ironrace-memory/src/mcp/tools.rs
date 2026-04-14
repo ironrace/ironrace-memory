@@ -447,10 +447,15 @@ fn handle_kg_add(app: &App, args: &Value) -> Result<Value, MemoryError> {
     if let Some(vf) = valid_from {
         validate_date_format(vf, "valid_from")?;
     }
-    let confidence = args
-        .get("confidence")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(1.0);
+    let confidence = match args.get("confidence").and_then(|v| v.as_f64()) {
+        None => 1.0,
+        Some(c) if c.is_finite() && (0.0..=1.0).contains(&c) => c,
+        Some(bad) => {
+            return Err(MemoryError::Validation(format!(
+                "confidence must be a finite number between 0.0 and 1.0, got {bad}"
+            )))
+        }
+    };
 
     let source_closet = match args.get("source_closet").and_then(|v| v.as_str()) {
         Some(sc) => Some(sanitize::sanitize_name(sc, "source_closet")?),
@@ -761,6 +766,55 @@ mod tests {
             McpAccessMode::Restricted,
             "ironmem_search"
         ));
+    }
+
+    #[test]
+    fn confidence_validation_rejects_out_of_range() {
+        use crate::config::{Config, EmbedMode, McpAccessMode};
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let config = Config {
+            db_path: dir.path().join("mem.sqlite3"),
+            model_dir: dir.path().join("model"),
+            model_dir_explicit: true,
+            state_dir: dir.path().join("state"),
+            mcp_access_mode: McpAccessMode::Trusted,
+            embed_mode: EmbedMode::Noop,
+        };
+        std::env::set_var("IRONMEM_DISABLE_MIGRATION", "1");
+        #[allow(clippy::arc_with_non_send_sync)]
+        let app = Arc::new(crate::mcp::app::App::new(config).unwrap());
+
+        // over 1.0
+        let args = serde_json::json!({
+            "subject": "foo", "predicate": "knows", "object": "bar",
+            "subject_type": "entity", "object_type": "entity",
+            "confidence": 1.5
+        });
+        let result = handle_kg_add(&app, &args);
+        assert!(result.is_err(), "confidence > 1.0 should fail");
+
+        // under 0.0
+        let args = serde_json::json!({
+            "subject": "foo", "predicate": "knows", "object": "bar",
+            "subject_type": "entity", "object_type": "entity",
+            "confidence": -0.1
+        });
+        let result = handle_kg_add(&app, &args);
+        assert!(result.is_err(), "confidence < 0.0 should fail");
+
+        // valid
+        let args = serde_json::json!({
+            "subject": "foo", "predicate": "knows", "object": "bar",
+            "subject_type": "entity", "object_type": "entity",
+            "confidence": 0.8
+        });
+        let result = handle_kg_add(&app, &args);
+        assert!(result.is_ok(), "confidence 0.8 should succeed");
+
+        std::env::remove_var("IRONMEM_DISABLE_MIGRATION");
     }
 
     #[test]

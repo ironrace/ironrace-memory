@@ -95,6 +95,28 @@ pub fn mine_directory(app: &App, path: &str) -> Result<(), MemoryError> {
         }
 
         let (wing, room) = derive_location(&root, &file.absolute_path, root_has_git)?;
+
+        if file_contains_secrets(&file.content) {
+            tracing::debug!(
+                path = %file.absolute_path.display(),
+                "skipping file: possible secrets detected"
+            );
+            // Evict any previously-indexed drawers so stale sensitive content
+            // does not remain searchable after a file gains credentials.
+            app.db.delete_drawers_by_source_file(&source_file)?;
+            // Record in the manifest with chunk_count=0 so subsequent mine
+            // runs see the current hash and skip without retrying.
+            manifest.files.insert(
+                source_file,
+                MineManifestEntry {
+                    content_hash: file.content_hash,
+                    chunk_count: 0,
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                },
+            );
+            continue;
+        }
+
         let chunks = chunk_text(&file.content);
 
         let embeddings = if chunks.is_empty() {
@@ -304,6 +326,43 @@ fn derive_location(
     ))
 }
 
+/// Returns true if the file content appears to contain credentials or secrets.
+///
+/// Uses simple case-insensitive substring matching — no regex, no external deps.
+/// A single matching line skips the whole file; we never redact individual lines.
+fn file_contains_secrets(content: &str) -> bool {
+    for line in content.lines() {
+        let lower = line.to_lowercase();
+        // Key/token/password assignment patterns (require `=` to avoid matching
+        // variable names like `secret_key_field_name` in docs or code).
+        if lower.contains("_key=")
+            || lower.contains("_secret=")
+            || lower.contains("_token=")
+            || lower.contains("_password=")
+            || lower.contains("_passwd=")
+            || lower.contains("api_key=")
+            // Spaced variants: `OPENAI_API_KEY = "..."` style (TOML, .env, INI)
+            || lower.contains("_key =")
+            || lower.contains("_secret =")
+            || lower.contains("_token =")
+            || lower.contains("_password =")
+            || lower.contains("_passwd =")
+            || lower.contains("api_key =")
+            // Bare config-style assignments
+            || lower.contains("password =")
+            || lower.contains("passwd =")
+            || lower.contains("secret =")
+            // PEM headers (private keys, certs, etc.)
+            || lower.contains("-----begin")
+            // Service-account JSON field
+            || lower.contains("\"private_key\"")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn chunk_text(content: &str) -> Vec<String> {
     let chars: Vec<char> = content.chars().collect();
     if chars.len() <= MAX_CHUNK_CHARS {
@@ -491,5 +550,55 @@ mod tests {
         assert!(paths.iter().any(|path| path.ends_with("visible.md")));
         assert!(paths.iter().any(|path| path.ends_with(".secret.md")));
         assert!(paths.iter().any(|path| path.ends_with(".codex/notes.md")));
+    }
+
+    #[test]
+    fn secret_filter_catches_aws_key_assignment() {
+        assert!(file_contains_secrets(
+            "export AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE\n"
+        ));
+    }
+
+    #[test]
+    fn secret_filter_catches_pem_header() {
+        assert!(file_contains_secrets("-----BEGIN RSA PRIVATE KEY-----\n"));
+    }
+
+    #[test]
+    fn secret_filter_catches_service_account_json() {
+        assert!(file_contains_secrets(
+            r#"{ "private_key": "-----BEGIN RSA PRIVATE KEY-----" }"#
+        ));
+    }
+
+    #[test]
+    fn secret_filter_catches_bare_password_assignment() {
+        assert!(file_contains_secrets("password = hunter2\n"));
+        assert!(file_contains_secrets("SECRET = abc123\n"));
+    }
+
+    #[test]
+    fn secret_filter_catches_spaced_assignment_variants() {
+        // TOML / .env / INI style: OPENAI_API_KEY = "sk-..."
+        assert!(file_contains_secrets("OPENAI_API_KEY = sk-abc123\n"));
+        assert!(file_contains_secrets("GITHUB_TOKEN = ghp_abc123\n"));
+        assert!(file_contains_secrets("MY_SECRET = supersecret\n"));
+        assert!(file_contains_secrets("DB_PASSWORD = hunter2\n"));
+    }
+
+    #[test]
+    fn secret_filter_ignores_variable_names_without_assignment() {
+        // "secret_key_field_name" in docs or code — no `=` follows the pattern
+        assert!(!file_contains_secrets(
+            "// See secret_key_field_name for details\n"
+        ));
+        // Function call: `_key` appears but is followed by `)`, not ` =` or `=`
+        assert!(!file_contains_secrets("let value = get_key();\n"));
+    }
+
+    #[test]
+    fn secret_filter_is_case_insensitive() {
+        assert!(file_contains_secrets("GITHUB_TOKEN=ghp_abc123\n"));
+        assert!(file_contains_secrets("github_token=ghp_abc123\n"));
     }
 }

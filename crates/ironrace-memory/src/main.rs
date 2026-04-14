@@ -7,6 +7,7 @@ use ironrace_memory::{bootstrap, config, ingest, mcp, migrate};
 #[derive(Parser)]
 #[command(
     name = "ironmem",
+    version = env!("CARGO_PKG_VERSION"),
     about = "AI memory — semantic search + knowledge graph"
 )]
 struct Cli {

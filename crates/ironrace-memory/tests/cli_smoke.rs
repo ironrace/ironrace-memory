@@ -17,7 +17,10 @@ fn base_command(home: &Path, db_path: &Path) -> Command {
     cmd.env("HOME", home)
         .env("IRONMEM_DB_PATH", db_path)
         .env("IRONMEM_EMBED_MODE", "noop")
-        .env("IRONMEM_AUTO_BOOTSTRAP", "0");
+        .env("IRONMEM_AUTO_BOOTSTRAP", "0")
+        // Smoke tests exercise the full write path; opt in explicitly now that
+        // the binary default is read-only.
+        .env("IRONMEM_MCP_MODE", "trusted");
     cmd
 }
 
