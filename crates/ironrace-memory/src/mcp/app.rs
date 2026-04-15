@@ -197,7 +197,14 @@ impl App {
             return self.rebuild_index_from_db();
         }
 
-        debug_assert_eq!(pos, state.id_map.len());
+        // pos == id_map.len() is invariant: insert_one returns self.count before
+        // incrementing, and id_map is kept in sync with the index on every insert.
+        assert_eq!(
+            pos,
+            state.id_map.len(),
+            "HNSW index position desync: pos={pos} id_map.len()={}",
+            state.id_map.len()
+        );
         state.id_map.push(drawer_id.to_string());
 
         if let Ok(mut cache) = self.graph_cache.write() {

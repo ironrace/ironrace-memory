@@ -484,7 +484,7 @@ def main() -> int:
             print(f"ironmem binary not found: {ironmem_binary}", file=sys.stderr)
             return 1
         ef_label = f"  ef_search={args.ef_search}" if args.ef_search else ""
-        print(f"\nirronrace-memory{ef_label}:", flush=True)
+        print(f"\nironrace-memory{ef_label}:", flush=True)
         r = run_ironrace_benchmark(
             data=data,
             ironmem_binary=str(ironmem_binary),
@@ -528,12 +528,6 @@ def main() -> int:
     if args.output_json:
         Path(args.output_json).write_text(json.dumps(results, indent=2))
         print(f"Results written to {args.output_json}")
-    elif args.backend == "mempalace" and "/tmp/_lme_mempalace_result.json" in str(args.output_json or ""):
-        pass  # internal invocation, already written
-
-    # Internal mempalace-only invocation: write to the output-json path so parent can read it
-    if args.output_json and args.backend == "mempalace":
-        Path(args.output_json).write_text(json.dumps(results, indent=2))
 
     return 0
 

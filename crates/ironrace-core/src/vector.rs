@@ -22,6 +22,8 @@ enum IndexInner {
         shard_capacities: Vec<usize>,
         shard_size_limit: usize,
         ef_construction: usize,
+        max_nb_connection: usize,
+        max_layer: usize,
     },
 }
 
@@ -142,6 +144,10 @@ impl VectorIndex {
 
         if n <= shard_size {
             // Small dataset: single index, sequential insert
+            // Headroom of 1000 (floor 100) lets insert_one add ~1000 entries before
+            // the Single index needs a full rebuild. Larger than the shard headroom
+            // (500) because single indexes have no overflow path — rebuilds are more
+            // expensive so we defer them longer.
             let capacity = n.max(100) + 1000;
             let hnsw = Hnsw::new(
                 max_nb_connection,
@@ -161,6 +167,9 @@ impl VectorIndex {
             // Large dataset: shard and build each in parallel with sequential insert
             let chunks: Vec<&[Vec<f32>]> = vectors.chunks(shard_size).collect();
             let shard_sizes: Vec<usize> = chunks.iter().map(|c| c.len()).collect();
+            // Headroom of 500 (floor 100) per shard: smaller than the Single headroom
+            // because sharded inserts overflow into a new shard rather than triggering
+            // a full rebuild, so the per-shard cost of overflow is low.
             let shard_capacities: Vec<usize> =
                 shard_sizes.iter().map(|&sz| sz.max(100) + 500).collect();
             let shard_offsets: Vec<usize> = shard_sizes
@@ -198,6 +207,8 @@ impl VectorIndex {
                     shard_capacities,
                     shard_size_limit: shard_size,
                     ef_construction,
+                    max_nb_connection,
+                    max_layer,
                 },
                 count: n,
             }
@@ -227,6 +238,8 @@ impl VectorIndex {
                 shard_capacities,
                 shard_size_limit,
                 ef_construction,
+                max_nb_connection,
+                max_layer,
             } => {
                 let last = shards.len() - 1;
                 if shard_sizes[last] < shard_capacities[last]
@@ -236,8 +249,16 @@ impl VectorIndex {
                     shards[last].insert((vec, local_id));
                     shard_sizes[last] += 1;
                 } else {
+                    // Last shard is full — open a new overflow shard with the same
+                    // 500-entry headroom used at build time.
                     let new_cap = (*shard_size_limit).max(100) + 500;
-                    let hnsw = Hnsw::new(16, new_cap, 16, *ef_construction, DistCosine);
+                    let hnsw = Hnsw::new(
+                        *max_nb_connection,
+                        new_cap,
+                        *max_layer,
+                        *ef_construction,
+                        DistCosine,
+                    );
                     hnsw.insert((vec, 0usize));
                     shard_offsets.push(pos);
                     shard_sizes.push(1);
