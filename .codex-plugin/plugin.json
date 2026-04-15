@@ -24,7 +24,7 @@
     "codex",
     "claude"
   ],
-  "repository": "https://github.com/jcagentszero/ironrace-memory",
+  "repository": "https://github.com/ironrace/ironrace-memory",
   "interface": {
     "displayName": "ironrace-memory",
     "shortDescription": "Persistent workspace memory for Codex",

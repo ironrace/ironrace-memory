@@ -6,7 +6,7 @@ use rusqlite::{Connection, Transaction};
 use crate::error::MemoryError;
 use ironrace_embed::embedder::EMBED_DIM;
 
-const SCHEMA_SQL: &str = include_str!("../../../../migrations/001_init.sql");
+const SCHEMA_SQL: &str = include_str!("../../migrations/001_init.sql");
 
 /// Database wrapper around a SQLite connection.
 ///

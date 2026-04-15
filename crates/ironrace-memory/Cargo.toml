@@ -2,6 +2,7 @@
 name = "ironrace-memory"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 description = "AI memory MCP server — semantic search + knowledge graph in a single binary"
 license = "Apache-2.0"
 authors = ["Jeffrey Crum <jeffrey.crum81@gmail.com>"]
