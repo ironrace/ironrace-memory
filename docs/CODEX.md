@@ -21,9 +21,10 @@ What works now:
 
 What hooks currently do on `stop` / `precompact`:
 
-- **Transcript review capture** — the last assistant message in the transcript is scanned for
-  code-review-like content (severity labels, file references, decision keywords). If found it is
-  stored as a drawer in the `reviews/` wing so it can be recalled in future sessions.
+- **Transcript review capture** — assistant messages in the transcript are scanned in reverse
+  chronological order for code-review-like content (severity labels, file references, decision
+  keywords). The most recent review-like assistant message is stored as a drawer in the
+  `reviews/` wing so it can be recalled in future sessions.
 - **Metadata diary entry** — a structured summary line is written to the diary recording the hook
   name, harness, session ID, working directory, and transcript path, plus the review room if a
   review was captured.
