@@ -158,10 +158,11 @@ impl BootstrapLock {
 fn process_is_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        // kill(pid, 0) probes process existence without sending a signal.
+        // SAFETY: kill(pid, 0) probes process existence without sending a signal.
         // Returns 0 if alive, ESRCH if the process does not exist.
         // EPERM means the process exists but we lack permission to signal it —
         // treat as alive (conservative; the lock is not stale).
+        // `pid` is cast from u32 to pid_t (i32); values ≤ i32::MAX are safe.
         let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
         if result == 0 {
             return true;

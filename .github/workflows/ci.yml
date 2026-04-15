@@ -114,7 +114,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: cargo package workspace
-        run: cargo package --workspace --no-verify
+        run: cargo package --workspace
 
   plugin-metadata:
     name: Plugin Metadata

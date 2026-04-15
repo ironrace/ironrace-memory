@@ -33,7 +33,7 @@ For a local release-style binary:
 ```bash
 cargo build --release -p ironrace-memory --bin ironmem
 ./target/release/ironmem setup
-./target/release/ironmem serve
+IRONMEM_MCP_MODE=trusted ./target/release/ironmem serve
 ```
 
 If you only need to validate the MCP transport without downloading the embedding model:

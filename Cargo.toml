@@ -5,3 +5,6 @@ members = [
     "crates/ironrace-memory",
 ]
 resolver = "2"
+
+[workspace.package]
+rust-version = "1.91"

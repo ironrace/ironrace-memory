@@ -1,5 +1,9 @@
 # ironrace-memory
 
+[![CI](https://github.com/ironrace/ironrace-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/ironrace/ironrace-memory/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/ironrace-memory.svg)](https://crates.io/crates/ironrace-memory)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 `ironrace-memory` is a Rust workspace for a local AI memory backend:
 
 - `ironrace-core`: shared HNSW vector index
@@ -25,10 +29,10 @@ cargo build --release -p ironrace-memory --bin ironmem
 ./target/release/ironmem setup
 ```
 
-Start the MCP server:
+Start the MCP server in trusted mode (required for write tools):
 
 ```bash
-./target/release/ironmem serve
+IRONMEM_MCP_MODE=trusted ./target/release/ironmem serve
 ```
 
 Smoke-test the live stdio server without downloading the model:
