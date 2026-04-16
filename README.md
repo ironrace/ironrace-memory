@@ -18,6 +18,22 @@ Key docs:
 - [Cross-Harness Implementation Plan](IMPLEMENTATION_PLAN.md)
 - [Codex Guide](docs/CODEX.md)
 
+## Contributor Hook
+
+This repo includes tracked Git hooks for local commits and pushes.
+
+Enable it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+chmod +x .githooks/pre-commit .githooks/pre-push
+```
+
+The hooks run:
+
+- `pre-commit`: `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `pre-push`: `cargo test --workspace`
+
 ## Quickstart: Install and Run in 60 Seconds
 
 Fastest path from source today:

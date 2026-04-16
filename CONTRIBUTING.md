@@ -8,6 +8,25 @@
 - `python3` for helper scripts and CI smoke checks
 - macOS or Linux for the current supported development flow
 
+## Git Hooks
+
+This repo ships tracked Git hooks in `.githooks/`.
+
+Enable it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+chmod +x .githooks/pre-commit .githooks/pre-push
+```
+
+After that:
+
+- every `git commit` runs:
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- every `git push` runs:
+- `cargo test --workspace`
+
 ## Local Development Loop
 
 From the repo root:

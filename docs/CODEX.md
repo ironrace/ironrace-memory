@@ -46,6 +46,23 @@ cargo build -p ironrace-memory --bin ironmem
 
 `setup` prepares the embedding model under the default model cache. On a fresh machine it may download the model.
 
+## Git Pre-Commit Hook
+
+This repo includes tracked Git hooks so Codex, Claude Code, and manual terminal workflows all hit the same local gates.
+
+Enable it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+chmod +x .githooks/pre-commit .githooks/pre-push
+```
+
+The hooks run:
+
+- `pre-commit`: `cargo fmt --all -- --check`
+- `pre-commit`: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `pre-push`: `cargo test --workspace`
+
 ## Manual Codex MCP Setup
 
 Add a server entry to your Codex MCP config.
@@ -241,5 +258,3 @@ All flags:
 ## Recommended Next Work
 
 1. Extend benchmark coverage with larger datasets and repeated warm-cache runs
-2. Implement rich LLM-written session summaries from `transcript_path` in hook stop/precompact
-3. Add a standalone installer command so users do not need to edit MCP config manually

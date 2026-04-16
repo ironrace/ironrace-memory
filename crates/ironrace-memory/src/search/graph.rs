@@ -151,7 +151,7 @@ pub fn find_tunnels(app: &App) -> Result<Vec<Tunnel>, MemoryError> {
         })
         .collect();
 
-    tunnels.sort_by(|a, b| b.count.cmp(&a.count));
+    tunnels.sort_by_key(|tunnel| std::cmp::Reverse(tunnel.count));
     Ok(tunnels)
 }
 

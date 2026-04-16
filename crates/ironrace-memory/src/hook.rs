@@ -326,10 +326,8 @@ fn extract_message_text(map: &serde_json::Map<String, serde_json::Value>) -> Str
 
 fn collect_text_fragments(value: &serde_json::Value, parts: &mut Vec<String>) {
     match value {
-        serde_json::Value::String(text) => {
-            if !text.trim().is_empty() {
-                parts.push(text.trim().to_string());
-            }
+        serde_json::Value::String(text) if !text.trim().is_empty() => {
+            parts.push(text.trim().to_string());
         }
         serde_json::Value::Array(items) => {
             for item in items {
