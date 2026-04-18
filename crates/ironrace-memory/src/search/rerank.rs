@@ -29,15 +29,7 @@ use regex::Regex;
 
 use crate::db::ScoredDrawer;
 
-// --- Weights -----------------------------------------------------------------
-
-pub const KW_WEIGHT: f32 = 0.50;
-pub const QUOTED_WEIGHT: f32 = 0.60;
-pub const NAME_WEIGHT: f32 = 0.20;
-
-/// If a token appears in this fraction of candidates or more, treat it as
-/// corpus-ubiquitous and skip it in overlap scoring (IDF-style dampener).
-const HIGH_DF_THRESHOLD: f32 = 0.80;
+use super::tunables;
 
 // --- Regex patterns ----------------------------------------------------------
 
@@ -237,7 +229,7 @@ pub fn shrinkage_rerank(candidates: &mut [ScoredDrawer], signals: &RerankSignals
     }
 
     let n = candidates.len() as f32;
-    let threshold = (n * HIGH_DF_THRESHOLD).ceil() as usize;
+    let threshold = (n * tunables::high_df_threshold()).ceil() as usize;
 
     // Build effective token lists (IDF-style: skip high-DF tokens)
     let effective_kws = idf_filter(&signals.predicate_kws, candidates, threshold);
@@ -288,13 +280,13 @@ pub fn shrinkage_rerank(candidates: &mut [ScoredDrawer], signals: &RerankSignals
         let dist = 1.0 - c.score;
         let mut shrunken = dist;
         if kw_boost > 0.0 {
-            shrunken *= 1.0 - KW_WEIGHT * kw_boost;
+            shrunken *= 1.0 - tunables::kw_weight() * kw_boost;
         }
         if quoted_boost > 0.0 {
-            shrunken *= 1.0 - QUOTED_WEIGHT * quoted_boost;
+            shrunken *= 1.0 - tunables::quoted_weight() * quoted_boost;
         }
         if name_boost > 0.0 {
-            shrunken *= 1.0 - NAME_WEIGHT * name_boost;
+            shrunken *= 1.0 - tunables::name_weight() * name_boost;
         }
         c.score = (1.0 - shrunken).clamp(0.0, 2.0);
     }

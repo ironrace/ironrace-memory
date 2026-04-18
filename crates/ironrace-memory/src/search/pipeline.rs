@@ -17,21 +17,7 @@ use crate::mcp::app::App;
 
 use super::rerank::{extract_signals, shrinkage_rerank, RerankSignals};
 use super::sanitizer::{extract_content_words, sanitize_query, SanitizeResult};
-
-/// Maximum HNSW candidates to overfetch before re-ranking.
-const MAX_OVERFETCH: usize = 150;
-
-/// RRF k constant. 60 is the widely-accepted default (Cormack et al. 2009).
-const RRF_K: f32 = 60.0;
-
-/// Queries with this many tokens or fewer skip the content-word variant.
-/// The variant strips question words (when/where/who) which loses question-type
-/// signal; on short LoCoMo-style questions it adds noise without benefit.
-const CONTENT_WORD_VARIANT_MIN_TOKENS: usize = 13;
-
-/// BM25 hit count below which we down-weight BM25's RRF contribution.
-/// With fewer than this many hits the lexical results are likely noisy.
-const BM25_SPARSE_THRESHOLD: usize = 5;
+use super::tunables;
 
 /// Full search result including sanitizer metadata.
 pub struct SearchResult {
@@ -76,7 +62,7 @@ pub fn search(
     // Short queries (≤ CONTENT_WORD_VARIANT_MIN_TOKENS tokens) skip the variant
     // because stripping question words (when/where/who) loses question-type signal.
     let token_count = sanitized.clean_query.split_whitespace().count();
-    let use_content_variant = token_count > CONTENT_WORD_VARIANT_MIN_TOKENS;
+    let use_content_variant = token_count > tunables::content_word_variant_min_tokens();
 
     let (primary_vec, maybe_content_vec) = {
         let mut emb = app
@@ -102,7 +88,7 @@ pub fn search(
     let content_word_variant_fired = maybe_content_vec.is_some();
 
     // Step 3: HNSW search — overfetch at 5× limit, clamped to MAX_OVERFETCH.
-    let overfetch = limit.saturating_mul(5).clamp(30, MAX_OVERFETCH);
+    let overfetch = limit.saturating_mul(5).clamp(30, tunables::max_overfetch());
 
     let state = app
         .index_state
@@ -138,18 +124,20 @@ pub fn search(
 
     // Step 5: Weighted RRF — down-weight BM25 when results are sparse to keep
     // HNSW authoritative rather than letting a few noisy BM25 hits dominate.
+    let sparse_threshold = tunables::bm25_sparse_threshold();
     let bm25_weight = if bm25_ids.is_empty() {
         0.0
-    } else if bm25_ids.len() < BM25_SPARSE_THRESHOLD {
-        bm25_ids.len() as f32 / BM25_SPARSE_THRESHOLD as f32
+    } else if bm25_ids.len() < sparse_threshold {
+        bm25_ids.len() as f32 / sparse_threshold as f32
     } else {
         1.0
     };
 
+    let rrf_k = tunables::rrf_k();
     let merged_ids = if bm25_weight == 0.0 {
         hnsw_ids.clone()
     } else {
-        rrf_merge_weighted(&hnsw_ids, &bm25_ids, RRF_K, bm25_weight)
+        rrf_merge_weighted(&hnsw_ids, &bm25_ids, rrf_k, bm25_weight)
     };
 
     // Step 6: Fetch drawer metadata with filters.
@@ -160,7 +148,7 @@ pub fn search(
         filters.room.as_deref(),
     )?;
 
-    let rrf_scores = rrf_scores_map_weighted(&hnsw_ids, &bm25_ids, RRF_K, bm25_weight);
+    let rrf_scores = rrf_scores_map_weighted(&hnsw_ids, &bm25_ids, rrf_k, bm25_weight);
     let mut scored: Vec<ScoredDrawer> = merged_ids
         .iter()
         .filter_map(|id| {
