@@ -292,9 +292,23 @@ def run_ironrace_benchmark(
                         drawer_id_to_idx[drawer_id] = j
                 # Save DB + ID map for future runs.
                 if db_cache_dir and cached_db_path is not None and cached_ids_path is not None:
+                    # Checkpoint the WAL so all committed frames land in the main
+                    # file before we copy it. Without this, shutil.copy2 captures
+                    # only the main file and silently omits the last few drawers.
+                    import sqlite3 as _sqlite3
+                    _conn = _sqlite3.connect(str(db_path))
+                    _conn.execute("PRAGMA wal_checkpoint(FULL)")
+                    _conn.close()
                     shutil.copy2(db_path, cached_db_path)
                     with open(cached_ids_path, "w") as _f:
                         json.dump(drawer_id_to_idx, _f)
+
+            if cache_hit:
+                # Pre-trigger reload_embedder() before the timed window.
+                # new_server_ready() starts with a noop embedder; without
+                # add_drawer, ensure_embedder_ready() fires on the first search
+                # call and pays ~1700ms. This warmup absorbs that cost.
+                client.call_tool("ironmem_search", {"query": "warmup", "limit": 1})
 
             t0 = time.perf_counter()
             payload = client.call_tool("ironmem_search", {

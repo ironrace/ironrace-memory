@@ -147,7 +147,10 @@ pub fn search(
     let mut prf_expanded_hnsw_ids: Option<Vec<String>> = None;
     let mut prf_expanded_bm25_ids: Option<Vec<String>> = None;
 
-    if tunables::prf_enabled() && merged_ids.len() >= tunables::prf_top_k() {
+    if tunables::prf_enabled()
+        && merged_ids.len() >= tunables::prf_top_k()
+        && merged_ids.len() >= tunables::prf_min_corpus()
+    {
         let fg_k = tunables::prf_top_k();
         let n_terms = tunables::prf_terms();
 

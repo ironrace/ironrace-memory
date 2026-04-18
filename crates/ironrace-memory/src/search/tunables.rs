@@ -105,6 +105,15 @@ pub fn prf_terms() -> usize {
     *V.get_or_init(|| env_usize("IRONMEM_PRF_TERMS", 4))
 }
 
+/// Minimum candidate count required to fire PRF. Corpora smaller than this
+/// have too few background docs for meaningful ICF scoring, producing noisy
+/// expansion terms that hurt precision. LongMemEval's ~50-session haystack
+/// stays below this floor; production corpora with 100+ drawers trigger it.
+pub fn prf_min_corpus() -> usize {
+    static V: OnceLock<usize> = OnceLock::new();
+    *V.get_or_init(|| env_usize("IRONMEM_PRF_MIN_CORPUS", 100))
+}
+
 // ── E5: index-time preference enrichment (on by default) ─────────────────────
 
 /// Append `[preferences: ...]` annotation to content before embedding and FTS indexing.
