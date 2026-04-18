@@ -149,3 +149,193 @@ fn kg_add_and_query_round_trip() {
         "query should return the inserted triple"
     );
 }
+
+#[test]
+fn collab_happy_path_locks_via_mcp_handlers() {
+    let app = App::open_for_test().unwrap();
+
+    let started = call_tool(
+        &app,
+        "ironmem_collab_start",
+        json!({
+            "repo_path": "/repo",
+            "branch": "main",
+            "initiator": "claude"
+        }),
+    );
+    let session_id = started["session_id"].as_str().unwrap();
+
+    call_tool(
+        &app,
+        "ironmem_collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "draft",
+            "content": "Claude first draft"
+        }),
+    );
+    call_tool(
+        &app,
+        "ironmem_collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "codex",
+            "topic": "draft",
+            "content": "Codex first draft"
+        }),
+    );
+    let status = call_tool(
+        &app,
+        "ironmem_collab_status",
+        json!({ "session_id": session_id }),
+    );
+    assert_eq!(status["phase"], "PlanSynthesisPending");
+
+    call_tool(
+        &app,
+        "ironmem_collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "canonical",
+            "content": "Merged canonical plan"
+        }),
+    );
+    let status = call_tool(
+        &app,
+        "ironmem_collab_status",
+        json!({ "session_id": session_id }),
+    );
+    assert_eq!(status["phase"], "PlanCodexReviewPending");
+    let canonical_hash = status["canonical_plan_hash"].as_str().unwrap().to_string();
+
+    call_tool(
+        &app,
+        "ironmem_collab_approve",
+        json!({
+            "session_id": session_id,
+            "agent": "codex",
+            "content_hash": canonical_hash
+        }),
+    );
+    let status = call_tool(
+        &app,
+        "ironmem_collab_status",
+        json!({ "session_id": session_id }),
+    );
+    assert_eq!(status["phase"], "PlanClaudeFinalizePending");
+
+    call_tool(
+        &app,
+        "ironmem_collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "final",
+            "content": json!({
+                "plan": "Final locked plan",
+                "codex_still_objects": false
+            }).to_string()
+        }),
+    );
+    let status = call_tool(
+        &app,
+        "ironmem_collab_status",
+        json!({ "session_id": session_id }),
+    );
+    assert_eq!(status["phase"], "PlanLocked");
+}
+
+#[test]
+fn collab_request_changes_escalates_and_approve_hash_mismatch_is_rejected() {
+    let app = App::open_for_test().unwrap();
+
+    let started = call_tool(
+        &app,
+        "ironmem_collab_start",
+        json!({
+            "repo_path": "/repo",
+            "branch": "main",
+            "initiator": "claude"
+        }),
+    );
+    let session_id = started["session_id"].as_str().unwrap();
+
+    call_tool(
+        &app,
+        "ironmem_collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "draft",
+            "content": "Claude first draft"
+        }),
+    );
+    call_tool(
+        &app,
+        "ironmem_collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "codex",
+            "topic": "draft",
+            "content": "Codex first draft"
+        }),
+    );
+    call_tool(
+        &app,
+        "ironmem_collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "canonical",
+            "content": "Merged canonical plan"
+        }),
+    );
+
+    let bad_approve = call_tool(
+        &app,
+        "ironmem_collab_approve",
+        json!({
+            "session_id": session_id,
+            "agent": "codex",
+            "content_hash": "deadbeef"
+        }),
+    );
+    assert!(bad_approve["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("content_hash does not match canonical_plan_hash"));
+
+    call_tool(
+        &app,
+        "ironmem_collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "codex",
+            "topic": "review",
+            "content": json!({
+                "verdict": "request_changes"
+            }).to_string()
+        }),
+    );
+    call_tool(
+        &app,
+        "ironmem_collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "final",
+            "content": json!({
+                "plan": "Claude final plan",
+                "codex_still_objects": false
+            }).to_string()
+        }),
+    );
+    let status = call_tool(
+        &app,
+        "ironmem_collab_status",
+        json!({ "session_id": session_id }),
+    );
+    assert_eq!(status["phase"], "PlanEscalated");
+}
