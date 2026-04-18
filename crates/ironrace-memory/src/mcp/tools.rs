@@ -1,9 +1,12 @@
 //! MCP tool definitions and dispatch.
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use super::app::App;
 use crate::bootstrap::MEMORY_PROTOCOL;
+use crate::collab::queue::{Capability, SessionRecord};
+use crate::collab::{apply_event, CollabError, CollabEvent};
 use crate::config::McpAccessMode;
 use crate::db::knowledge_graph::KnowledgeGraph;
 use crate::db::SearchFilters;
@@ -13,7 +16,7 @@ use crate::sanitize;
 use crate::search;
 
 /// Maximum allowed value for search `limit`.
-const MAX_SEARCH_LIMIT: usize = 100;
+const MAX_SEARCH_LIMIT: usize = 25;
 /// Maximum allowed value for list/read `limit` parameters.
 const MAX_READ_LIMIT: usize = 100;
 /// Maximum allowed BFS traversal depth.
@@ -22,6 +25,10 @@ const MAX_DEPTH: usize = 10;
 const MAX_SENSITIVE_FIELD_CHARS: usize = 4_000;
 /// Maximum aggregate characters returned across search results.
 const MAX_SEARCH_RESPONSE_CHARS: usize = 32_000;
+/// Maximum content length accepted by collab queue messages.
+const MAX_COLLAB_CONTENT_CHARS: usize = 32_000;
+/// Maximum capability field length.
+const MAX_COLLAB_CAP_FIELD_CHARS: usize = 512;
 
 /// Return tool definitions for tools/list.
 pub fn tool_definitions(app: &App) -> Vec<Value> {
@@ -192,6 +199,117 @@ pub fn tool_definitions(app: &App) -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "name": "ironmem_collab_start",
+            "description": "Create a bounded Claude↔Codex planning session",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo_path": { "type": "string" },
+                    "branch": { "type": "string" },
+                    "initiator": { "type": "string", "enum": ["claude", "codex"] }
+                },
+                "required": ["repo_path", "branch", "initiator"]
+            }
+        }),
+        json!({
+            "name": "ironmem_collab_send",
+            "description": "Send a collab message and advance the bounded planning state machine when applicable",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "sender": { "type": "string", "enum": ["claude", "codex"] },
+                    "topic": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["session_id", "sender", "topic", "content"]
+            }
+        }),
+        json!({
+            "name": "ironmem_collab_recv",
+            "description": "Read pending collab messages for one agent",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "receiver": { "type": "string", "enum": ["claude", "codex"] },
+                    "limit": { "type": "integer", "default": 10 }
+                },
+                "required": ["session_id", "receiver"]
+            }
+        }),
+        json!({
+            "name": "ironmem_collab_ack",
+            "description": "Mark a collab message as consumed",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "message_id": { "type": "string" },
+                    "session_id": { "type": "string" }
+                },
+                "required": ["message_id", "session_id"]
+            }
+        }),
+        json!({
+            "name": "ironmem_collab_status",
+            "description": "Return the full collab session state",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" }
+                },
+                "required": ["session_id"]
+            }
+        }),
+        json!({
+            "name": "ironmem_collab_approve",
+            "description": "Codex-only shortcut for submitting an approve review",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "agent": { "type": "string", "enum": ["codex"] },
+                    "content_hash": { "type": "string" }
+                },
+                "required": ["session_id", "agent", "content_hash"]
+            }
+        }),
+        json!({
+            "name": "ironmem_collab_register_caps",
+            "description": "Register available sub-agents/tools for a collab participant",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "agent": { "type": "string", "enum": ["claude", "codex"] },
+                    "capabilities": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "description": { "type": "string" }
+                            },
+                            "required": ["name"]
+                        }
+                    }
+                },
+                "required": ["session_id", "agent", "capabilities"]
+            }
+        }),
+        json!({
+            "name": "ironmem_collab_get_caps",
+            "description": "Read registered capabilities for one or all collab participants",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "agent": { "type": "string", "enum": ["claude", "codex"] }
+                },
+                "required": ["session_id"]
+            }
+        }),
     ];
 
     tools
@@ -229,6 +347,14 @@ pub fn call_tool(app: &App, name: &str, args: &Value) -> Result<Value, MemoryErr
         "ironmem_graph_stats" => handle_graph_stats(app),
         "ironmem_diary_write" => handle_diary_write(app, args),
         "ironmem_diary_read" => handle_diary_read(app, args),
+        "ironmem_collab_start" => handle_collab_start(app, args),
+        "ironmem_collab_send" => handle_collab_send(app, args),
+        "ironmem_collab_recv" => handle_collab_recv(app, args),
+        "ironmem_collab_ack" => handle_collab_ack(app, args),
+        "ironmem_collab_status" => handle_collab_status(app, args),
+        "ironmem_collab_approve" => handle_collab_approve(app, args),
+        "ironmem_collab_register_caps" => handle_collab_register_caps(app, args),
+        "ironmem_collab_get_caps" => handle_collab_get_caps(app, args),
         _ => Err(MemoryError::Permission(format!(
             "Tool '{name}' is not available in the current MCP mode"
         ))),
@@ -651,6 +777,268 @@ fn handle_diary_read(app: &App, args: &Value) -> Result<Value, MemoryError> {
     Ok(json!({ "entries": entries, "count": entries.len() }))
 }
 
+// ── Collab protocol handlers ─────────────────────────────────────────────────
+
+fn handle_collab_start(app: &App, args: &Value) -> Result<Value, MemoryError> {
+    let repo_path = require_str(args, "repo_path")?;
+    let branch = require_str(args, "branch")?;
+    let initiator = require_agent(require_str(args, "initiator")?)?;
+    let session_id = uuid::Uuid::new_v4().to_string();
+
+    app.db.with_transaction(|tx| {
+        crate::collab::queue::create_session(tx, &session_id, repo_path, branch)?;
+        crate::db::schema::Database::wal_log_tx(
+            tx,
+            "collab_start",
+            &json!({
+                "session_id": session_id,
+                "repo_path": repo_path,
+                "branch": branch,
+                "initiator": initiator,
+            }),
+            Some(&json!({ "session_id": session_id })),
+        )?;
+        Ok(())
+    })?;
+
+    Ok(json!({ "session_id": session_id }))
+}
+
+fn handle_collab_send(app: &App, args: &Value) -> Result<Value, MemoryError> {
+    let session_id = require_str(args, "session_id")?;
+    let sender = require_agent(require_str(args, "sender")?)?;
+    let topic = require_str(args, "topic")?;
+    let content =
+        sanitize::sanitize_content(require_str(args, "content")?, MAX_COLLAB_CONTENT_CHARS)?;
+    if !matches!(topic, "draft" | "canonical" | "review" | "final") {
+        return Err(MemoryError::Validation(format!(
+            "unknown collab topic: {topic}"
+        )));
+    }
+
+    app.db.with_transaction(|tx| {
+        let mut session = crate::collab::queue::load_session(tx, session_id)?;
+        let phase_before = session.phase.to_string();
+        let event = match topic {
+            "draft" => CollabEvent::SubmitDraft {
+                content_hash: sha256_hex(content),
+            },
+            "canonical" => CollabEvent::PublishCanonical {
+                content_hash: sha256_hex(content),
+            },
+            "review" => CollabEvent::SubmitReview {
+                verdict: parse_review_verdict(content)?,
+            },
+            "final" => {
+                let plan = parse_final_payload(content)?;
+                CollabEvent::PublishFinal {
+                    content_hash: sha256_hex(&plan),
+                    codex_still_objects: false,
+                }
+            }
+            _ => unreachable!(),
+        };
+
+        session = apply_event(&session, sender, &event).map_err(collab_error_to_memory_error)?;
+        crate::collab::queue::save_session(tx, &session)?;
+
+        let message_id = crate::collab::queue::send_message(
+            tx,
+            session_id,
+            sender,
+            other_agent(sender),
+            topic,
+            content,
+        )?;
+        crate::db::schema::Database::wal_log_tx(
+            tx,
+            "collab_send",
+            &json!({
+                "session_id": session_id,
+                "sender": sender,
+                "topic": topic,
+                "phase_before": phase_before,
+            }),
+            Some(&json!({
+                "message_id": message_id,
+                "phase": session.phase.to_string(),
+            })),
+        )?;
+
+        Ok(json!({
+            "message_id": message_id,
+            "phase": session.phase.to_string(),
+        }))
+    })
+}
+
+fn handle_collab_recv(app: &App, args: &Value) -> Result<Value, MemoryError> {
+    let session_id = require_str(args, "session_id")?;
+    let receiver = require_agent(require_str(args, "receiver")?)?;
+    let limit = (args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize).min(50);
+    let messages = app.db.collab_recv_messages(session_id, receiver, limit)?;
+    Ok(json!({
+        "messages": messages.into_iter().map(|message| json!({
+            "id": message.id,
+            "sender": message.sender,
+            "topic": message.topic,
+            "content": message.content,
+            "created_at": message.created_at,
+        })).collect::<Vec<_>>()
+    }))
+}
+
+fn handle_collab_ack(app: &App, args: &Value) -> Result<Value, MemoryError> {
+    let message_id = require_str(args, "message_id")?;
+    let session_id = require_str(args, "session_id")?;
+    app.db.with_transaction(|tx| {
+        crate::collab::queue::ack_message(tx, session_id, message_id)?;
+        crate::db::schema::Database::wal_log_tx(
+            tx,
+            "collab_ack",
+            &json!({
+                "session_id": session_id,
+                "message_id": message_id,
+            }),
+            Some(&json!({ "ok": true })),
+        )?;
+        Ok(())
+    })?;
+    Ok(json!({ "ok": true }))
+}
+
+fn handle_collab_status(app: &App, args: &Value) -> Result<Value, MemoryError> {
+    let session_id = require_str(args, "session_id")?;
+    let record = app.db.collab_load_session_record(session_id)?;
+    Ok(session_record_json(&record))
+}
+
+fn handle_collab_approve(app: &App, args: &Value) -> Result<Value, MemoryError> {
+    let session_id = require_str(args, "session_id")?;
+    let agent = require_agent(require_str(args, "agent")?)?;
+    if agent != "codex" {
+        return Err(MemoryError::Validation(
+            "agent must be 'codex' for ironmem_collab_approve".to_string(),
+        ));
+    }
+    let content_hash = require_str(args, "content_hash")?;
+    let review_content = json!({
+        "verdict": "approve",
+        "content_hash": content_hash,
+    })
+    .to_string();
+
+    app.db.with_transaction(|tx| {
+        let session = crate::collab::queue::load_session(tx, session_id)?;
+        let expected_hash = session
+            .canonical_plan_hash
+            .as_deref()
+            .ok_or_else(|| MemoryError::Validation("canonical_plan_hash is not set".to_string()))?;
+        if content_hash != expected_hash {
+            return Err(MemoryError::Validation(
+                "content_hash does not match canonical_plan_hash".to_string(),
+            ));
+        }
+        let session = apply_event(
+            &session,
+            "codex",
+            &CollabEvent::SubmitReview {
+                verdict: "approve".to_string(),
+            },
+        )
+        .map_err(collab_error_to_memory_error)?;
+        crate::collab::queue::save_session(tx, &session)?;
+        let _ = crate::collab::queue::send_message(
+            tx,
+            session_id,
+            "codex",
+            "claude",
+            "review",
+            &review_content,
+        )?;
+        crate::db::schema::Database::wal_log_tx(
+            tx,
+            "collab_approve",
+            &json!({
+                "session_id": session_id,
+                "agent": agent,
+                "content_hash": content_hash,
+            }),
+            Some(&json!({ "phase": session.phase.to_string() })),
+        )?;
+        Ok(json!({ "phase": session.phase.to_string() }))
+    })
+}
+
+fn handle_collab_register_caps(app: &App, args: &Value) -> Result<Value, MemoryError> {
+    let session_id = require_str(args, "session_id")?;
+    let agent = require_agent(require_str(args, "agent")?)?;
+    let capabilities = args
+        .get("capabilities")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| MemoryError::Validation("capabilities must be an array".to_string()))?;
+
+    let mut parsed = Vec::new();
+    for capability in capabilities {
+        let name = capability
+            .get("name")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| MemoryError::Validation("capability name is required".to_string()))?;
+        let name = sanitize::sanitize_content(name, MAX_COLLAB_CAP_FIELD_CHARS)?.to_string();
+        let description = capability
+            .get("description")
+            .and_then(|value| value.as_str())
+            .map(|value| sanitize::sanitize_content(value, MAX_COLLAB_CAP_FIELD_CHARS))
+            .transpose()?
+            .map(ToString::to_string);
+        parsed.push(Capability {
+            agent: agent.to_string(),
+            name,
+            description,
+        });
+    }
+
+    let count = parsed.len();
+    app.db.with_transaction(|tx| {
+        crate::collab::queue::register_caps(tx, session_id, agent, &parsed)?;
+        crate::db::schema::Database::wal_log_tx(
+            tx,
+            "collab_register_caps",
+            &json!({
+                "session_id": session_id,
+                "agent": agent,
+                "count": count,
+            }),
+            Some(&json!({ "success": true, "count": count })),
+        )?;
+        Ok(())
+    })?;
+
+    Ok(json!({ "success": true, "count": count }))
+}
+
+fn handle_collab_get_caps(app: &App, args: &Value) -> Result<Value, MemoryError> {
+    let session_id = require_str(args, "session_id")?;
+    let agent = args
+        .get("agent")
+        .and_then(|value| value.as_str())
+        .map(require_agent)
+        .transpose()?;
+    let capabilities = app
+        .db
+        .collab_get_caps(session_id, agent)?
+        .into_iter()
+        .map(|capability| {
+            json!({
+                "agent": capability.agent,
+                "name": capability.name,
+                "description": capability.description,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "capabilities": capabilities }))
+}
+
 fn tool_known(name: &str) -> bool {
     matches!(
         name,
@@ -671,6 +1059,14 @@ fn tool_known(name: &str) -> bool {
             | "ironmem_graph_stats"
             | "ironmem_diary_write"
             | "ironmem_diary_read"
+            | "ironmem_collab_start"
+            | "ironmem_collab_send"
+            | "ironmem_collab_recv"
+            | "ironmem_collab_ack"
+            | "ironmem_collab_status"
+            | "ironmem_collab_approve"
+            | "ironmem_collab_register_caps"
+            | "ironmem_collab_get_caps"
     )
 }
 
@@ -686,6 +1082,11 @@ fn tool_allowed_in_mode(mode: McpAccessMode, name: &str) -> bool {
                 | "ironmem_kg_add"
                 | "ironmem_kg_invalidate"
                 | "ironmem_diary_write"
+                | "ironmem_collab_start"
+                | "ironmem_collab_send"
+                | "ironmem_collab_ack"
+                | "ironmem_collab_approve"
+                | "ironmem_collab_register_caps"
         )
 }
 
@@ -740,6 +1141,79 @@ fn validate_hex_id(value: &str, field_name: &str) -> Result<(), MemoryError> {
         )));
     }
     Ok(())
+}
+
+fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, MemoryError> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| MemoryError::Validation(format!("{key} is required")))
+}
+
+fn require_agent(value: &str) -> Result<&str, MemoryError> {
+    if matches!(value, "claude" | "codex") {
+        Ok(value)
+    } else {
+        Err(MemoryError::Validation(
+            "agent must be 'claude' or 'codex'".to_string(),
+        ))
+    }
+}
+
+fn other_agent(agent: &str) -> &'static str {
+    if agent == "claude" {
+        "codex"
+    } else {
+        "claude"
+    }
+}
+
+fn sha256_hex(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    let digest = hasher.finalize();
+    format!("{digest:x}")
+}
+
+fn parse_review_verdict(content: &str) -> Result<String, MemoryError> {
+    let payload: Value = serde_json::from_str(content)?;
+    let verdict = payload
+        .get("verdict")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            MemoryError::Validation("review content must include verdict".to_string())
+        })?;
+    Ok(verdict.to_string())
+}
+
+fn parse_final_payload(content: &str) -> Result<String, MemoryError> {
+    let payload: Value = serde_json::from_str(content)?;
+    let plan = payload
+        .get("plan")
+        .and_then(Value::as_str)
+        .ok_or_else(|| MemoryError::Validation("final content must include plan".to_string()))?;
+    Ok(plan.to_string())
+}
+
+fn collab_error_to_memory_error(error: CollabError) -> MemoryError {
+    MemoryError::Validation(error.to_string())
+}
+
+fn session_record_json(record: &SessionRecord) -> Value {
+    json!({
+        "id": record.session.id.as_str(),
+        "phase": record.session.phase.to_string(),
+        "current_owner": record.session.current_owner.as_str(),
+        "repo_path": record.repo_path.as_str(),
+        "branch": record.branch.as_str(),
+        "claude_draft_hash": record.session.claude_draft_hash.as_deref(),
+        "codex_draft_hash": record.session.codex_draft_hash.as_deref(),
+        "canonical_plan_hash": record.session.canonical_plan_hash.as_deref(),
+        "final_plan_hash": record.session.final_plan_hash.as_deref(),
+        "codex_review_verdict": record.session.codex_review_verdict.as_deref(),
+        "created_at": record.created_at.as_str(),
+        "updated_at": record.updated_at.as_str(),
+    })
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ use ironrace_embed::embedder::EMBED_DIM;
 
 const SCHEMA_SQL: &str = include_str!("../../migrations/001_init.sql");
 const FTS_SQL: &str = include_str!("../../migrations/002_fts.sql");
+const COLLAB_SQL: &str = include_str!("../../migrations/003_collab.sql");
 
 /// Database wrapper around a SQLite connection.
 ///
@@ -67,6 +68,16 @@ impl Database {
             retry_on_busy(|| self.conn.execute_batch(FTS_SQL))?;
         }
 
+        // v3: collab protocol tables for bounded planning between Claude and Codex
+        if current_version < 3 {
+            self.create_collab_tables()?;
+        }
+
+        Ok(())
+    }
+
+    pub fn create_collab_tables(&self) -> Result<(), MemoryError> {
+        retry_on_busy(|| self.conn.execute_batch(COLLAB_SQL))?;
         Ok(())
     }
 
