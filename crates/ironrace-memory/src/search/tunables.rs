@@ -114,15 +114,6 @@ pub fn prf_min_corpus() -> usize {
     *V.get_or_init(|| env_usize("IRONMEM_PRF_MIN_CORPUS", 100))
 }
 
-// ── E5: index-time preference enrichment (on by default) ─────────────────────
-
-/// Append `[preferences: ...]` annotation to content before embedding and FTS indexing.
-/// Disable with `IRONMEM_PREF_ENRICH=0`.
-pub fn pref_enrich_enabled() -> bool {
-    static V: OnceLock<bool> = OnceLock::new();
-    *V.get_or_init(|| env_bool("IRONMEM_PREF_ENRICH", false))
-}
-
 // ── E4: recency boost (off by default) ───────────────────────────────────────
 
 pub fn recency_boost_enabled() -> bool {
