@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -171,6 +172,23 @@ def build_corpus(entry: dict, granularity: str = "session") -> tuple[list[str], 
 
 # ── ironrace-memory retriever ─────────────────────────────────────────────────
 
+def _corpus_cache_key(docs: list[str], granularity: str, ingest_env: dict[str, str]) -> str:
+    """SHA-256 fingerprint of the corpus + ingest-affecting env vars.
+
+    Only IRONMEM_PREF_ENRICH (and similar write-path vars) change what gets
+    stored in the DB.  Search-only tunables (RRF_K, BM25_THRESHOLD, etc.)
+    don't affect embeddings so they don't invalidate the cache.
+    """
+    h = hashlib.sha256()
+    for doc in docs:
+        h.update(doc.encode())
+    h.update(granularity.encode())
+    write_vars = {k: v for k, v in sorted(ingest_env.items())
+                  if k in ("IRONMEM_PREF_ENRICH",)}
+    h.update(json.dumps(write_vars, sort_keys=True).encode())
+    return h.hexdigest()[:24]
+
+
 def run_ironrace_benchmark(
     data: list[dict],
     ironmem_binary: str,
@@ -179,6 +197,7 @@ def run_ironrace_benchmark(
     granularity: str,
     ef_search: int | None,
     per_question_json: str | None = None,
+    db_cache_dir: str | None = None,
 ) -> dict:
     """Run LongMemEval against ironrace-memory, one fresh server per question.
 
@@ -227,6 +246,22 @@ def run_ironrace_benchmark(
 
         env = {**base_env, "IRONMEM_DB_PATH": str(db_path)}
 
+        # DB cache: copy a pre-embedded DB + ID map so we skip add_drawer calls.
+        # Cache key covers corpus content + ingest-affecting env vars.
+        # A JSON sidecar stores the drawer_id→corpus_index map so we don't need
+        # to reconstruct IDs (which requires replicating Rust's sanitize + hash).
+        cache_hit = False
+        cached_db_path: Path | None = None
+        cached_ids_path: Path | None = None
+        if db_cache_dir:
+            Path(db_cache_dir).mkdir(parents=True, exist_ok=True)
+            key = _corpus_cache_key(docs, granularity, base_env)
+            cached_db_path = Path(db_cache_dir) / f"{key}.sqlite3"
+            cached_ids_path = Path(db_cache_dir) / f"{key}.ids.json"
+            if cached_db_path.exists() and cached_ids_path.exists():
+                shutil.copy2(cached_db_path, db_path)
+                cache_hit = True
+
         client = McpClient(
             name="ironrace-memory",
             cmd=[ironmem_binary, "serve"],
@@ -236,20 +271,30 @@ def run_ironrace_benchmark(
         try:
             client.start(wait_for_embedder=True)
 
-            # Capture drawer IDs during ingest for exact ID-based matching.
-            # Fingerprinting doc[:120] was fragile: sanitize_content() trims
-            # stored content, so stored[:120] ≠ original[:120] on any doc with
-            # leading whitespace, silently demoting that result to rank 50+.
             drawer_id_to_idx: dict[str, int] = {}
-            for j, doc in enumerate(docs):
-                resp = client.call_tool("ironmem_add_drawer", {
-                    "content": doc,
-                    "wing": "session",
-                    "room": "haystack",
-                })
-                drawer_id = resp.get("id")
-                if drawer_id:
-                    drawer_id_to_idx[drawer_id] = j
+            if cache_hit and cached_ids_path is not None:
+                # Load pre-built ID map from sidecar — skip all embed calls.
+                with open(cached_ids_path) as _f:
+                    drawer_id_to_idx = {k: int(v) for k, v in json.load(_f).items()}
+            else:
+                # Capture drawer IDs during ingest for exact ID-based matching.
+                # Fingerprinting doc[:120] was fragile: sanitize_content() trims
+                # stored content, so stored[:120] ≠ original[:120] on any doc with
+                # leading whitespace, silently demoting that result to rank 50+.
+                for j, doc in enumerate(docs):
+                    resp = client.call_tool("ironmem_add_drawer", {
+                        "content": doc,
+                        "wing": "session",
+                        "room": "haystack",
+                    })
+                    drawer_id = resp.get("id")
+                    if drawer_id:
+                        drawer_id_to_idx[drawer_id] = j
+                # Save DB + ID map for future runs.
+                if db_cache_dir and cached_db_path is not None and cached_ids_path is not None:
+                    shutil.copy2(db_path, cached_db_path)
+                    with open(cached_ids_path, "w") as _f:
+                        json.dump(drawer_id_to_idx, _f)
 
             t0 = time.perf_counter()
             payload = client.call_tool("ironmem_search", {
@@ -541,6 +586,16 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         help="Write one JSON record per question (JSONL) including gold rank, top-10 results, and latency",
     )
+    p.add_argument(
+        "--db-cache-dir",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Cache pre-embedded SQLite DBs keyed by corpus hash. "
+            "First run embeds and saves; subsequent runs skip add_drawer calls entirely. "
+            "Clear the directory when changing IRONMEM_PREF_ENRICH or the binary's ingest logic."
+        ),
+    )
     return p.parse_args()
 
 
@@ -571,6 +626,7 @@ def main() -> int:
             granularity=args.granularity,
             ef_search=args.ef_search,
             per_question_json=args.per_question_json,
+            db_cache_dir=args.db_cache_dir,
         )
         results.append(r)
 
