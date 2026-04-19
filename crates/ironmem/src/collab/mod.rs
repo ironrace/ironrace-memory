@@ -616,6 +616,14 @@ pub fn apply_event(
             return Err(CollabError::SessionLocked);
         }
         (phase, _) => {
+            // Terminal phases must be handled by the preceding arm; if a
+            // future refactor reorders the arms this guard catches it in
+            // debug builds rather than leaking a sentinel "SessionLocked"
+            // string as the expected event.
+            debug_assert!(
+                !matches!(phase, Phase::CodingComplete | Phase::CodingFailed),
+                "terminal phase {phase:?} reached WrongPhase catch-all",
+            );
             return Err(CollabError::WrongPhase {
                 expected: expected_event_for_phase(phase).to_string(),
                 got: event_name(event).to_string(),

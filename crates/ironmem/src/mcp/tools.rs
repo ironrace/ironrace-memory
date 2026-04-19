@@ -1610,6 +1610,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn extract_required_str_pins_error_format() {
+        let payload = json!({ "head_sha": "abc123", "empty": "", "n": 3 });
+        assert_eq!(
+            extract_required_str(&payload, "head_sha", "implement").unwrap(),
+            "abc123"
+        );
+        let missing = extract_required_str(&payload, "pr_url", "pr_opened").unwrap_err();
+        assert_eq!(
+            missing.to_string(),
+            "Validation error: pr_opened content must include a non-empty \"pr_url\" field"
+        );
+        let empty = extract_required_str(&payload, "empty", "verdict").unwrap_err();
+        assert!(empty.to_string().contains("non-empty \"empty\" field"));
+        let wrong_type = extract_required_str(&payload, "n", "verdict").unwrap_err();
+        assert!(wrong_type.to_string().contains("non-empty \"n\" field"));
+    }
+
+    #[test]
     fn test_tool_access_modes_disable_writes_outside_trusted_mode() {
         assert!(tool_allowed_in_mode(McpAccessMode::Trusted, "add_drawer"));
         assert!(!tool_allowed_in_mode(McpAccessMode::ReadOnly, "add_drawer"));
