@@ -4,6 +4,8 @@
 
 This guide explains how to use `ironrace-memory` with Codex today, what is still missing, and how to compare it against `mempalace`.
 
+For the bounded Claude↔Codex planning protocol, see [COLLAB.md](COLLAB.md).
+
 ## Current Support Level
 
 What works now:

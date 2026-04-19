@@ -4,6 +4,8 @@
 
 /// Background startup orchestration and stale-lock recovery.
 pub mod bootstrap;
+/// Pure bounded planning protocol and SQLite-backed queue helpers.
+pub mod collab;
 /// Configuration loading and environment-variable overrides.
 pub mod config;
 /// SQLite-backed persistence for drawers, WAL events, and graph state.
