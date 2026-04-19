@@ -67,7 +67,6 @@ args = ["serve"]
 
 [mcp_servers.ironmem.env]
 IRONMEM_MCP_MODE = "trusted"
-IRONMEM_DB_PATH = "~/.ironmem/memory.sqlite3"
 ```
 
 Tagged releases upload prebuilt macOS and Linux binaries automatically. Until the first tagged release is published, building from source is the supported install path.
