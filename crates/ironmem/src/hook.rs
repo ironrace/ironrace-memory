@@ -551,7 +551,7 @@ mod tests {
     fn transcript_review_storage_is_deduplicated() {
         let app = App::open_for_test().unwrap();
         let temp = tempfile::tempdir().unwrap();
-        let workspace = temp.path().join("ironrace-memory");
+        let workspace = temp.path().join("ironmem");
         std::fs::create_dir_all(&workspace).unwrap();
         let transcript = temp.path().join("transcript.jsonl");
         std::fs::write(
