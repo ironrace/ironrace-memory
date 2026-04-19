@@ -108,6 +108,9 @@ pub fn load_session_record(
                 claude_draft_hash, codex_draft_hash, canonical_plan_hash,
                 final_plan_hash, codex_review_verdict,
                 review_round, task, ended_at,
+                task_list, current_task_index,
+                task_review_round, global_review_round,
+                base_sha, last_head_sha, pr_url, coding_failure,
                 created_at, updated_at
          FROM collab_sessions
          WHERE id = ?1",
@@ -123,6 +126,12 @@ pub fn load_session_record(
             })?;
             let review_round_i: i64 = row.get(10)?;
             let review_round = review_round_i.clamp(0, u8::MAX as i64) as u8;
+            let task_list: Option<String> = row.get(13)?;
+            let current_task_index: Option<i64> = row.get(14)?;
+            let current_task_index = current_task_index.map(|i| i.max(0) as u32);
+            let task_review_round_i: i64 = row.get(15)?;
+            let global_review_round_i: i64 = row.get(16)?;
+            let tasks_count = task_list.as_deref().and_then(parse_tasks_count);
             Ok(SessionRecord {
                 session: CollabSession {
                     id: row.get(0)?,
@@ -134,18 +143,39 @@ pub fn load_session_record(
                     final_plan_hash: row.get(8)?,
                     codex_review_verdict: row.get(9)?,
                     review_round,
+                    task_list,
+                    tasks_count,
+                    current_task_index,
+                    task_review_round: task_review_round_i.clamp(0, u8::MAX as i64) as u8,
+                    global_review_round: global_review_round_i.clamp(0, u8::MAX as i64) as u8,
+                    base_sha: row.get(17)?,
+                    last_head_sha: row.get(18)?,
+                    pr_url: row.get(19)?,
+                    coding_failure: row.get(20)?,
                 },
                 repo_path: row.get(3)?,
                 branch: row.get(4)?,
                 task: row.get(11)?,
                 ended_at: row.get(12)?,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
+                created_at: row.get(21)?,
+                updated_at: row.get(22)?,
             })
         },
     )
     .optional()?
     .ok_or_else(|| MemoryError::NotFound(format!("session {session_id} not found")))
+}
+
+/// Count tasks in the stored `task_list` JSON. The array lives under a
+/// `tasks` key per the v2 schema; if the column holds a bare array we fall
+/// back to that for forward-compat with in-tree unit tests.
+fn parse_tasks_count(raw: &str) -> Option<u32> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let array = value
+        .get("tasks")
+        .and_then(|v| v.as_array())
+        .or_else(|| value.as_array())?;
+    u32::try_from(array.len()).ok()
 }
 
 pub fn save_session(conn: &Connection, session: &CollabSession) -> Result<(), MemoryError> {
@@ -159,8 +189,16 @@ pub fn save_session(conn: &Connection, session: &CollabSession) -> Result<(), Me
              final_plan_hash = ?6,
              codex_review_verdict = ?7,
              review_round = ?8,
+             task_list = ?9,
+             current_task_index = ?10,
+             task_review_round = ?11,
+             global_review_round = ?12,
+             base_sha = ?13,
+             last_head_sha = ?14,
+             pr_url = ?15,
+             coding_failure = ?16,
              updated_at = datetime('now')
-        WHERE id = ?9",
+        WHERE id = ?17",
         params![
             session.phase.to_string(),
             session.current_owner.as_str(),
@@ -170,6 +208,14 @@ pub fn save_session(conn: &Connection, session: &CollabSession) -> Result<(), Me
             session.final_plan_hash.as_deref(),
             session.codex_review_verdict.as_deref(),
             session.review_round as i64,
+            session.task_list.as_deref(),
+            session.current_task_index.map(|i| i as i64),
+            session.task_review_round as i64,
+            session.global_review_round as i64,
+            session.base_sha.as_deref(),
+            session.last_head_sha.as_deref(),
+            session.pr_url.as_deref(),
+            session.coding_failure.as_deref(),
             session.id.as_str(),
         ],
     )?;
@@ -330,6 +376,7 @@ mod tests {
     const FTS_SQL: &str = include_str!("../../migrations/002_fts.sql");
     const COLLAB_SQL: &str = include_str!("../../migrations/003_collab.sql");
     const COLLAB_V1_SQL: &str = include_str!("../../migrations/004_collab_planning_v1.sql");
+    const COLLAB_V2_SQL: &str = include_str!("../../migrations/005_collab_v2.sql");
 
     fn open() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -337,6 +384,7 @@ mod tests {
         conn.execute_batch(FTS_SQL).unwrap();
         conn.execute_batch(COLLAB_SQL).unwrap();
         conn.execute_batch(COLLAB_V1_SQL).unwrap();
+        conn.execute_batch(COLLAB_V2_SQL).unwrap();
         conn
     }
 
@@ -468,5 +516,49 @@ mod tests {
         let db = open();
         let err = end_session(&db, "does-not-exist").unwrap_err();
         assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_v2_fields_round_trip() {
+        let db = open();
+        create_session(&db, "sess-v2", "/repo", "main", None).unwrap();
+        let mut session = load_session(&db, "sess-v2").unwrap();
+        session.task_list = Some(r#"{"plan_hash":"pf","tasks":[{"id":1},{"id":2}]}"#.to_string());
+        session.current_task_index = Some(1);
+        session.task_review_round = 1;
+        session.global_review_round = 2;
+        session.base_sha = Some("abc123".to_string());
+        session.last_head_sha = Some("def456".to_string());
+        session.pr_url = Some("https://example/pr/42".to_string());
+        session.coding_failure = Some("gh_auth: token expired".to_string());
+        save_session(&db, &session).unwrap();
+
+        let record = load_session_record(&db, "sess-v2").unwrap();
+        let rt = &record.session;
+        assert_eq!(rt.current_task_index, Some(1));
+        assert_eq!(rt.task_review_round, 1);
+        assert_eq!(rt.global_review_round, 2);
+        assert_eq!(rt.base_sha.as_deref(), Some("abc123"));
+        assert_eq!(rt.last_head_sha.as_deref(), Some("def456"));
+        assert_eq!(rt.pr_url.as_deref(), Some("https://example/pr/42"));
+        assert_eq!(rt.coding_failure.as_deref(), Some("gh_auth: token expired"));
+        // tasks_count is derived from task_list JSON on load.
+        assert_eq!(rt.tasks_count, Some(2));
+    }
+
+    #[test]
+    fn test_v1_defaults_for_fresh_session() {
+        let db = open();
+        create_session(&db, "sess-fresh", "/repo", "main", None).unwrap();
+        let session = load_session(&db, "sess-fresh").unwrap();
+        assert!(session.task_list.is_none());
+        assert!(session.current_task_index.is_none());
+        assert_eq!(session.task_review_round, 0);
+        assert_eq!(session.global_review_round, 0);
+        assert!(session.base_sha.is_none());
+        assert!(session.last_head_sha.is_none());
+        assert!(session.pr_url.is_none());
+        assert!(session.coding_failure.is_none());
+        assert_eq!(session.tasks_count, None);
     }
 }

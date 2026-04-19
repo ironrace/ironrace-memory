@@ -215,7 +215,7 @@ pub fn tool_definitions(app: &App) -> Vec<Value> {
         }),
         json!({
             "name": "collab_send",
-            "description": "Send a collab message and advance the bounded planning state machine when applicable",
+            "description": "Send a collab message and advance the bounded state machine. v1 planning topics: draft, canonical, review, final. v2 coding topics: task_list, implement, review, verdict, comment, final, review_local, review_global, verdict_global, comment_global, final_review, pr_opened, failure_report. Topics review and final are phase-dispatched (v1 vs v2 semantics chosen by current phase).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -326,7 +326,7 @@ pub fn tool_definitions(app: &App) -> Vec<Value> {
         }),
         json!({
             "name": "collab_end",
-            "description": "End a collab session. Reserved for the v2 coding phase — DO NOT call during planning. Idempotent; blocks subsequent send/approve/wait_my_turn writes.",
+            "description": "End a collab session. Valid from PlanLocked (pre-task_list), CodingComplete, or CodingFailed; rejected in any coding-active phase (CodeImplementPending through PrReadyPending). Idempotent.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -846,7 +846,7 @@ fn handle_collab_send(app: &App, args: &Value) -> Result<Value, MemoryError> {
     let topic = require_str(args, "topic")?;
     let content =
         sanitize::sanitize_content(require_str(args, "content")?, MAX_COLLAB_CONTENT_CHARS)?;
-    if !matches!(topic, "draft" | "canonical" | "review" | "final") {
+    if !is_known_collab_topic(topic) {
         return Err(MemoryError::Validation(format!(
             "unknown collab topic: {topic}"
         )));
@@ -854,26 +854,9 @@ fn handle_collab_send(app: &App, args: &Value) -> Result<Value, MemoryError> {
 
     app.db.with_transaction(|tx| {
         crate::collab::queue::ensure_active(tx, session_id)?;
-        let mut session = crate::collab::queue::load_session(tx, session_id)?;
+        let mut session = crate::collab::queue::load_session_record(tx, session_id)?.session;
         let phase_before = session.phase.to_string();
-        let event = match topic {
-            "draft" => CollabEvent::SubmitDraft {
-                content_hash: sha256_hex(content),
-            },
-            "canonical" => CollabEvent::PublishCanonical {
-                content_hash: sha256_hex(content),
-            },
-            "review" => CollabEvent::SubmitReview {
-                verdict: parse_review_verdict(content)?,
-            },
-            "final" => {
-                let plan = parse_final_payload(content)?;
-                CollabEvent::PublishFinal {
-                    content_hash: sha256_hex(&plan),
-                }
-            }
-            _ => unreachable!(),
-        };
+        let event = build_collab_event(topic, content, &session)?;
 
         session = apply_event(&session, sender, &event).map_err(collab_error_to_memory_error)?;
         crate::collab::queue::save_session(tx, &session)?;
@@ -1120,7 +1103,18 @@ fn handle_collab_wait_my_turn(app: &App, args: &Value) -> Result<Value, MemoryEr
     loop {
         let record = app.db.collab_load_session_record(session_id)?;
         let ended = record.ended_at.is_some();
-        let phase_is_terminal = matches!(record.session.phase, crate::collab::Phase::PlanLocked);
+        // Dynamic terminal set: pre-task_list, PlanLocked is terminal so v1
+        // agents can exit cleanly after the plan locks. Post-task_list (the
+        // v2 coding phase is underway) PlanLocked is impossible by the state
+        // machine's construction, and the terminal set switches to
+        // {CodingComplete, CodingFailed}.
+        let task_list_submitted = record.session.task_list.is_some();
+        let phase_is_terminal = if task_list_submitted {
+            record.session.phase.is_terminal_v2()
+        } else {
+            matches!(record.session.phase, crate::collab::Phase::PlanLocked)
+                || record.session.phase.is_terminal_v2()
+        };
         let is_my_turn = !ended && !phase_is_terminal && record.session.current_owner == agent;
 
         if is_my_turn || ended || phase_is_terminal || std::time::Instant::now() >= deadline {
@@ -1141,6 +1135,17 @@ fn handle_collab_end(app: &App, args: &Value) -> Result<Value, MemoryError> {
     let agent = require_agent(require_str(args, "agent")?)?;
 
     app.db.with_transaction(|tx| {
+        // v2 rule: collab_end is valid only when the session is pre-coding
+        // (PlanLocked and before task_list) or has reached a v2 terminal
+        // phase. Rejecting during any coding-active phase prevents agents
+        // from killing a session mid-debate.
+        let session = crate::collab::queue::load_session(tx, session_id)?;
+        if session.phase.is_coding_active() {
+            return Err(MemoryError::Validation(format!(
+                "collab_end rejected in coding-active phase {}; end is only valid in CodingComplete or CodingFailed",
+                session.phase
+            )));
+        }
         crate::collab::queue::end_session(tx, session_id)?;
         crate::db::schema::Database::wal_log_tx(
             tx,
@@ -1148,6 +1153,7 @@ fn handle_collab_end(app: &App, args: &Value) -> Result<Value, MemoryError> {
             &json!({
                 "session_id": session_id,
                 "agent": agent,
+                "phase": session.phase.to_string(),
             }),
             Some(&json!({ "ok": true })),
         )?;
@@ -1296,6 +1302,258 @@ fn sha256_hex(content: &str) -> String {
     format!("{digest:x}")
 }
 
+/// True for every topic the collab_send handler accepts — v1 planning
+/// vocabulary plus the v2 coding vocabulary. The topic strings `review` and
+/// `final` are intentionally reused across versions; dispatch happens on the
+/// current phase inside `build_collab_event`.
+fn is_known_collab_topic(topic: &str) -> bool {
+    matches!(
+        topic,
+        "draft"
+            | "canonical"
+            | "review"
+            | "final"
+            | "task_list"
+            | "implement"
+            | "verdict"
+            | "comment"
+            | "review_local"
+            | "review_global"
+            | "verdict_global"
+            | "comment_global"
+            | "final_review"
+            | "pr_opened"
+            | "failure_report"
+    )
+}
+
+/// Translate a `(topic, content)` send into a `CollabEvent` using the session's
+/// current phase to disambiguate v1/v2-overloaded topics (`review`, `final`).
+fn build_collab_event(
+    topic: &str,
+    content: &str,
+    session: &crate::collab::CollabSession,
+) -> Result<CollabEvent, MemoryError> {
+    use crate::collab::Phase;
+    match topic {
+        "draft" => Ok(CollabEvent::SubmitDraft {
+            content_hash: sha256_hex(content),
+        }),
+        "canonical" => Ok(CollabEvent::PublishCanonical {
+            content_hash: sha256_hex(content),
+        }),
+        "review" => {
+            // v1 planning review vs. v2 per-task review share the same topic
+            // string. Disambiguate on phase — `CodeReviewPending` is the only
+            // v2 phase that accepts `review`.
+            if matches!(session.phase, Phase::CodeReviewPending) {
+                let head_sha = parse_required_head_sha(content, "review")?;
+                Ok(CollabEvent::CodeReview { head_sha })
+            } else {
+                Ok(CollabEvent::SubmitReview {
+                    verdict: parse_review_verdict(content)?,
+                })
+            }
+        }
+        "final" => {
+            if matches!(session.phase, Phase::CodeFinalPending) {
+                let head_sha = parse_required_head_sha(content, "final")?;
+                Ok(CollabEvent::CodeFinal { head_sha })
+            } else {
+                let plan = parse_final_payload(content)?;
+                Ok(CollabEvent::PublishFinal {
+                    content_hash: sha256_hex(&plan),
+                })
+            }
+        }
+        "task_list" => parse_task_list_event(content),
+        "implement" => {
+            let head_sha = parse_required_head_sha(content, "implement")?;
+            Ok(CollabEvent::CodeImplement { head_sha })
+        }
+        "verdict" => {
+            let head_sha = parse_required_head_sha(content, "verdict")?;
+            let verdict = parse_required_verdict(content, "verdict")?;
+            Ok(CollabEvent::CodeVerdict { verdict, head_sha })
+        }
+        "comment" => {
+            let head_sha = parse_required_head_sha(content, "comment")?;
+            Ok(CollabEvent::CodeComment { head_sha })
+        }
+        "review_local" => {
+            let head_sha = parse_required_head_sha(content, "review_local")?;
+            Ok(CollabEvent::ReviewLocal { head_sha })
+        }
+        "review_global" => {
+            let head_sha = parse_required_head_sha(content, "review_global")?;
+            let verdict = parse_required_verdict(content, "review_global")?;
+            Ok(CollabEvent::ReviewGlobal { verdict, head_sha })
+        }
+        "verdict_global" => {
+            let head_sha = parse_required_head_sha(content, "verdict_global")?;
+            let verdict = parse_required_verdict(content, "verdict_global")?;
+            Ok(CollabEvent::VerdictGlobal { verdict, head_sha })
+        }
+        "comment_global" => {
+            let head_sha = parse_required_head_sha(content, "comment_global")?;
+            Ok(CollabEvent::CommentGlobal { head_sha })
+        }
+        "final_review" => {
+            let head_sha = parse_required_head_sha(content, "final_review")?;
+            Ok(CollabEvent::FinalReview { head_sha })
+        }
+        "pr_opened" => {
+            let head_sha = parse_required_head_sha(content, "pr_opened")?;
+            let payload: Value = serde_json::from_str(content).map_err(|e| {
+                MemoryError::Validation(format!("pr_opened content must be JSON: {e}"))
+            })?;
+            let pr_url = payload
+                .get("pr_url")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    MemoryError::Validation(
+                        "pr_opened content must include a non-empty \"pr_url\" field".to_string(),
+                    )
+                })?
+                .to_string();
+            Ok(CollabEvent::PrOpened { pr_url, head_sha })
+        }
+        "failure_report" => {
+            let payload: Value = serde_json::from_str(content).map_err(|e| {
+                MemoryError::Validation(format!("failure_report content must be JSON: {e}"))
+            })?;
+            let coding_failure = payload
+                .get("coding_failure")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    MemoryError::Validation(
+                        "failure_report content must include a non-empty \"coding_failure\" field"
+                            .to_string(),
+                    )
+                })?
+                .to_string();
+            Ok(CollabEvent::FailureReport { coding_failure })
+        }
+        other => Err(MemoryError::Validation(format!(
+            "unknown collab topic: {other}"
+        ))),
+    }
+}
+
+/// Parse and validate the task_list payload shape. Fails fast on missing
+/// fields, empty task array, missing acceptance criteria, or non-array tasks.
+/// The state machine re-checks plan_hash, base_sha presence, and task count.
+fn parse_task_list_event(content: &str) -> Result<CollabEvent, MemoryError> {
+    let payload: Value = serde_json::from_str(content).map_err(|e| {
+        MemoryError::Validation(format!(
+            "task_list content must be JSON shaped like {{\"plan_hash\":\"…\",\"base_sha\":\"…\",\"head_sha\":\"…\",\"tasks\":[{{\"id\":1,\"title\":\"…\",\"acceptance\":[\"…\"]}}]}} (parse error: {e})"
+        ))
+    })?;
+    let plan_hash = payload
+        .get("plan_hash")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            MemoryError::Validation("task_list missing non-empty plan_hash".to_string())
+        })?
+        .to_string();
+    let base_sha = payload
+        .get("base_sha")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| MemoryError::Validation("task_list missing non-empty base_sha".to_string()))?
+        .to_string();
+    let head_sha = payload
+        .get("head_sha")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| MemoryError::Validation("task_list missing non-empty head_sha".to_string()))?
+        .to_string();
+    let tasks = payload
+        .get("tasks")
+        .and_then(Value::as_array)
+        .ok_or_else(|| MemoryError::Validation("task_list missing \"tasks\" array".to_string()))?;
+    if tasks.is_empty() {
+        return Err(MemoryError::Validation(
+            "task_list must contain at least one task".to_string(),
+        ));
+    }
+    let mut last_id: Option<i64> = None;
+    for (idx, task) in tasks.iter().enumerate() {
+        let task_id = task.get("id").and_then(Value::as_i64).ok_or_else(|| {
+            MemoryError::Validation(format!("task_list task[{idx}] missing integer \"id\""))
+        })?;
+        if let Some(prev) = last_id {
+            if task_id <= prev {
+                return Err(MemoryError::Validation(format!(
+                    "task_list tasks must be strictly ordered by id (task[{idx}].id={task_id} follows {prev})"
+                )));
+            }
+        }
+        last_id = Some(task_id);
+        let acceptance = task
+            .get("acceptance")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                MemoryError::Validation(format!(
+                    "task_list task[{idx}] missing \"acceptance\" array"
+                ))
+            })?;
+        if acceptance.is_empty() {
+            return Err(MemoryError::Validation(format!(
+                "task_list task[{idx}] must include at least one acceptance criterion"
+            )));
+        }
+    }
+    let tasks_count = u32::try_from(tasks.len())
+        .map_err(|_| MemoryError::Validation("task_list contains too many tasks".to_string()))?;
+    // Canonicalize the task_list JSON we store on the session so downstream
+    // readers see a normalized form regardless of incoming whitespace.
+    let task_list_json = serde_json::to_string(&payload)
+        .map_err(|e| MemoryError::Validation(format!("task_list serialize error: {e}")))?;
+    Ok(CollabEvent::SubmitTaskList {
+        plan_hash,
+        base_sha,
+        task_list_json,
+        tasks_count,
+        head_sha,
+    })
+}
+
+fn parse_required_head_sha(content: &str, topic: &str) -> Result<String, MemoryError> {
+    let payload: Value = serde_json::from_str(content)
+        .map_err(|e| MemoryError::Validation(format!("{topic} content must be JSON: {e}")))?;
+    let head_sha = payload
+        .get("head_sha")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            MemoryError::Validation(format!(
+                "{topic} content must include a non-empty \"head_sha\" field"
+            ))
+        })?
+        .to_string();
+    Ok(head_sha)
+}
+
+fn parse_required_verdict(content: &str, topic: &str) -> Result<String, MemoryError> {
+    let payload: Value = serde_json::from_str(content)
+        .map_err(|e| MemoryError::Validation(format!("{topic} content must be JSON: {e}")))?;
+    let verdict = payload
+        .get("verdict")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            MemoryError::Validation(format!(
+                "{topic} content must include a non-empty \"verdict\" field"
+            ))
+        })?
+        .to_string();
+    Ok(verdict)
+}
+
 fn parse_review_verdict(content: &str) -> Result<String, MemoryError> {
     let payload: Value = serde_json::from_str(content).map_err(|e| {
         MemoryError::Validation(format!(
@@ -1343,6 +1601,15 @@ fn session_record_json(record: &SessionRecord) -> Value {
         "final_plan_hash": record.session.final_plan_hash.as_deref(),
         "codex_review_verdict": record.session.codex_review_verdict.as_deref(),
         "review_round": record.session.review_round,
+        "task_list": record.session.task_list.as_deref(),
+        "tasks_count": record.session.tasks_count,
+        "current_task_index": record.session.current_task_index,
+        "task_review_round": record.session.task_review_round,
+        "global_review_round": record.session.global_review_round,
+        "base_sha": record.session.base_sha.as_deref(),
+        "last_head_sha": record.session.last_head_sha.as_deref(),
+        "pr_url": record.session.pr_url.as_deref(),
+        "coding_failure": record.session.coding_failure.as_deref(),
         "ended_at": record.ended_at.as_deref(),
         "created_at": record.created_at.as_str(),
         "updated_at": record.updated_at.as_str(),

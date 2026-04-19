@@ -591,3 +591,404 @@ fn collab_end_blocks_subsequent_writes() {
     assert_eq!(wait["session_ended"], true);
     assert_eq!(wait["is_my_turn"], false);
 }
+
+// ── v2 coding-loop E2E tests ────────────────────────────────────────────────
+
+/// Drive a fresh session all the way to PlanLocked via MCP handlers and
+/// return `(session_id, final_plan_text)` so callers can assemble valid
+/// `task_list` payloads (the state machine rejects a mismatched `plan_hash`).
+fn drive_to_plan_locked(app: &App, final_plan: &str) -> String {
+    let started = call_tool(
+        app,
+        "collab_start",
+        json!({
+            "repo_path": "/repo",
+            "branch": "main",
+            "initiator": "claude"
+        }),
+    );
+    let session_id = started["session_id"].as_str().unwrap().to_string();
+
+    for (sender, content) in [("claude", "cdraft"), ("codex", "xdraft")] {
+        call_tool(
+            app,
+            "collab_send",
+            json!({
+                "session_id": session_id,
+                "sender": sender,
+                "topic": "draft",
+                "content": content
+            }),
+        );
+    }
+    call_tool(
+        app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "canonical",
+            "content": "canonical plan v1"
+        }),
+    );
+    call_tool(
+        app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "codex",
+            "topic": "review",
+            "content": json!({ "verdict": "approve" }).to_string()
+        }),
+    );
+    call_tool(
+        app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "final",
+            "content": json!({ "plan": final_plan }).to_string()
+        }),
+    );
+    let status = call_tool(app, "collab_status", json!({ "session_id": &session_id }));
+    assert_eq!(status["phase"], "PlanLocked");
+    session_id
+}
+
+fn plan_hash(app: &App, session_id: &str) -> String {
+    let status = call_tool(app, "collab_status", json!({ "session_id": session_id }));
+    status["final_plan_hash"].as_str().unwrap().to_string()
+}
+
+fn task_list_payload(plan_hash: &str, base_sha: &str, head_sha: &str, n: usize) -> String {
+    let tasks: Vec<_> = (1..=n)
+        .map(|i| {
+            json!({
+                "id": i,
+                "title": format!("task {i}"),
+                "acceptance": [format!("criterion {i}")]
+            })
+        })
+        .collect();
+    json!({
+        "plan_hash": plan_hash,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "tasks": tasks,
+    })
+    .to_string()
+}
+
+/// Run implement → review → verdict=agree, advancing one task.
+fn happy_task_cycle(app: &App, session_id: &str, head: &str) {
+    for (sender, topic) in [("claude", "implement"), ("codex", "review")] {
+        call_tool(
+            app,
+            "collab_send",
+            json!({
+                "session_id": session_id,
+                "sender": sender,
+                "topic": topic,
+                "content": json!({ "head_sha": head }).to_string()
+            }),
+        );
+    }
+    call_tool(
+        app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "verdict",
+            "content": json!({ "head_sha": head, "verdict": "agree" }).to_string()
+        }),
+    );
+}
+
+#[test]
+fn collab_v2_happy_path_reaches_coding_complete() {
+    let app = App::open_for_test().unwrap();
+    let session_id = drive_to_plan_locked(&app, "final plan text");
+    let hash = plan_hash(&app, &session_id);
+
+    // Submit a 2-task list.
+    call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "task_list",
+            "content": task_list_payload(&hash, "base0", "head0", 2)
+        }),
+    );
+    let status = call_tool(&app, "collab_status", json!({ "session_id": &session_id }));
+    assert_eq!(status["phase"], "CodeImplementPending");
+    assert_eq!(status["tasks_count"], 2);
+    assert_eq!(status["current_task_index"], 0);
+    assert_eq!(status["base_sha"], "base0");
+
+    // Task 1 + Task 2 happy path.
+    happy_task_cycle(&app, &session_id, "h1");
+    let status = call_tool(&app, "collab_status", json!({ "session_id": &session_id }));
+    assert_eq!(status["phase"], "CodeImplementPending");
+    assert_eq!(status["current_task_index"], 1);
+    happy_task_cycle(&app, &session_id, "h2");
+    let status = call_tool(&app, "collab_status", json!({ "session_id": &session_id }));
+    assert_eq!(status["phase"], "CodeReviewLocalPending");
+
+    // Local review → global review agree → PR ready.
+    call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "review_local",
+            "content": json!({ "head_sha": "h2" }).to_string()
+        }),
+    );
+    call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "codex",
+            "topic": "review_global",
+            "content": json!({ "head_sha": "h2", "verdict": "agree" }).to_string()
+        }),
+    );
+    let status = call_tool(&app, "collab_status", json!({ "session_id": &session_id }));
+    assert_eq!(status["phase"], "PrReadyPending");
+
+    // PR opened → CodingComplete.
+    call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "pr_opened",
+            "content": json!({ "head_sha": "h2", "pr_url": "https://example/pr/1" }).to_string()
+        }),
+    );
+    let status = call_tool(&app, "collab_status", json!({ "session_id": &session_id }));
+    assert_eq!(status["phase"], "CodingComplete");
+    assert_eq!(status["pr_url"], "https://example/pr/1");
+    assert_eq!(status["last_head_sha"], "h2");
+}
+
+#[test]
+fn collab_v2_task_disagree_round_loops_back_to_review() {
+    let app = App::open_for_test().unwrap();
+    let session_id = drive_to_plan_locked(&app, "fp");
+    let hash = plan_hash(&app, &session_id);
+    call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "task_list",
+            "content": task_list_payload(&hash, "b0", "h0", 1)
+        }),
+    );
+
+    // implement → review → verdict=disagree → debate comment → final
+    // (under cap, so Final loops back to CodeReviewPending).
+    for (sender, topic, extra) in [
+        ("claude", "implement", json!({ "head_sha": "h1" })),
+        ("codex", "review", json!({ "head_sha": "h1" })),
+        (
+            "claude",
+            "verdict",
+            json!({ "head_sha": "h1", "verdict": "disagree_with_reasons" }),
+        ),
+        ("codex", "comment", json!({ "head_sha": "h1" })),
+        ("claude", "final", json!({ "head_sha": "h1" })),
+    ] {
+        call_tool(
+            &app,
+            "collab_send",
+            json!({
+                "session_id": session_id,
+                "sender": sender,
+                "topic": topic,
+                "content": extra.to_string()
+            }),
+        );
+    }
+    let status = call_tool(&app, "collab_status", json!({ "session_id": &session_id }));
+    assert_eq!(status["phase"], "CodeReviewPending");
+    assert_eq!(status["task_review_round"], 1);
+}
+
+#[test]
+fn collab_v2_end_rejected_in_coding_active_phase() {
+    let app = App::open_for_test().unwrap();
+    let session_id = drive_to_plan_locked(&app, "fp");
+    let hash = plan_hash(&app, &session_id);
+    call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "task_list",
+            "content": task_list_payload(&hash, "b0", "h0", 1)
+        }),
+    );
+    // Now in CodeImplementPending — collab_end must be rejected.
+    let blocked = call_tool(
+        &app,
+        "collab_end",
+        json!({ "session_id": session_id, "agent": "claude" }),
+    );
+    assert!(blocked["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("coding-active phase"));
+
+    // Session still active — send should work.
+    let ok = call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "implement",
+            "content": json!({ "head_sha": "h1" }).to_string()
+        }),
+    );
+    assert_eq!(ok["phase"], "CodeReviewPending");
+}
+
+#[test]
+fn collab_v2_wait_my_turn_dynamic_terminal_set() {
+    let app = App::open_for_test().unwrap();
+    let session_id = drive_to_plan_locked(&app, "fp");
+
+    // Pre-task_list: PlanLocked is terminal. wait_my_turn returns immediately
+    // with is_my_turn=false and phase=PlanLocked for either agent — the
+    // terminal check fires before the ownership check.
+    let wait = call_tool(
+        &app,
+        "collab_wait_my_turn",
+        json!({ "session_id": session_id, "agent": "codex", "timeout_secs": 1 }),
+    );
+    assert_eq!(wait["phase"], "PlanLocked");
+    assert_eq!(wait["is_my_turn"], false);
+
+    // Submit task_list → terminal set flips to {CodingComplete, CodingFailed}.
+    let hash = plan_hash(&app, &session_id);
+    call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "task_list",
+            "content": task_list_payload(&hash, "b0", "h0", 1)
+        }),
+    );
+    // CodeImplementPending is NOT terminal — wait for claude returns is_my_turn=true.
+    let wait = call_tool(
+        &app,
+        "collab_wait_my_turn",
+        json!({ "session_id": session_id, "agent": "claude", "timeout_secs": 1 }),
+    );
+    assert_eq!(wait["phase"], "CodeImplementPending");
+    assert_eq!(wait["is_my_turn"], true);
+}
+
+#[test]
+fn collab_v2_failure_report_transitions_to_coding_failed() {
+    let app = App::open_for_test().unwrap();
+    let session_id = drive_to_plan_locked(&app, "fp");
+    let hash = plan_hash(&app, &session_id);
+    call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "task_list",
+            "content": task_list_payload(&hash, "b0", "h0", 1)
+        }),
+    );
+    // Codex detects drift and emits failure_report.
+    call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "codex",
+            "topic": "failure_report",
+            "content": json!({ "coding_failure": "branch_drift: expected=b0 got=b1" }).to_string()
+        }),
+    );
+    let status = call_tool(&app, "collab_status", json!({ "session_id": &session_id }));
+    assert_eq!(status["phase"], "CodingFailed");
+    assert!(status["coding_failure"]
+        .as_str()
+        .unwrap_or("")
+        .contains("branch_drift"));
+
+    // Terminal: collab_end now succeeds (no longer coding-active).
+    let ended = call_tool(
+        &app,
+        "collab_end",
+        json!({ "session_id": session_id, "agent": "claude" }),
+    );
+    assert_eq!(ended["ok"], true);
+}
+
+#[test]
+fn collab_v2_task_list_rejects_wrong_plan_hash() {
+    let app = App::open_for_test().unwrap();
+    let session_id = drive_to_plan_locked(&app, "fp");
+
+    let bad = call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "task_list",
+            "content": task_list_payload("deadbeef", "b0", "h0", 1)
+        }),
+    );
+    assert!(bad["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("plan_hash mismatch"));
+}
+
+#[test]
+fn collab_v2_task_list_rejects_empty_acceptance() {
+    let app = App::open_for_test().unwrap();
+    let session_id = drive_to_plan_locked(&app, "fp");
+    let hash = plan_hash(&app, &session_id);
+    let bad_payload = json!({
+        "plan_hash": hash,
+        "base_sha": "b0",
+        "head_sha": "h0",
+        "tasks": [ { "id": 1, "title": "t", "acceptance": [] } ],
+    })
+    .to_string();
+    let bad = call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "task_list",
+            "content": bad_payload
+        }),
+    );
+    assert!(bad["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("acceptance criterion"));
+}
