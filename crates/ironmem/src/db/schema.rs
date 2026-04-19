@@ -10,6 +10,7 @@ const SCHEMA_SQL: &str = include_str!("../../migrations/001_init.sql");
 const FTS_SQL: &str = include_str!("../../migrations/002_fts.sql");
 const COLLAB_SQL: &str = include_str!("../../migrations/003_collab.sql");
 const COLLAB_V1_SQL: &str = include_str!("../../migrations/004_collab_planning_v1.sql");
+const COLLAB_V2_SQL: &str = include_str!("../../migrations/005_collab_v2.sql");
 
 /// Database wrapper around a SQLite connection.
 ///
@@ -78,6 +79,13 @@ impl Database {
         // and PlanEscalated → PlanLocked data migration.
         if current_version < 4 {
             retry_on_busy(|| self.conn.execute_batch(COLLAB_V1_SQL))?;
+        }
+
+        // v5: collab v2 coding loop — task_list, per-task & global round
+        // counters, base_sha / last_head_sha drift tracking, pr_url,
+        // coding_failure.
+        if current_version < 5 {
+            retry_on_busy(|| self.conn.execute_batch(COLLAB_V2_SQL))?;
         }
 
         Ok(())
