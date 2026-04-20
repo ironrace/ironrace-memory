@@ -62,4 +62,36 @@ if [[ -n "$RUNNING" ]]; then
   echo "      (Claude Code / Codex) to reconnect to the freshly installed one."
 fi
 
+# Detect legacy MCP server registrations left over from the pre-rename era
+# (ironrace-memory → ironmem). We do NOT edit these files — a legacy entry
+# may point at a forked or staging binary deliberately. Warn only, with the
+# exact command to remove it.
+CLAUDE_CONFIG="$HOME/.claude.json"
+CODEX_CONFIG="$HOME/.codex/config.toml"
+LEGACY_FOUND=0
+
+if [[ -f "$CLAUDE_CONFIG" ]] && command -v jq >/dev/null 2>&1; then
+  if jq -e '.mcpServers["ironrace-memory"]' "$CLAUDE_CONFIG" >/dev/null 2>&1; then
+    if [[ "$LEGACY_FOUND" -eq 0 ]]; then echo ""; echo "Legacy MCP registrations detected:"; fi
+    LEGACY_FOUND=1
+    echo "  - Claude Code ($CLAUDE_CONFIG) has an 'ironrace-memory' server."
+    echo "      Remove with: claude mcp remove ironrace-memory"
+  fi
+fi
+
+if [[ -f "$CODEX_CONFIG" ]] && grep -q '^\[mcp_servers\.ironrace_memory\]' "$CODEX_CONFIG" 2>/dev/null; then
+  if [[ "$LEGACY_FOUND" -eq 0 ]]; then echo ""; echo "Legacy MCP registrations detected:"; fi
+  LEGACY_FOUND=1
+  echo "  - Codex ($CODEX_CONFIG) has an [mcp_servers.ironrace_memory] section."
+  echo "      Remove it by hand — delete the [mcp_servers.ironrace_memory] block"
+  echo "      and any [mcp_servers.ironrace_memory.*] subsections."
+fi
+
+if [[ "$LEGACY_FOUND" -eq 1 ]]; then
+  echo ""
+  echo "  Why this matters: the plugin registers itself as 'ironmem'. When a"
+  echo "  legacy 'ironrace-memory' server is also registered, tool calls render"
+  echo "  under the old name and both servers run against the same SQLite DB."
+fi
+
 echo "==> Done"

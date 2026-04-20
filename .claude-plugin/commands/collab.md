@@ -66,21 +66,25 @@ Both v1 and v2 share a common dispatch loop:
 
 ```text
 loop:
-  wait_my_turn(session_id, "claude", 60)
   status = collab_status(session_id)
-  
+
   if session_ended or phase in terminal_set:
     exit and report to user
-  
-  if not is_my_turn:
-    loop (continue polling)
-  
+
+  if current_owner == "codex":
+    invoke mcp__codex__codex with "/collab join <session_id>"
+      (see "Codex handoff — synchronous MCP invocation" below)
+    loop  # re-read status when Codex returns
+
+  # current_owner == "claude"
   recv(session_id, "claude") → ack each message
-  
   act on phase (send exactly one message per iteration)
-  
-  loop (restart polling)
+  loop
 ```
+
+`wait_my_turn` is only needed to bridge brief race windows where the
+server is still writing state after a send. Do NOT use it as a
+wait-for-Codex mechanism — Codex isn't polling, Claude drives it.
 
 Terminal sets:
 - **v1**: `{PlanLocked}` (until `task_list` is sent)
@@ -176,6 +180,71 @@ building the payload:
 
 After each send in v2, loop back to polling. The loop continues until
 `phase in {CodingComplete, CodingFailed}` or `session_ended`.
+
+### Codex handoff — synchronous MCP invocation
+
+**Whenever `current_owner == "codex"` in a coding-active or planning-active
+phase, drive Codex's turn inline via the Codex MCP tool.** Codex CLI
+sessions are one-shot and do not sustain `wait_my_turn` loops across
+handoffs, so Claude is the single control loop: polling when it's Claude's
+turn, spawning Codex via MCP when it's Codex's turn. This applies in three
+contexts:
+
+- **After a Claude `collab_send`** that flips the owner to Codex.
+- **On `/collab join`** when status returns `current_owner == "codex"`.
+- **Inside the dispatch loop** whenever a `collab_status` check shows
+  `current_owner == "codex"` — do not fall back to a bare `wait_my_turn`
+  poll, because no Codex session is running to change the state.
+
+Procedure:
+
+1. Read a fresh `collab_status`. If `current_owner == "claude"` or
+   `phase` is terminal, skip this step and resume polling / exit.
+2. If `current_owner == "codex"` and phase is non-terminal, expand the
+   Codex slash command locally and pass the resolved prompt to the MCP
+   tool. **`codex mcp-server` does not read `.codex-plugin/prompts/` —
+   the literal `/collab join <sid>` string would be treated as ordinary
+   user text.** So:
+
+   a. Read `.codex-plugin/prompts/collab.md` from the collab repo
+      (`/Users/jeffreycrum/git-repos/ironrace-memory/.codex-plugin/prompts/collab.md`
+      — this repo holds the canonical prompt regardless of the target
+      `repo_path`).
+   b. Substitute `$ARGUMENTS` in that file with `join <session_id>`.
+   c. Call:
+      ```json
+      {
+        "name": "mcp__codex__codex",
+        "arguments": {
+          "prompt": "<resolved prompt text>",
+          "cwd": "<repo_path from collab_status>"
+        }
+      }
+      ```
+
+   Block on the result. Codex executes its phase-specific action
+   (review, debate, global review, etc.) and returns when the session
+   flips back to a Claude-owned phase or terminates. Codex may chain
+   multiple handoffs internally — the tool call stays open for as long
+   as the Codex session runs.
+3. When `mcp__codex__codex` returns, resume the dispatch loop at
+   `wait_my_turn`. The next iteration will see either a Claude-owned
+   phase or a terminal condition.
+
+Also update the **dispatch loop itself**: replace the
+`if not is_my_turn: loop (continue polling)` step with
+`if not is_my_turn: drive Codex via the procedure above, then loop`. The
+`wait_my_turn` call is now only used to block on Claude-owned work that
+the server is still finalizing (brief race-window waits), not as a
+general wait-for-Codex mechanism.
+
+Applies to every Codex-owned phase: v1 `PlanParallelDrafts` (Codex
+drafting), `PlanCodexReviewPending`, v2 `CodeReviewPending`,
+`CodeDebatePending`, `CodeReviewCodexPending`, `CodeReviewDebatePending`.
+
+If `mcp__codex__codex` is not registered, fall back to the legacy flow:
+tell the user to run `/collab join <session_id>` in a Codex terminal,
+then `ScheduleWakeup` and resume polling.
 
 ## Invariants — do not violate
 

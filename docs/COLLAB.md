@@ -565,6 +565,42 @@ Smoke test without the embed model:
 IRONMEM_MCP_MODE=trusted IRONMEM_EMBED_MODE=noop ./target/release/ironmem serve
 ```
 
+## Codex handoff via MCP
+
+Codex CLI sessions are one-shot: after sending a review and seeing the
+session hand off back to Claude, Codex emits a summary and stops. It has
+no `ScheduleWakeup` primitive to self-wake on the next handoff. Rather
+than relying on an external daemon, Claude drives Codex's turn inline
+via Codex's MCP server (`codex mcp-server`):
+
+1. Register `codex mcp-server` with Claude Code (once):
+   ```bash
+   claude mcp add codex codex mcp-server
+   ```
+2. Claude's `/collab` prompt drives Codex whenever
+   `current_owner == "codex"` (after a Claude send, on `/collab join`
+   mid-session, or in the dispatch loop). **`codex mcp-server` does not
+   resolve slash commands from `.codex-plugin/prompts/`.** Passing a
+   raw `/collab join <sid>` string makes Codex treat it as ordinary
+   user text and go off-script. Claude must expand the prompt locally:
+   read `.codex-plugin/prompts/collab.md`, substitute `$ARGUMENTS` with
+   `join <session_id>`, and call:
+   ```json
+   {
+     "name": "mcp__codex__codex",
+     "arguments": {
+       "prompt": "<resolved prompt text from collab.md>",
+       "cwd": "<repo_path>"
+     }
+   }
+   ```
+   The call blocks until Codex finishes its phase-specific action and
+   hands control back. Claude then resumes the dispatch loop.
+
+This keeps the control loop inside Claude Code — no external daemon, no
+FIFO, no turn-change webhook. If the `codex` MCP server isn't registered,
+the prompt falls back to asking the user to run `/collab join` manually.
+
 ## Validation
 
 ```bash
