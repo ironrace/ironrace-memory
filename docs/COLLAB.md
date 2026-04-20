@@ -340,7 +340,7 @@ at the time of `collab_send`. All other topics map 1:1.
 |---|---|---|
 | `PlanParallelDrafts` | `draft` | v1 planning |
 | `PlanSynthesisPending` | `canonical` | v1 planning |
-| `PlanReviewPending` | `review` | v1 — Codex review of canonical |
+| `PlanCodexReviewPending` | `review` | v1 — Codex review of canonical |
 | `PlanClaudeFinalizePending` | `final` | v1 — Claude finalizes |
 | `PlanLocked` | `task_list` | v1 → v2 hand-off |
 | `CodeImplementPending` | `implement`, `failure_report` | |
