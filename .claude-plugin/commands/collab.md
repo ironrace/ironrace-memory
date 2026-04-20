@@ -28,19 +28,28 @@ branch names.
    - `initiator` ← `"claude"` (this is Claude's terminal).
    - `task` ← the remainder of `$ARGUMENTS` after the word `start`.
 2. Call `mcp__ironmem__collab_start` with those four fields.
-3. Tell the user, in a single line they can copy-paste into Codex's terminal:
+3. **Do not ask the user to run anything in a Codex terminal.** Claude
+   drives every Codex-owned turn via `mcp__codex__codex` in this same
+   terminal — there is no second terminal for the user to manage. Just
+   report the new `session_id` to the user as a single line so they can
+   track it:
 
    ```
-   Run in Codex: /collab join <session_id>
+   Collab session started: <session_id>
    ```
 
+   Only fall back to `"Run in Codex: /collab join <session_id>"` if
+   `mcp__codex__codex` is not registered (see the Codex handoff section
+   below for the fallback path).
 4. Enter Plan Mode and draft your first plan for `<task>` — the draft is
    yours alone, Codex cannot see it. When you have the user's approval in
    Plan Mode, call `mcp__ironmem__collab_send` with
    `sender="claude"`, `topic="draft"`, `content=<the plan text>`.
-5. After the draft is sent, begin the v1 planning loop (below). After the
-   plan locks (`PlanLocked`), the session automatically flows into the v3
-   coding bridge (no separate invocation needed).
+5. After the draft is sent, begin the v1 planning loop (below). When the
+   loop observes `current_owner == "codex"`, it drives Codex inline via
+   the MCP tool (see "Codex handoff — synchronous MCP invocation"). After
+   the plan locks (`PlanLocked`), the session automatically flows into
+   the v3 coding bridge (no separate invocation needed).
 
 ## `join <session_id>`
 
