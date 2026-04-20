@@ -168,7 +168,7 @@ building the payload:
 |---|---|
 | `CodeImplementPending` | **Run pre-send harness.** Write code for the current task. Commit and push. Call `collab_send` with `sender="claude"`, `topic="implement"`, `content=<JSON {"head_sha":"<current HEAD>"}>`. |
 | `CodeReviewPending` | Codex's turn. is_my_turn should be false. If `collab_status` confirms Claude is the owner, exit the loop and report the anomaly to the user; do not attempt a send. |
-| `CodeVerdictPending` | **Run pre-send harness.** Read Codex's review. If local gates pass AND Codex's review raises no concrete actionable issue, send `verdict` with `"agree"`; otherwise send `verdict` with `"disagree_with_reasons"` and a terse justification. Payload: `{"head_sha":"<current HEAD>","verdict":"agree"|"disagree_with_reasons"}`. Escalate to the user in Plan Mode only if Codex flags something the gates cannot mechanically verify (architectural drift, plan-scope creep, security smell) or the choice is between two reasonable fixes. |
+| `CodeVerdictPending` | **Run pre-send harness.** Read Codex's review. If local gates pass AND Codex's review raises no concrete actionable issue, send `verdict` with `"agree"`. Send `verdict` with `"disagree_with_reasons"` only when you have a genuine position Codex should weigh — a specific pushback, an open question, or a framing disagreement. **Do not use `disagree_with_reasons` as a state-machine detour to reach `CodeFinalPending`.** If you plan to apply all of Codex's notes as-is with no independent position, that is `"agree"`: fixes land in the next `CodeImplementPending` round (per-task loop) or in `CodeReviewFinalPending` (global loop), not via a manufactured debate. Payload: `{"head_sha":"<current HEAD>","verdict":"agree"\|"disagree_with_reasons","reasons":"<text, only when disagreeing>"}`. Escalate to the user in Plan Mode only if Codex flags something the gates cannot mechanically verify (architectural drift, plan-scope creep, security smell) or the choice is between two reasonable fixes. |
 | `CodeDebatePending` | Codex's turn. is_my_turn should be false. If `collab_status` confirms Claude is the owner, exit the loop and report the anomaly. |
 | `CodeFinalPending` | **Run pre-send harness (gates before finalize).** Apply fixes from Codex's comment. Re-run gates. Call `collab_send` with `sender="claude"`, `topic="final"`, `content=<JSON {"head_sha":"<current HEAD>"}>`. |
 | `CodeReviewLocalPending` | **Run pre-send harness.** Call `collab_send` with `sender="claude"`, `topic="review_local"`, `content=<JSON {"head_sha":"<current HEAD>"}>`. Proactive review (`/ultrareview-local`) happens once, at `PrReadyPending` — not here. |
@@ -221,6 +221,17 @@ Procedure:
         }
       }
       ```
+
+   **The `prompt` argument is the verbatim expanded
+   `.codex-plugin/prompts/collab.md` with `$ARGUMENTS` substituted —
+   nothing more.** Do not append, prepend, or inline any session
+   context, state summary, recap of Claude's last message, or
+   instructions about what Codex should conclude. Codex reads state
+   via its own `collab_status` and `recv` calls and must form its
+   own judgment. Hand-crafted prompts that steer Codex toward a
+   conclusion ("withdraw objections", "this is pro-forma", "Claude
+   intends to fix everything") collapse the review into a
+   rubber-stamp and defeat the point of an independent second pass.
 
    Block on the result. Codex executes its phase-specific action
    (review, debate, global review, etc.) and returns when the session
