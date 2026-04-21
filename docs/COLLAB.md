@@ -1,18 +1,20 @@
-# IronRace Collab (v1 Planning + v2 Coding)
+# IronRace Collab (v1 Planning + v3 Coding)
 
 `ironmem` includes a bounded collaboration protocol that lets Claude Code
 and Codex coordinate a single plan and then implement it through the shared
 MCP server.
 
 - **v1 (planning)**: bounded parallel drafts → canonical synthesis → Codex
-  review → Claude finalize → `PlanLocked`.
-- **v2 (coding)**: post-`PlanLocked` task list → per-task 5-phase debate →
-  local review → 2-pass global Codex review → PR handoff →
-  `CodingComplete` / `CodingFailed`.
+  review → Claude finalize → `PlanLocked`. Two review rounds.
+- **v3 (coding)**: post-`PlanLocked` task list → per-task 3-phase linear
+  flow (Claude implement → Codex review+fix → Claude final) → local
+  review → global 3-phase linear flow (Claude local → Codex review+fix →
+  Claude final with PR URL) → `CodingComplete` / `CodingFailed`. No
+  debate rounds at the coding stage — Codex writes code directly.
 
 This document covers:
 
-- the full state machine and invariants (v1 + v2)
+- the full state machine and invariants (v1 + v3)
 - the `collab_*` MCP tools
 - topic payload formats for every protocol message
 - harness-side responsibilities (git, cargo, gh, coderabbit)
@@ -20,6 +22,12 @@ This document covers:
 - Claude's Plan Mode integration for canonical synthesis and revisions
 - copy-pasteable prompts for the Claude and Codex terminals
 - a worked example
+
+The two slash-command prompts that agents actually run are derived from
+this spec — keep them in sync when protocol changes land:
+
+- `.claude-plugin/commands/collab.md` — Claude's `/collab` prompt.
+- `.codex-plugin/prompts/collab.md` — Codex's `/collab` prompt.
 
 ## What It Is
 
@@ -60,7 +68,9 @@ Stored in `collab_sessions`:
 | `current_owner` | Agent whose turn it is (`claude` or `codex`) |
 | `claude_draft_hash`, `codex_draft_hash` | SHA-256 of each first draft |
 | `canonical_plan_hash` | SHA-256 of Claude's synthesis |
+| `canonical_plan` | Latest `canonical` message content (present when `canonical_plan_hash` is set). Lets a fresh agent rejoining mid-planning pull back its own earlier synthesis without a counterpart `recv`. |
 | `final_plan_hash` | SHA-256 of the locked plan |
+| `final_plan` | Latest `final` message content as sent — the JSON string `{"plan":"<full text>"}` (present when `final_plan_hash` is set). Primary input to the v2 `task_list` bridge after `PlanLocked`. |
 | `codex_review_verdict` | Last Codex verdict |
 | `review_round` | Number of completed Codex reviews (0, 1, or 2) |
 | `ended_at` | Non-null once `collab_end` has been called |
@@ -121,52 +131,54 @@ Plan is frozen; `final_plan_hash` is set. This is terminal for `wait_my_turn`
   task list is non-empty; the session stays active and the terminal set for
   `wait_my_turn` flips to `{CodingComplete, CodingFailed}`.
 
-## v2 Coding Phase Model
+## v3 Coding Phase Model
 
-v2 reuses the same session (no new `id`). It extends `collab_sessions` with
-per-task and global round counters, a `base_sha` / `last_head_sha` pair for
-branch-drift detection, `pr_url` for the PR handoff, and `coding_failure`
-for unrecoverable errors. Each phase names the exact event that advances it.
+v3 reuses the same session (no new `id`). It extends `collab_sessions` with
+a `base_sha` / `last_head_sha` pair for branch-drift detection, `pr_url`
+for the PR handoff, and `coding_failure` for unrecoverable errors. Each
+phase names the exact event that advances it.
 
-### Per-task 5-phase debate
+v3 is deliberately linear: every turn deterministically advances to the
+next phase. There are no debate rounds, no verdicts, no round counters
+at the coding stage. This structurally prevents the orchestrator from
+steering the reviewer's conclusion — Codex writes code directly rather
+than handing a review-with-verdict back to Claude for re-interpretation.
 
-Applied once per task in `task_list`. `task_review_round` counts Codex-review
-passes; at `MAX_TASK_REVIEW_ROUNDS = 2`, `verdict=disagree_with_reasons`
-skips `CodeDebatePending` and lands directly in `CodeFinalPending`, which
-**advances the task** instead of looping back.
+### Per-task 3-phase linear flow
 
-| Phase | Owner | Event | Next |
-|---|---|---|---|
-| `CodeImplementPending` | `claude` | `CodeImplement{head_sha}` | `CodeReviewPending` |
-| `CodeReviewPending` | `codex` | `CodeReview{head_sha}` | `CodeVerdictPending` |
-| `CodeVerdictPending` | `claude` | `CodeVerdict{verdict, head_sha}` — `agree` advances task; `disagree_with_reasons` under cap → `CodeDebatePending`; at cap → `CodeFinalPending` | varies |
-| `CodeDebatePending` | `codex` | `CodeComment{head_sha}` | `CodeFinalPending` |
-| `CodeFinalPending` | `claude` | `CodeFinal{head_sha}` — under cap loops to `CodeReviewPending`; at cap advances task | varies |
-
-**Advance**: `task_review_round` resets to 0; if another task remains,
-`current_task_index += 1` and phase returns to `CodeImplementPending`,
-else phase transitions to `CodeReviewLocalPending`.
-
-### Local + global review
+Applied once per task in `task_list`. Each turn advances deterministically;
+the task advances after Claude's final turn.
 
 | Phase | Owner | Event | Next |
 |---|---|---|---|
-| `CodeReviewLocalPending` | `claude` | `ReviewLocal{head_sha}` | `CodeReviewCodexPending` |
-| `CodeReviewCodexPending` | `codex` | `ReviewGlobal{verdict, head_sha}` — `agree` → `PrReadyPending`; `disagree_with_reasons` → `CodeReviewVerdictPending` (bumps `global_review_round`) | varies |
-| `CodeReviewVerdictPending` | `claude` | `VerdictGlobal{verdict, head_sha}` | `CodeReviewDebatePending` |
-| `CodeReviewDebatePending` | `codex` | `CommentGlobal{head_sha}` | `CodeReviewFinalPending` |
-| `CodeReviewFinalPending` | `claude` | `FinalReview{head_sha}` — under `MAX_GLOBAL_REVIEW_ROUNDS = 2` loops to `CodeReviewCodexPending`; at cap forces `PrReadyPending` | varies |
+| `CodeImplementPending` | `claude` | `CodeImplement{head_sha}` | `CodeReviewFixPending` |
+| `CodeReviewFixPending` | `codex` | `CodeReviewFix{head_sha}` — Codex reviewed and (if needed) pushed fixes directly; payload is just the post-fix HEAD | `CodeFinalPending` |
+| `CodeFinalPending` | `claude` | `CodeFinal{head_sha}` — Claude's last word on this task; advances the task | varies |
 
-### PR handoff + terminal
+**Advance**: if another task remains, `current_task_index += 1` and phase
+returns to `CodeImplementPending`; else phase transitions to
+`CodeReviewLocalPending`.
+
+### Global review, 3-phase linear
+
+Mirrors the per-task flow at branch scope. Claude opens the PR on the
+final turn.
 
 | Phase | Owner | Event | Next |
 |---|---|---|---|
-| `PrReadyPending` | `claude` | `PrOpened{pr_url, head_sha}` | `CodingComplete` (terminal) |
+| `CodeReviewLocalPending` | `claude` | `ReviewLocal{head_sha}` | `CodeReviewFixGlobalPending` |
+| `CodeReviewFixGlobalPending` | `codex` | `CodeReviewFixGlobal{head_sha}` — Codex reviewed the full branch and (if needed) pushed fixes directly | `CodeReviewFinalPending` |
+| `CodeReviewFinalPending` | `claude` | `FinalReview{head_sha, pr_url}` — Claude opens the PR and sends the URL in the same event | `CodingComplete` (terminal) |
+
+### Failure + terminal
+
+| Phase | Owner | Event | Next |
+|---|---|---|---|
 | *any coding-active phase* | either | `FailureReport{coding_failure}` | `CodingFailed` (terminal) |
 
 `collab_end` is **rejected** in every coding-active phase
-(`CodeImplementPending` through `PrReadyPending`). Only `CodingComplete` or
-`CodingFailed` end the session post-`task_list`.
+(`CodeImplementPending` through `CodeReviewFinalPending`). Only
+`CodingComplete` or `CodingFailed` end the session post-`task_list`.
 
 ## Blind-Draft Invariant
 
@@ -206,9 +218,8 @@ Sends a protocol message and advances the state machine.
 
 v1 planning topics: `draft`, `canonical`, `review`, `final`.
 
-v2 coding topics: `task_list`, `implement`, `verdict`, `comment`,
-`review_local`, `review_global`, `verdict_global`, `comment_global`,
-`final_review`, `pr_opened`, `failure_report`.
+v3 coding topics: `task_list`, `implement`, `review_fix`, `final`,
+`review_local`, `review_fix_global`, `final_review`, `failure_report`.
 
 The phase→topic acceptance matrix is tabulated in
 [§ Phase → Topic Acceptance](#phase--topic-acceptance); consult that table
@@ -262,8 +273,8 @@ Ends a session. Valid **only** from one of three phases:
 
 **Rejected** during any active planning phase (`PlanParallelDrafts` through
 `PlanClaudeFinalizePending`) or coding-active phase (`CodeImplementPending`
-through `PrReadyPending`). This prevents either agent from killing a session
-the counterpart is still working in.
+through `CodeReviewFinalPending`). This prevents either agent from killing
+a session the counterpart is still working in.
 
 Idempotent once allowed: calling from a terminal phase or an
 already-ended session is a no-op, and subsequent `send`, `ack`, `approve`,
@@ -307,53 +318,49 @@ JSON:
 { "plan": "final merged plan text" }
 ```
 
-### v2 coding topic payloads
+### v3 coding topic payloads
 
-Every v2 `collab_send` content is JSON. The server parses strictly — missing
+Every v3 `collab_send` content is JSON. The server parses strictly — missing
 or empty required fields reject with a validation error. `head_sha` appears
-on nearly every coding message so the server can record branch progress and
-either agent can detect drift.
+on every coding message so the server can record branch progress and either
+agent can detect drift.
+
+The per-task `implement`, `review_fix`, and `final` payloads carry **only**
+`head_sha`. There is no `verdict`, `notes`, or `comment` field — Codex's
+review judgment is expressed as commits, not prose. This is the v3 rule
+that removes the channel Claude used to puppeteer the review.
 
 | Topic | Sender | Payload | Notes |
 |---|---|---|---|
 | `task_list` | `claude` | `{"plan_hash","base_sha","head_sha","tasks":[{"id","title","acceptance":[...]}]}` | `plan_hash` must equal `final_plan_hash`; `tasks` must be non-empty and strictly ordered by `id`; each task requires ≥1 `acceptance` entry. |
-| `implement` | `claude` | `{"head_sha"}` | Harness has pushed the commit before sending. |
-| `review` (v2) | `codex` | `{"head_sha"}` | In `CodeReviewPending` only. |
-| `verdict` | `claude` | `{"head_sha","verdict":"agree"\|"disagree_with_reasons"}` | |
-| `comment` | `codex` | `{"head_sha"}` | In `CodeDebatePending`. Full rebuttal lives in the content (free text alongside `head_sha`). |
-| `final` (v2) | `claude` | `{"head_sha"}` | In `CodeFinalPending` only. |
-| `review_local` | `claude` | `{"head_sha"}` | |
-| `review_global` | `codex` | `{"head_sha","verdict":"agree"\|"disagree_with_reasons"}` | |
-| `verdict_global` | `claude` | `{"head_sha","verdict":...}` | |
-| `comment_global` | `codex` | `{"head_sha"}` | |
-| `final_review` | `claude` | `{"head_sha"}` | |
-| `pr_opened` | `claude` | `{"head_sha","pr_url"}` | |
+| `implement` | `claude` | `{"head_sha"}` | Harness has pushed the commit before sending. Payload carries only `head_sha` — no notes, no guidance for Codex. |
+| `review_fix` | `codex` | `{"head_sha"}` | In `CodeReviewFixPending` only. Codex has already pushed fixes (or a no-op commit if clean). |
+| `final` (v3) | `claude` | `{"head_sha"}` | In `CodeFinalPending` only. Advances the task. |
+| `review_local` | `claude` | `{"head_sha"}` | Post-ultrareview, before handing to Codex for the global pass. |
+| `review_fix_global` | `codex` | `{"head_sha"}` | In `CodeReviewFixGlobalPending` only. Codex has pushed any branch-level fixes. |
+| `final_review` | `claude` | `{"head_sha","pr_url"}` | In `CodeReviewFinalPending` only. Claude has opened the PR; the event carries the URL and advances directly to `CodingComplete`. `pr_url` must start with `https://` and be ≤2048 chars. |
 | `failure_report` | either | `{"coding_failure":"<reason>"}` | Valid in any coding-active phase. |
 
 ### Phase → Topic Acceptance
 
-The server dispatches strictly on the current phase. The topic strings
-`review` and `final` are overloaded — their semantics depend on the phase
-at the time of `collab_send`. All other topics map 1:1.
+The server dispatches strictly on the current phase. The topic string
+`final` is overloaded — in `PlanClaudeFinalizePending` it means Claude's
+v1 plan finalization; in `CodeFinalPending` it means Claude's per-task
+final turn. All other topics map 1:1.
 
 | Phase | Accepted topic(s) | Notes |
 |---|---|---|
 | `PlanParallelDrafts` | `draft` | v1 planning |
 | `PlanSynthesisPending` | `canonical` | v1 planning |
-| `PlanReviewPending` | `review` | v1 — Codex review of canonical |
+| `PlanCodexReviewPending` | `review` | v1 — Codex review of canonical |
 | `PlanClaudeFinalizePending` | `final` | v1 — Claude finalizes |
-| `PlanLocked` | `task_list` | v1 → v2 hand-off |
+| `PlanLocked` | `task_list` | v1 → v3 hand-off |
 | `CodeImplementPending` | `implement`, `failure_report` | |
-| `CodeReviewPending` | `review`, `failure_report` | **v2** review, not v1 |
-| `CodeVerdictPending` | `verdict`, `failure_report` | |
-| `CodeDebatePending` | `comment`, `failure_report` | |
-| `CodeFinalPending` | `final`, `failure_report` | **v2** final, not v1 |
+| `CodeReviewFixPending` | `review_fix`, `failure_report` | |
+| `CodeFinalPending` | `final`, `failure_report` | **v3** per-task final, not v1 |
 | `CodeReviewLocalPending` | `review_local`, `failure_report` | |
-| `CodeReviewCodexPending` | `review_global`, `failure_report` | |
-| `CodeReviewVerdictPending` | `verdict_global`, `failure_report` | |
-| `CodeReviewDebatePending` | `comment_global`, `failure_report` | |
+| `CodeReviewFixGlobalPending` | `review_fix_global`, `failure_report` | |
 | `CodeReviewFinalPending` | `final_review`, `failure_report` | |
-| `PrReadyPending` | `pr_opened`, `failure_report` | |
 | `CodingComplete` / `CodingFailed` | *(none — terminal; only `collab_end` accepted)* | |
 
 `failure_report` is accepted from either agent in any coding-active phase
@@ -373,16 +380,20 @@ these things between `wait_my_turn` and `collab_send`:
   the harness reads `last_head_sha` from `collab_status` and runs
   `git cat-file -e <sha>^{commit}` to verify the commit is present; if not,
   it sends `failure_report` with `coding_failure: "branch_drift: ..."`.
-- **Local gates** before `implement` / `final` / `review_local`:
-  `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace`.
-  Any failure surfaces as `failure_report`; don't try to hide it.
-- **Review tooling** during Codex's `review` and `review_global`:
-  `coderabbit` (or equivalent) plus manual review. Verdicts ride on the
-  `verdict` / `review_global` payloads.
-- **PR creation** during `pr_opened`: `gh pr create --base <base_sha> ...`;
-  capture the URL and include it in the send.
-- **Plan Mode** on Claude's side is entered before `canonical`, `final` (v1),
-  and `final` (v2). Codex never enters Plan Mode.
+- **Local gates** before every Claude-owned coding turn (`implement`,
+  `final`, `review_local`, `final_review`): `cargo fmt --check`,
+  `cargo clippy -D warnings`, `cargo test --workspace`. Any failure
+  surfaces as `failure_report`; don't hide it.
+- **Review + fix tooling** during Codex's `review_fix` and
+  `review_fix_global`: `coderabbit` / `/ultrareview-local` / manual
+  review, followed by direct code edits + commit + push. Codex's
+  judgment is expressed as commits, not prose.
+- **PR creation** during `final_review`: Claude runs `gh pr create
+  --base <base_sha> ...` and sends the URL inline with the `final_review`
+  event. There is no separate `pr_opened` turn.
+- **Plan Mode** on Claude's side is entered before `canonical`, `final`
+  (v1), `task_list` (v3 bridge), and `final_review` (v3 PR creation).
+  Codex never enters Plan Mode.
 
 The server does not shell out, does not read the git tree, and does not
 verify a commit exists — it trusts the harness's `head_sha` string. Drift
@@ -414,24 +425,19 @@ Phase → action (v1):
 | `PlanSynthesisPending` | enter Plan Mode, synthesize `canonical`, send | wait |
 | `PlanCodexReviewPending` | wait | send `review` (or `approve` shortcut) |
 | `PlanClaudeFinalizePending` | enter Plan Mode, send `final` | wait |
-| `PlanLocked` | exit loop (or send `task_list` to start v2) | exit loop |
+| `PlanLocked` | exit loop (or send `task_list` to start v3) | exit loop |
 
-Phase → action (v2):
+Phase → action (v3):
 
 | Phase | Claude does | Codex does |
 |---|---|---|
 | `PlanLocked` (post-final) | verify `base_sha`, build `task_list` JSON, send | wait |
 | `CodeImplementPending` | run gates, commit, push, send `implement` | wait |
-| `CodeReviewPending` | wait | run reviewer tooling, send `review` |
-| `CodeVerdictPending` | send `verdict` (`agree` or `disagree_with_reasons`) | wait |
-| `CodeDebatePending` | wait | send `comment` with rebuttal |
-| `CodeFinalPending` | apply fixes, re-run gates, send `final` | wait |
-| `CodeReviewLocalPending` | run gates once more, send `review_local` | wait |
-| `CodeReviewCodexPending` | wait | run coderabbit, send `review_global` |
-| `CodeReviewVerdictPending` | send `verdict_global` | wait |
-| `CodeReviewDebatePending` | wait | send `comment_global` |
-| `CodeReviewFinalPending` | send `final_review` | wait |
-| `PrReadyPending` | `gh pr create`, send `pr_opened` | wait |
+| `CodeReviewFixPending` | wait | review the diff, fix any issues in place (commit+push), send `review_fix` |
+| `CodeFinalPending` | reset to Codex's HEAD, optionally tweak, re-run gates, send `final` | wait |
+| `CodeReviewLocalPending` | run `/ultrareview-local`, fix HIGH/CRITICAL in place, send `review_local` | wait |
+| `CodeReviewFixGlobalPending` | wait | review full diff, fix branch-level issues in place, send `review_fix_global` |
+| `CodeReviewFinalPending` | gates, enter Plan Mode for PR title/body, `gh pr create`, send `final_review{pr_url}` | wait |
 | `CodingComplete` / `CodingFailed` | exit loop | exit loop |
 
 ### Claude's Plan Mode Integration
@@ -557,6 +563,42 @@ Smoke test without the embed model:
 IRONMEM_MCP_MODE=trusted IRONMEM_EMBED_MODE=noop ./target/release/ironmem serve
 ```
 
+## Codex handoff via MCP
+
+Codex CLI sessions are one-shot: after sending a review and seeing the
+session hand off back to Claude, Codex emits a summary and stops. It has
+no `ScheduleWakeup` primitive to self-wake on the next handoff. Rather
+than relying on an external daemon, Claude drives Codex's turn inline
+via Codex's MCP server (`codex mcp-server`):
+
+1. Register `codex mcp-server` with Claude Code (once):
+   ```bash
+   claude mcp add codex codex mcp-server
+   ```
+2. Claude's `/collab` prompt drives Codex whenever
+   `current_owner == "codex"` (after a Claude send, on `/collab join`
+   mid-session, or in the dispatch loop). **`codex mcp-server` does not
+   resolve slash commands from `.codex-plugin/prompts/`.** Passing a
+   raw `/collab join <sid>` string makes Codex treat it as ordinary
+   user text and go off-script. Claude must expand the prompt locally:
+   read `.codex-plugin/prompts/collab.md`, substitute `$ARGUMENTS` with
+   `join <session_id>`, and call:
+   ```json
+   {
+     "name": "mcp__codex__codex",
+     "arguments": {
+       "prompt": "<resolved prompt text from collab.md>",
+       "cwd": "<repo_path>"
+     }
+   }
+   ```
+   The call blocks until Codex finishes its phase-specific action and
+   hands control back. Claude then resumes the dispatch loop.
+
+This keeps the control loop inside Claude Code — no external daemon, no
+FIFO, no turn-change webhook. If the `codex` MCP server isn't registered,
+the prompt falls back to asking the user to run `/collab join` manually.
+
 ## Validation
 
 ```bash
@@ -579,12 +621,13 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
 
 ## Scope and Limits
 
-Scope (v1 + v2):
+Scope (v1 + v3):
 
-- bounded planning (v1) and bounded coding loop (v2) through a single session
+- bounded planning (v1) and bounded coding loop (v3) through a single session
 - one plan → one task list → one PR per session
-- Claude always gets the last word in both the planning and per-task debates
-- round caps force advance; no indefinite ping-pong
+- v1 planning is 2 review rounds; v3 coding is strictly linear (no rounds)
+- Claude always gets the last word in planning (v1) and at each per-task
+  + global final (v3)
 - long-poll via `wait_my_turn`; agents run autonomously
 
 Out of scope:
