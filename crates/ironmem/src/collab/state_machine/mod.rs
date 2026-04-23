@@ -4,6 +4,23 @@ use super::phase::Phase;
 use super::session::CollabSession;
 use super::BRANCH_DRIFT_PREFIX;
 
+/// Construct a fresh `CollabSession` positioned at the v3 global-review
+/// stage, for the coding-review shortcut. Rejects empty SHAs so the
+/// session never enters the review flow with unset drift-detection state.
+pub fn start_global_review_session(
+    id: &str,
+    base_sha: &str,
+    head_sha: &str,
+) -> Result<CollabSession, CollabError> {
+    if base_sha.is_empty() {
+        return Err(CollabError::MissingBaseSha);
+    }
+    if head_sha.is_empty() {
+        return Err(CollabError::MissingHeadSha);
+    }
+    Ok(CollabSession::new_global_review(id, base_sha, head_sha))
+}
+
 /// Maximum number of review cycles Codex may run on the canonical plan.
 /// After this many reviews, Claude is forced into finalize regardless of the
 /// verdict (she always gets the last word).

@@ -1,6 +1,6 @@
 ---
-description: Start or join an IronRace bounded planning session with Codex, auto-flowing into v3 coding if enabled. Covers v1 planning and v3 per-task linear → global review → PR handoff. Usage — /collab start <task>  |  /collab join <session_id>
-argument-hint: start <task> | join <session_id>
+description: Start or join an IronRace bounded planning session with Codex, auto-flowing into v3 coding if enabled. Covers v1 planning, v3 per-task linear → global review → PR handoff, and the post-subagent review shortcut. Usage — /collab start <task>  |  /collab join <session_id>  |  /collab review <short-topic>
+argument-hint: start <task> | join <session_id> | review <short-topic>
 ---
 
 <!-- DERIVED FROM docs/COLLAB.md — protocol changes must update:
@@ -50,6 +50,41 @@ branch names.
    the MCP tool (see "Codex handoff — synchronous MCP invocation"). After
    the plan locks (`PlanLocked`), the session automatically flows into
    the v3 coding bridge (no separate invocation needed).
+
+## `review <short-topic>`
+
+Shortcut entry for post-subagent-driven-development flows: skip v1
+planning and v3 per-task coding, and drop straight into the v3 global-review
+stage with Codex as the reviewer on the already-committed branch.
+Everything except the short topic is inferred — never ask the user for
+paths, branches, or SHAs.
+
+1. Resolve defaults:
+   - `repo_path` ← output of `git rev-parse --show-toplevel`.
+   - `branch` ← output of `git branch --show-current`. If the result is
+     empty (detached HEAD) or equals `main`/`master`/`trunk`, abort with
+     an error message explaining the shortcut requires a feature branch.
+   - `head_sha` ← output of `git rev-parse HEAD`.
+   - `base_sha` ← output of `git merge-base origin/main HEAD` (fall back
+     to `origin/master` if that fails, then `origin/trunk`). Abort if all
+     three fail with a message asking the user to set an upstream.
+   - `initiator` ← `"claude"`.
+   - `task` ← the remainder of `$ARGUMENTS` after the word `review`.
+2. Call `mcp__ironmem__collab_start_code_review` with
+   `{repo_path, branch, base_sha, head_sha, initiator, task}`.
+3. Report the session id back as a single line:
+
+   ```
+   Collab review session started: <session_id>
+   ```
+
+4. **Do not enter Plan Mode and do not draft anything.** The shortcut
+   positions the session at `CodeReviewFixGlobalPending` — the next action
+   is Codex's review turn, driven inline via `mcp__codex__codex` under
+   the existing "Codex handoff — synchronous MCP invocation" rules.
+5. Enter the v3 dispatch loop at phase `CodeReviewFixGlobalPending`. The
+   loop handles the two remaining turns (`review_fix_global` from Codex,
+   then `final_review` from Claude) and terminates at `CodingComplete`.
 
 ## `join <session_id>`
 
@@ -194,6 +229,12 @@ building the payload:
 After each send in v3, loop back to polling. The loop continues until
 `phase in {CodingComplete, CodingFailed}` or `session_ended`.
 
+**Shortcut entry:** `/collab review` starts the loop at phase
+`CodeReviewFixGlobalPending` with `current_owner == "codex"`. No per-task
+phases are traversed. The only two remaining turns are Codex's
+`review_fix_global` and Claude's `final_review`. All anti-puppeteering
+rules below apply unchanged.
+
 ### Anti-puppeteering rules (v3)
 
 v3 structurally removes the `verdict` and `comment` turns that v2 used,
@@ -311,8 +352,8 @@ then `ScheduleWakeup` and resume polling.
 
 ## Unknown subcommand
 
-If `$ARGUMENTS` does not start with `start` or `join`, tell the user:
+If `$ARGUMENTS` does not start with `start`, `join`, or `review`, tell the user:
 
 ```
-Usage: /collab start <task>  |  /collab join <session_id>
+Usage: /collab start <task>  |  /collab join <session_id>  |  /collab review <short-topic>
 ```

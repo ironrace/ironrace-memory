@@ -17,7 +17,8 @@ mod shared;
 use collab_caps::{handle_collab_get_caps, handle_collab_register_caps};
 use collab_session::{
     handle_collab_ack, handle_collab_approve, handle_collab_end, handle_collab_recv,
-    handle_collab_send, handle_collab_start, handle_collab_status, handle_collab_wait_my_turn,
+    handle_collab_send, handle_collab_start, handle_collab_start_code_review, handle_collab_status,
+    handle_collab_wait_my_turn,
 };
 use diary::{handle_diary_read, handle_diary_write};
 use drawers::{
@@ -213,6 +214,22 @@ pub fn tool_definitions(app: &App) -> Vec<Value> {
             }
         }),
         json!({
+            "name": "collab_start_code_review",
+            "description": "Create a bounded Claude↔Codex review-only session positioned directly at the v3 global-review stage. Codex owns the first turn; initiator must be claude.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo_path": { "type": "string" },
+                    "branch": { "type": "string" },
+                    "base_sha": { "type": "string" },
+                    "head_sha": { "type": "string" },
+                    "initiator": { "type": "string", "enum": ["claude"] },
+                    "task": { "type": "string" }
+                },
+                "required": ["repo_path", "branch", "base_sha", "head_sha", "initiator", "task"]
+            }
+        }),
+        json!({
             "name": "collab_send",
             "description": "Send a collab message and advance the bounded state machine. v1 planning topics: draft, canonical, review, final. v3 coding topics: task_list, implement, review_fix, final, review_local, review_fix_global, final_review, failure_report. Topic final is phase-dispatched (v1 plan finalize vs v3 per-task final chosen by current phase).",
             "inputSchema": {
@@ -373,6 +390,7 @@ pub fn call_tool(app: &App, name: &str, args: &Value) -> Result<Value, MemoryErr
         "diary_write" => handle_diary_write(app, args),
         "diary_read" => handle_diary_read(app, args),
         "collab_start" => handle_collab_start(app, args),
+        "collab_start_code_review" => handle_collab_start_code_review(app, args),
         "collab_send" => handle_collab_send(app, args),
         "collab_recv" => handle_collab_recv(app, args),
         "collab_ack" => handle_collab_ack(app, args),
@@ -411,6 +429,7 @@ fn tool_known(name: &str) -> bool {
             | "diary_write"
             | "diary_read"
             | "collab_start"
+            | "collab_start_code_review"
             | "collab_send"
             | "collab_recv"
             | "collab_ack"
@@ -436,6 +455,7 @@ fn tool_allowed_in_mode(mode: McpAccessMode, name: &str) -> bool {
                 | "kg_invalidate"
                 | "diary_write"
                 | "collab_start"
+                | "collab_start_code_review"
                 | "collab_send"
                 | "collab_ack"
                 | "collab_approve"

@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
+use std::process::Command;
 
 use crate::collab::queue::SessionRecord;
-use crate::collab::{apply_event, CollabError, CollabEvent, Phase};
+use crate::collab::{apply_event, start_global_review_session, CollabError, CollabEvent, Phase};
 use crate::error::MemoryError;
 use crate::mcp::app::App;
 use crate::sanitize;
@@ -142,6 +143,48 @@ pub(super) fn handle_collab_start(app: &App, args: &Value) -> Result<Value, Memo
     Ok(json!({ "session_id": session_id, "task": task }))
 }
 
+pub(super) fn handle_collab_start_code_review(
+    app: &App,
+    args: &Value,
+) -> Result<Value, MemoryError> {
+    let repo_path = require_str(args, "repo_path")?;
+    let branch = require_str(args, "branch")?;
+    let base_sha = require_str(args, "base_sha")?;
+    let head_sha = require_str(args, "head_sha")?;
+    let initiator = require_agent(require_str(args, "initiator")?)?;
+    if initiator != "claude" {
+        return Err(MemoryError::Validation(
+            "initiator must be 'claude' for collab_start_code_review".to_string(),
+        ));
+    }
+    let task = sanitize::sanitize_content(require_str(args, "task")?, MAX_COLLAB_CONTENT_CHARS)?;
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let session = start_global_review_session(&session_id, base_sha, head_sha)
+        .map_err(collab_error_to_memory_error)?;
+
+    app.db.with_transaction(|tx| {
+        crate::collab::queue::create_session(tx, &session_id, repo_path, branch, Some(task))?;
+        crate::collab::queue::save_session(tx, &session)?;
+        crate::db::schema::Database::wal_log_tx(
+            tx,
+            "collab_start_code_review",
+            &json!({
+                "session_id": session_id,
+                "repo_path": repo_path,
+                "branch": branch,
+                "base_sha": base_sha,
+                "head_sha": head_sha,
+                "initiator": initiator,
+                "task": task,
+            }),
+            Some(&json!({ "session_id": session_id })),
+        )?;
+        Ok(())
+    })?;
+
+    Ok(json!({ "session_id": session_id, "task": task }))
+}
+
 pub(super) fn handle_collab_send(app: &App, args: &Value) -> Result<Value, MemoryError> {
     let session_id = require_str(args, "session_id")?;
     let sender = require_agent(require_str(args, "sender")?)?;
@@ -156,7 +199,8 @@ pub(super) fn handle_collab_send(app: &App, args: &Value) -> Result<Value, Memor
 
     app.db.with_transaction(|tx| {
         crate::collab::queue::ensure_active(tx, session_id)?;
-        let mut session = crate::collab::queue::load_session_record(tx, session_id)?.session;
+        let record = crate::collab::queue::load_session_record(tx, session_id)?;
+        let mut session = record.session;
         let phase_before = session.phase.to_string();
 
         // Upstream turn gate: reject sends from the non-owner before any
@@ -182,6 +226,27 @@ pub(super) fn handle_collab_send(app: &App, args: &Value) -> Result<Value, Memor
         }
 
         let event = build_collab_event(topic, content, &session)?;
+        if matches!(
+            (&session.phase, &event),
+            (
+                crate::collab::Phase::CodeReviewFixGlobalPending,
+                crate::collab::CollabEvent::CodeReviewFixGlobal { .. }
+            )
+        ) && session.task_list.is_none()
+        {
+            validate_global_review_head_advance(
+                &record.repo_path,
+                session.last_head_sha.as_deref().ok_or_else(|| {
+                    MemoryError::Validation(
+                        "last_head_sha is missing for CodeReviewFixGlobalPending".to_string(),
+                    )
+                })?,
+                match &event {
+                    crate::collab::CollabEvent::CodeReviewFixGlobal { head_sha } => head_sha,
+                    _ => unreachable!(),
+                },
+            )?;
+        }
 
         session = apply_event(&session, sender, &event).map_err(collab_error_to_memory_error)?;
         crate::collab::queue::save_session(tx, &session)?;
@@ -214,6 +279,49 @@ pub(super) fn handle_collab_send(app: &App, args: &Value) -> Result<Value, Memor
             "phase": session.phase.to_string(),
         }))
     })
+}
+
+fn validate_global_review_head_advance(
+    repo_path: &str,
+    last_head_sha: &str,
+    head_sha: &str,
+) -> Result<(), MemoryError> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path,
+            "merge-base",
+            "--is-ancestor",
+            last_head_sha,
+            head_sha,
+        ])
+        .output()
+        .map_err(|err| {
+            MemoryError::Validation(format!(
+                "git ancestry validation failed: unable to execute git: {err}"
+            ))
+        })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    if output.status.code() == Some(1) {
+        return Err(MemoryError::Validation(format!(
+            "branch_drift: head_sha {head_sha} is not a descendant of last_head_sha {last_head_sha}"
+        )));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    let detail = if stderr.is_empty() {
+        format!("git exited with status {:?}", output.status.code())
+    } else {
+        stderr.to_string()
+    };
+    Err(MemoryError::Validation(format!(
+        "git ancestry validation failed: {detail}"
+    )))
 }
 
 pub(super) fn handle_collab_recv(app: &App, args: &Value) -> Result<Value, MemoryError> {
