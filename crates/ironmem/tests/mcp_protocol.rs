@@ -7,6 +7,71 @@ use ironmem::mcp::app::App;
 use ironmem::mcp::protocol::JsonRpcRequest;
 use ironmem::mcp::server::dispatch;
 use serde_json::json;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn git(args: &[&str], cwd: &Path) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("git command must run");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git output must be valid utf-8")
+        .trim()
+        .to_string()
+}
+
+fn write_file(path: &Path, contents: &str) {
+    std::fs::write(path, contents).expect("fixture file must be writable");
+}
+
+fn commit_file(cwd: &Path, filename: &str, contents: &str, message: &str) -> String {
+    write_file(&cwd.join(filename), contents);
+    git(&["add", filename], cwd);
+    git(&["commit", "-m", message], cwd);
+    git(&["rev-parse", "HEAD"], cwd)
+}
+
+fn git_repo_fixture() -> (tempfile::TempDir, PathBuf, String, String, String, String) {
+    let temp = tempfile::tempdir().expect("temp repo must be creatable");
+    let repo_path = temp.path().to_path_buf();
+    git(&["init"], &repo_path);
+    git(&["config", "user.name", "Ironmem Test"], &repo_path);
+    git(&["config", "user.email", "ironmem@example.com"], &repo_path);
+
+    let base_sha = commit_file(&repo_path, "branch.txt", "base\n", "base commit");
+    let head_sha = commit_file(
+        &repo_path,
+        "branch.txt",
+        "review start\n",
+        "review start commit",
+    );
+    let descendant_sha = commit_file(
+        &repo_path,
+        "branch.txt",
+        "review fix\n",
+        "review fix commit",
+    );
+
+    git(&["checkout", "-b", "drift", &base_sha], &repo_path);
+    let drift_sha = commit_file(&repo_path, "branch.txt", "drift\n", "drift commit");
+
+    (
+        temp,
+        repo_path,
+        base_sha,
+        head_sha,
+        descendant_sha,
+        drift_sha,
+    )
+}
 
 fn request(method: &str, params: serde_json::Value) -> JsonRpcRequest {
     serde_json::from_value(json!({
@@ -78,6 +143,7 @@ fn tools_list_contains_required_tools() {
         "kg_stats",
         "add_drawer",
         "diary_write",
+        "collab_start_code_review",
     ] {
         assert!(
             names.contains(required),
@@ -596,6 +662,51 @@ fn collab_start_with_task_roundtrips_via_status() {
     assert_eq!(status["task"], "design a landing page");
     assert_eq!(status["review_round"], 0);
     assert!(status["ended_at"].is_null());
+}
+
+#[test]
+fn collab_start_code_review_roundtrips_via_status() {
+    let app = App::open_for_test().unwrap();
+    let started = call_tool(
+        &app,
+        "collab_start_code_review",
+        json!({
+            "repo_path": "/repo",
+            "branch": "feat/landing-page",
+            "base_sha": "abc123",
+            "head_sha": "def456",
+            "initiator": "claude",
+            "task": "review landing page branch"
+        }),
+    );
+    assert_eq!(started["task"], "review landing page branch");
+    let session_id = started["session_id"].as_str().unwrap();
+
+    let status = call_tool(&app, "collab_status", json!({ "session_id": session_id }));
+    assert_eq!(status["task"], "review landing page branch");
+    assert_eq!(status["phase"], "CodeReviewFixGlobalPending");
+    assert_eq!(status["current_owner"], "codex");
+    assert_eq!(status["base_sha"], "abc123");
+    assert_eq!(status["last_head_sha"], "def456");
+    assert!(status["task_list"].is_null());
+}
+
+#[test]
+fn collab_start_code_review_rejects_codex_initiator() {
+    let app = App::open_for_test().unwrap();
+    let error = call_tool_expect_error(
+        &app,
+        "collab_start_code_review",
+        json!({
+            "repo_path": "/repo",
+            "branch": "feat/landing-page",
+            "base_sha": "abc123",
+            "head_sha": "def456",
+            "initiator": "codex",
+            "task": "review landing page branch"
+        }),
+    );
+    assert!(error.contains("initiator must be 'claude'"));
 }
 
 #[test]
@@ -1196,6 +1307,227 @@ fn collab_v2_failure_report_transitions_to_coding_failed() {
         json!({ "session_id": session_id, "agent": "claude" }),
     );
     assert_eq!(ended["ok"], true);
+}
+
+#[test]
+fn collab_start_code_review_happy_path_reaches_coding_complete() {
+    let app = App::open_for_test().unwrap();
+    let (_temp, repo_path, base_sha, head_sha, descendant_sha, _drift_sha) = git_repo_fixture();
+    let started = call_tool(
+        &app,
+        "collab_start_code_review",
+        json!({
+            "repo_path": repo_path,
+            "branch": "feat/review-shortcut",
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "initiator": "claude",
+            "task": "review completed branch"
+        }),
+    );
+    let session_id = started["session_id"].as_str().unwrap();
+
+    let wait = call_tool(
+        &app,
+        "collab_wait_my_turn",
+        json!({ "session_id": session_id, "agent": "codex", "timeout_secs": 1 }),
+    );
+    assert_eq!(wait["phase"], "CodeReviewFixGlobalPending");
+    assert_eq!(wait["is_my_turn"], true);
+
+    call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "codex",
+            "topic": "review_fix_global",
+            "content": json!({ "head_sha": descendant_sha }).to_string()
+        }),
+    );
+    let status = call_tool(&app, "collab_status", json!({ "session_id": session_id }));
+    assert_eq!(status["phase"], "CodeReviewFinalPending");
+    assert_eq!(status["last_head_sha"], descendant_sha);
+
+    call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "final_review",
+            "content": json!({ "head_sha": descendant_sha, "pr_url": "https://example/pr/42" }).to_string()
+        }),
+    );
+    let status = call_tool(&app, "collab_status", json!({ "session_id": session_id }));
+    assert_eq!(status["phase"], "CodingComplete");
+    assert_eq!(status["pr_url"], "https://example/pr/42");
+}
+
+#[test]
+fn collab_start_code_review_end_rejected_during_active_review() {
+    let app = App::open_for_test().unwrap();
+    let started = call_tool(
+        &app,
+        "collab_start_code_review",
+        json!({
+            "repo_path": "/repo",
+            "branch": "feat/review-shortcut",
+            "base_sha": "base0",
+            "head_sha": "head0",
+            "initiator": "claude",
+            "task": "review completed branch"
+        }),
+    );
+    let session_id = started["session_id"].as_str().unwrap();
+
+    let blocked = call_tool_expect_error(
+        &app,
+        "collab_end",
+        json!({ "session_id": session_id, "agent": "claude" }),
+    );
+    assert!(blocked.contains("active phase CodeReviewFixGlobalPending"));
+}
+
+#[test]
+fn collab_start_code_review_failure_report_reaches_coding_failed() {
+    let app = App::open_for_test().unwrap();
+    let started = call_tool(
+        &app,
+        "collab_start_code_review",
+        json!({
+            "repo_path": "/repo",
+            "branch": "feat/review-shortcut",
+            "base_sha": "base0",
+            "head_sha": "head0",
+            "initiator": "claude",
+            "task": "review completed branch"
+        }),
+    );
+    let session_id = started["session_id"].as_str().unwrap();
+
+    call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "codex",
+            "topic": "failure_report",
+            "content": json!({ "coding_failure": "branch_drift: expected=head0 got=headX" }).to_string()
+        }),
+    );
+    let status = call_tool(&app, "collab_status", json!({ "session_id": session_id }));
+    assert_eq!(status["phase"], "CodingFailed");
+    assert!(status["coding_failure"]
+        .as_str()
+        .unwrap_or("")
+        .contains("branch_drift"));
+}
+
+#[test]
+fn collab_start_code_review_accepts_descendant_head_and_rejects_end_in_final_review() {
+    let app = App::open_for_test().unwrap();
+    let (_temp, repo_path, base_sha, head_sha, descendant_sha, _drift_sha) = git_repo_fixture();
+
+    let started = call_tool(
+        &app,
+        "collab_start_code_review",
+        json!({
+            "repo_path": repo_path,
+            "branch": "feat/review-shortcut",
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "initiator": "claude",
+            "task": "review completed branch"
+        }),
+    );
+    let session_id = started["session_id"].as_str().unwrap();
+
+    call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "codex",
+            "topic": "review_fix_global",
+            "content": json!({ "head_sha": descendant_sha }).to_string()
+        }),
+    );
+    let status = call_tool(&app, "collab_status", json!({ "session_id": session_id }));
+    assert_eq!(status["phase"], "CodeReviewFinalPending");
+    assert_eq!(status["current_owner"], "claude");
+    assert_eq!(status["last_head_sha"], descendant_sha);
+
+    let blocked = call_tool_expect_error(
+        &app,
+        "collab_end",
+        json!({ "session_id": session_id, "agent": "claude" }),
+    );
+    assert!(blocked.contains("active phase CodeReviewFinalPending"));
+}
+
+#[test]
+fn collab_start_code_review_rejects_non_descendant_head() {
+    let app = App::open_for_test().unwrap();
+    let (_temp, repo_path, base_sha, head_sha, _descendant_sha, drift_sha) = git_repo_fixture();
+
+    let started = call_tool(
+        &app,
+        "collab_start_code_review",
+        json!({
+            "repo_path": repo_path,
+            "branch": "feat/review-shortcut",
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "initiator": "claude",
+            "task": "review completed branch"
+        }),
+    );
+    let session_id = started["session_id"].as_str().unwrap();
+
+    let blocked = call_tool_expect_error(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "codex",
+            "topic": "review_fix_global",
+            "content": json!({ "head_sha": drift_sha }).to_string()
+        }),
+    );
+    assert!(blocked.contains("branch_drift"));
+    assert!(blocked.contains("last_head_sha"));
+}
+
+#[test]
+fn collab_start_code_review_operational_git_failure_is_not_branch_drift() {
+    let app = App::open_for_test().unwrap();
+    let started = call_tool(
+        &app,
+        "collab_start_code_review",
+        json!({
+            "repo_path": "/definitely/not/a/repo",
+            "branch": "feat/review-shortcut",
+            "base_sha": "abc123",
+            "head_sha": "def456",
+            "initiator": "claude",
+            "task": "review completed branch"
+        }),
+    );
+    let session_id = started["session_id"].as_str().unwrap();
+
+    let blocked = call_tool_expect_error(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "codex",
+            "topic": "review_fix_global",
+            "content": json!({ "head_sha": "def457" }).to_string()
+        }),
+    );
+    assert!(blocked.contains("git ancestry validation failed"));
+    assert!(!blocked.contains("branch_drift"));
 }
 
 #[test]

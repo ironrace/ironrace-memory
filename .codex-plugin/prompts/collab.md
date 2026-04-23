@@ -170,6 +170,22 @@ before building the payload:
 After one successful send, exit. Claude will re-invoke `/collab join`
 via its Codex MCP tool when the session needs you again.
 
+### Shortcut-entered sessions (post-subagent review)
+
+A session may be created via `collab_start_code_review` and land directly
+at `CodeReviewFixGlobalPending` with `current_owner == "codex"`. When
+Codex joins such a session:
+
+- `task_list`, `final_plan_hash`, and planning-phase fields will all be
+  null in `collab_status`.
+- `base_sha` and `last_head_sha` will be set — use them for branch-drift
+  detection exactly as in a full-flow global review.
+- Codex's next turn is `review_fix_global`; after that, Claude's
+  `final_review` closes out the session. No earlier phases are reachable
+  from a shortcut session.
+
+All existing v3 anti-puppeteering rules apply unchanged.
+
 ## Invariants — do not violate
 
 - **Never** call `ironmem_collab_end` during an active phase:

@@ -527,6 +527,79 @@ fn test_code_review_fix_global_wrong_sender_rejected() {
     assert!(matches!(err, CollabError::NotYourTurn { .. }));
 }
 
+#[test]
+fn start_global_review_session_seeds_codex_owned_review_phase() {
+    let session = start_global_review_session("s1", "basesha", "headsha").unwrap();
+    assert_eq!(session.id, "s1");
+    assert_eq!(session.phase, Phase::CodeReviewFixGlobalPending);
+    assert_eq!(session.current_owner, "codex");
+    assert_eq!(session.base_sha.as_deref(), Some("basesha"));
+    assert_eq!(session.last_head_sha.as_deref(), Some("headsha"));
+    assert!(session.task_list.is_none());
+    assert!(session.current_task_index.is_none());
+    assert!(session.final_plan_hash.is_none());
+    assert_eq!(session.review_round, 0);
+}
+
+#[test]
+fn start_global_review_session_rejects_empty_base_sha() {
+    let err = start_global_review_session("s1", "", "headsha").unwrap_err();
+    assert!(matches!(err, CollabError::MissingBaseSha));
+}
+
+#[test]
+fn start_global_review_session_rejects_empty_head_sha() {
+    let err = start_global_review_session("s1", "basesha", "").unwrap_err();
+    assert!(matches!(err, CollabError::MissingHeadSha));
+}
+
+#[test]
+fn start_global_review_session_flows_into_final_review() {
+    let session = start_global_review_session("s1", "basesha", "h0").unwrap();
+
+    let after_codex = apply_event(
+        &session,
+        "codex",
+        &CollabEvent::CodeReviewFixGlobal {
+            head_sha: "h1".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(after_codex.phase, Phase::CodeReviewFinalPending);
+    assert_eq!(after_codex.current_owner, "claude");
+
+    let after_claude = apply_event(
+        &after_codex,
+        "claude",
+        &CollabEvent::FinalReview {
+            head_sha: "h1".to_string(),
+            pr_url: "https://github.com/acme/repo/pull/1".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(after_claude.phase, Phase::CodingComplete);
+    assert_eq!(
+        after_claude.pr_url.as_deref(),
+        Some("https://github.com/acme/repo/pull/1")
+    );
+}
+
+#[test]
+fn start_global_review_session_accepts_branch_drift_failure_from_non_owner() {
+    let session = start_global_review_session("s1", "basesha", "h0").unwrap();
+
+    let failed = apply_event(
+        &session,
+        "claude",
+        &CollabEvent::FailureReport {
+            coding_failure: "branch_drift: last_head_sha=h0 not found".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(failed.phase, Phase::CodingFailed);
+    assert_eq!(failed.current_owner, "claude");
+}
+
 // ── v3: failure report ───────────────────────────────────────────────
 
 #[test]

@@ -170,6 +170,34 @@ final turn.
 | `CodeReviewFixGlobalPending` | `codex` | `CodeReviewFixGlobal{head_sha}` — Codex reviewed the full branch and (if needed) pushed fixes directly | `CodeReviewFinalPending` |
 | `CodeReviewFinalPending` | `claude` | `FinalReview{head_sha, pr_url}` — Claude opens the PR and sends the URL in the same event | `CodingComplete` (terminal) |
 
+### Shortcut: post-subagent coding review
+
+When an orchestrator already completed the branch's per-task work outside
+Collab, it can skip v1 planning and the v3 per-task phases by calling
+`collab_start_code_review`. The session starts directly at
+`CodeReviewFixGlobalPending` with `current_owner = codex`.
+
+The no-op handshake turn is collapsed: the ordinary full-flow global-review
+path starts with Claude `ReviewLocal{head_sha}`, but the shortcut already
+receives the branch `head_sha` at session creation time. From there, the
+surviving flow is unchanged:
+
+| Phase | Owner | Event | Next |
+|---|---|---|---|
+| `CodeReviewFixGlobalPending` | `codex` | `CodeReviewFixGlobal{head_sha}` | `CodeReviewFinalPending` |
+| `CodeReviewFinalPending` | `claude` | `FinalReview{head_sha, pr_url}` | `CodingComplete` |
+
+Invariants that still apply:
+
+- `collab_end` is rejected during both review phases, same as any other
+  coding-active phase.
+- `failure_report` is the only escape hatch and transitions to
+  `CodingFailed`.
+- Drift detection is special-cased for shortcut-started sessions:
+  the server validates `CodeReviewFixGlobal{head_sha}` with a git
+  ancestry check only when `task_list` is still unset. Full-flow v2
+  sessions keep their existing non-shell-out behavior.
+
 ### Failure + terminal
 
 | Phase | Owner | Event | Next |
@@ -207,6 +235,26 @@ Creates a new session.
 Returns `{ session_id, task }`. The `task` is stored on the session so the
 counterpart agent can read it via `collab_status` without a manual
 paste.
+
+### `collab_start_code_review`
+
+Shortcut entry. Creates a session positioned at `CodeReviewFixGlobalPending`,
+owner `codex`. See the "Shortcut: post-subagent coding review" subsection
+above for the constraints and surviving flow.
+
+```json
+{
+  "repo_path": "/path/to/repo",
+  "branch": "feat/landing-page",
+  "base_sha": "abc123",
+  "head_sha": "def456",
+  "initiator": "claude",
+  "task": "add landing page"
+}
+```
+
+Returns `{ session_id, task }`. The `task` is stored on the session and is
+readable via `collab_status`.
 
 ### `collab_send`
 
@@ -369,10 +417,10 @@ by the owner recorded in the phase table above.
 
 ## Harness-Side Responsibilities
 
-The server is pure: it validates transitions, persists hashes, and routes
-messages. Every shell-level action — git, cargo, gh, coderabbit — is the
-**agent harness's** responsibility. The protocol relies on the harness doing
-these things between `wait_my_turn` and `collab_send`:
+The server validates transitions, persists hashes, and routes messages.
+Most shell-level action — cargo, gh, coderabbit — is the **agent harness's**
+responsibility. The protocol relies on the harness doing these things
+between `wait_my_turn` and `collab_send`:
 
 - **`base_sha` / `head_sha` tracking.** The harness records `base_sha` at
   `task_list` send time (the commit the branch forked from) and the current
@@ -388,6 +436,11 @@ these things between `wait_my_turn` and `collab_send`:
   `review_fix_global`: `coderabbit` / `/ultrareview-local` / manual
   review, followed by direct code edits + commit + push. Codex's
   judgment is expressed as commits, not prose.
+- **Shortcut ancestry validation** during shortcut-started
+  `review_fix_global`: the server shells out narrowly to `git
+  merge-base --is-ancestor` to distinguish a true descendant check from
+  operational git failures, and only applies that validation when
+  `task_list` is still unset.
 - **PR creation** during `final_review`: Claude runs `gh pr create
   --base <base_sha> ...` and sends the URL inline with the `final_review`
   event. There is no separate `pr_opened` turn.
@@ -395,10 +448,12 @@ these things between `wait_my_turn` and `collab_send`:
   (v1), `task_list` (v3 bridge), and `final_review` (v3 PR creation).
   Codex never enters Plan Mode.
 
-The server does not shell out, does not read the git tree, and does not
-verify a commit exists — it trusts the harness's `head_sha` string. Drift
-detection is therefore cooperative: either agent can raise `failure_report`
-as soon as their local verification fails.
+The server does not read the git tree for the full v2 flow, and it still
+trusts the harness's `head_sha` string there. The narrow shortcut-only
+ancestry check is the exception; drift detection in that path is now a
+hybrid responsibility, with the server performing the git ancestor check
+and the harness still responsible for local verification and any
+`failure_report` it emits.
 
 ## Autonomous Planning Loop
 

@@ -24,7 +24,7 @@ pub use error::CollabError;
 pub use event::CollabEvent;
 pub use phase::Phase;
 pub use session::{tasks_count_from_list, CollabSession};
-pub use state_machine::apply_event;
+pub use state_machine::{apply_event, start_global_review_session};
 
 /// Prefix on `coding_failure` that marks a failure as "branch drift" — a
 /// mismatch the non-owner may detect via its own git ops. Drift failures are

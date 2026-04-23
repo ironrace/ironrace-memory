@@ -30,4 +30,7 @@ pub enum CollabError {
 
     #[error("base_sha is required")]
     MissingBaseSha,
+
+    #[error("head_sha is required but missing or empty")]
+    MissingHeadSha,
 }
