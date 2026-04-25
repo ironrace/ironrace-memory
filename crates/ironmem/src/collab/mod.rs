@@ -4,10 +4,12 @@
 //! → `PlanCodexReviewPending` → `PlanClaudeFinalizePending` → `PlanLocked`.
 //!
 //! v3 extends `PlanLocked` with a human-approved coding loop. A single
-//! Claude `task_list` send transitions out of `PlanLocked` into the per-task
-//! 3-phase linear flow (`CodeImplementPending` → `CodeReviewFixPending` →
-//! `CodeFinalPending`); after all tasks, the session enters the global
-//! 3-phase flow (`CodeReviewLocalPending` → `CodeReviewFixGlobalPending` →
+//! Claude `task_list` send transitions out of `PlanLocked` into the batch
+//! implementation phase (`CodeImplementPending`), where Claude orchestrates
+//! per-task subagents (via `superpowers:writing-plans` →
+//! `superpowers:subagent-driven-development`) entirely on its side. A
+//! single `implementation_done` send jumps to the global 3-phase review
+//! flow (`CodeReviewLocalPending` → `CodeReviewFixGlobalPending` →
 //! `CodeReviewFinalPending`) and lands directly in `CodingComplete`
 //! (terminal) on success — the final Claude turn opens the PR and carries
 //! its URL. `CodingFailed` is the unrecoverable-error terminal.

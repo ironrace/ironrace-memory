@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use crate::collab::{CollabEvent, Phase};
+use crate::collab::CollabEvent;
 use crate::error::MemoryError;
 
 use super::shared::sha256_hex;
@@ -16,21 +16,22 @@ const MAX_CODING_FAILURE_CHARS: usize = 2048;
 /// CHECK constraint in migration 005.
 const MAX_PR_URL_CHARS: usize = 2048;
 
-/// Translate a `(topic, content)` send into a `CollabEvent` using the session's
-/// current phase to disambiguate v1/v3-overloaded topics (`final`). Dispatch
-/// is split into v1 planning, phase-overloaded, and v3 coding groups so each
-/// sub-function stays under the file's 50-line function guideline.
-pub(super) fn build_collab_event(
-    topic: &str,
-    content: &str,
-    session: &crate::collab::CollabSession,
-) -> Result<CollabEvent, MemoryError> {
+/// Translate a `(topic, content)` send into a `CollabEvent`. Dispatch is
+/// split into v1 planning and v3 coding groups so each sub-function stays
+/// under the file's 50-line function guideline. Phase disambiguation is no
+/// longer required: v3 batch mode dropped the phase-overloaded `final`
+/// topic, so each topic maps to exactly one event variant.
+pub(super) fn build_collab_event(topic: &str, content: &str) -> Result<CollabEvent, MemoryError> {
     match topic {
         "draft" | "canonical" => build_v1_plan_event(topic, content),
         "review" => build_v1_review_event(content),
-        "final" => build_overloaded_final_event(content, &session.phase),
-        "task_list" | "implement" | "review_fix" | "review_local" | "review_fix_global"
-        | "final_review" | "failure_report" => build_v3_coding_event(topic, content),
+        "final" => build_v1_final_event(content),
+        "task_list"
+        | "implementation_done"
+        | "review_local"
+        | "review_fix_global"
+        | "final_review"
+        | "failure_report" => build_v3_coding_event(topic, content),
         other => Err(MemoryError::Validation(format!(
             "unknown collab topic: {other}"
         ))),
@@ -51,52 +52,36 @@ pub(super) fn build_v1_plan_event(topic: &str, content: &str) -> Result<CollabEv
     }
 }
 
-/// v1 `review` topic — plan-only now. v3 removed the per-task `review` topic
-/// entirely (Codex reviews+fixes in a single `review_fix` send).
+/// v1 `review` topic — plan-only. v3 batch mode has no per-task review topic
+/// (Codex only participates at the global review stage).
 pub(super) fn build_v1_review_event(content: &str) -> Result<CollabEvent, MemoryError> {
     Ok(CollabEvent::SubmitReview {
         verdict: parse_review_verdict(content)?,
     })
 }
 
-/// `final` is shared across v1 plan finalization and v3 per-task finalization.
-/// An explicit phase whitelist picks the right event variant — anything
-/// outside the whitelist is rejected here so the caller gets a clean
-/// `WrongPhase` instead of a cryptic JSON parse error downstream.
-pub(super) fn build_overloaded_final_event(
-    content: &str,
-    phase: &Phase,
-) -> Result<CollabEvent, MemoryError> {
-    match phase {
-        Phase::PlanClaudeFinalizePending => {
-            let plan = parse_final_payload(content)?;
-            Ok(CollabEvent::PublishFinal {
-                content_hash: sha256_hex(&plan),
-            })
-        }
-        Phase::CodeFinalPending => {
-            let head_sha = parse_required_head_sha(content, "final")?;
-            Ok(CollabEvent::CodeFinal { head_sha })
-        }
-        other => Err(MemoryError::Validation(format!(
-            "topic 'final' is not accepted in phase {other}; expected PlanClaudeFinalizePending or CodeFinalPending",
-        ))),
-    }
+/// v1 plan finalization. `final` was previously phase-overloaded (also used
+/// by v3 per-task `CodeFinal`), but v3 batch mode removed that path entirely.
+/// The state machine still rejects `final` outside `PlanClaudeFinalizePending`
+/// via its `WrongPhase` arm — so we no longer need a phase whitelist here.
+pub(super) fn build_v1_final_event(content: &str) -> Result<CollabEvent, MemoryError> {
+    let plan = parse_final_payload(content)?;
+    Ok(CollabEvent::PublishFinal {
+        content_hash: sha256_hex(&plan),
+    })
 }
 
-/// v3 coding topics. Codex's review+fix events carry only `head_sha` — the
-/// post-fix commit Claude pulls for the final phase.
+/// v3 coding topics. Batch mode: Claude orchestrates per-task subagents
+/// inline and signals completion via `implementation_done`; Codex only
+/// participates at the global review stage.
 pub(super) fn build_v3_coding_event(
     topic: &str,
     content: &str,
 ) -> Result<CollabEvent, MemoryError> {
     match topic {
         "task_list" => parse_task_list_event(content),
-        "implement" => Ok(CollabEvent::CodeImplement {
-            head_sha: parse_required_head_sha(content, "implement")?,
-        }),
-        "review_fix" => Ok(CollabEvent::CodeReviewFix {
-            head_sha: parse_required_head_sha(content, "review_fix")?,
+        "implementation_done" => Ok(CollabEvent::ImplementationDone {
+            head_sha: parse_required_head_sha(content, "implementation_done")?,
         }),
         "review_local" => Ok(CollabEvent::ReviewLocal {
             head_sha: parse_required_head_sha(content, "review_local")?,
@@ -170,10 +155,15 @@ pub(super) fn failure_report_is_branch_drift(content: &str) -> bool {
 /// Parse and validate the task_list payload shape. Fails fast on missing
 /// fields, empty task array, missing acceptance criteria, or non-array tasks.
 /// The state machine re-checks plan_hash, base_sha presence, and task count.
+///
+/// Optional `plan_file_path`: if present, must be non-empty, repo-relative
+/// (no leading `/`), and contain no `..` path segments. Persisted on the
+/// session (via the canonicalized `task_list` JSON) so reviewers can locate
+/// the writing-plans markdown that drove subagent execution.
 pub(super) fn parse_task_list_event(content: &str) -> Result<CollabEvent, MemoryError> {
     let payload: Value = serde_json::from_str(content).map_err(|e| {
         MemoryError::Validation(format!(
-            "task_list content must be JSON shaped like {{\"plan_hash\":\"…\",\"base_sha\":\"…\",\"head_sha\":\"…\",\"tasks\":[{{\"id\":1,\"title\":\"…\",\"acceptance\":[\"…\"]}}]}} (parse error: {e})"
+            "task_list content must be JSON shaped like {{\"plan_hash\":\"…\",\"base_sha\":\"…\",\"head_sha\":\"…\",\"plan_file_path\":\"docs/…\",\"tasks\":[{{\"id\":1,\"title\":\"…\",\"acceptance\":[\"…\"]}}]}} (parse error: {e})"
         ))
     })?;
     let plan_hash = payload
@@ -196,6 +186,26 @@ pub(super) fn parse_task_list_event(content: &str) -> Result<CollabEvent, Memory
         .filter(|v| !v.is_empty())
         .ok_or_else(|| MemoryError::Validation("task_list missing non-empty head_sha".to_string()))?
         .to_string();
+    if let Some(raw) = payload.get("plan_file_path") {
+        let path = raw.as_str().ok_or_else(|| {
+            MemoryError::Validation("task_list plan_file_path must be a string".to_string())
+        })?;
+        if path.is_empty() {
+            return Err(MemoryError::Validation(
+                "task_list plan_file_path must be non-empty when present".to_string(),
+            ));
+        }
+        if path.starts_with('/') {
+            return Err(MemoryError::Validation(
+                "task_list plan_file_path must be repo-relative (no leading '/')".to_string(),
+            ));
+        }
+        if path.split('/').any(|seg| seg == "..") {
+            return Err(MemoryError::Validation(
+                "task_list plan_file_path must not contain '..' segments".to_string(),
+            ));
+        }
+    }
     let tasks = payload
         .get("tasks")
         .and_then(Value::as_array)
@@ -323,5 +333,62 @@ mod tests {
         assert!(empty.to_string().contains("non-empty \"empty\" field"));
         let wrong_type = extract_required_str(&payload, "n", "review_fix").unwrap_err();
         assert!(wrong_type.to_string().contains("non-empty \"n\" field"));
+    }
+
+    fn task_list_with_plan_file_path(path: serde_json::Value) -> String {
+        let mut payload = json!({
+            "plan_hash": "h",
+            "base_sha": "b",
+            "head_sha": "head",
+            "tasks": [{ "id": 1, "title": "t", "acceptance": ["ok"] }],
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("plan_file_path".to_string(), path);
+        payload.to_string()
+    }
+
+    #[test]
+    fn task_list_accepts_optional_plan_file_path() {
+        let raw = task_list_with_plan_file_path(json!("docs/superpowers/plans/today-feature.md"));
+        let event = parse_task_list_event(&raw).expect("valid plan_file_path should parse");
+        let CollabEvent::SubmitTaskList { task_list_json, .. } = event else {
+            panic!("expected SubmitTaskList event");
+        };
+        // Canonicalized JSON must round-trip the field so reviewers can find
+        // the markdown plan that drove subagent execution.
+        assert!(
+            task_list_json.contains("docs/superpowers/plans/today-feature.md"),
+            "plan_file_path should be preserved in canonicalized task_list, got: {task_list_json}",
+        );
+    }
+
+    #[test]
+    fn task_list_rejects_non_string_plan_file_path() {
+        let raw = task_list_with_plan_file_path(json!(42));
+        let err = parse_task_list_event(&raw).unwrap_err();
+        assert!(err.to_string().contains("plan_file_path must be a string"));
+    }
+
+    #[test]
+    fn task_list_rejects_empty_plan_file_path() {
+        let raw = task_list_with_plan_file_path(json!(""));
+        let err = parse_task_list_event(&raw).unwrap_err();
+        assert!(err.to_string().contains("plan_file_path must be non-empty"));
+    }
+
+    #[test]
+    fn task_list_rejects_absolute_plan_file_path() {
+        let raw = task_list_with_plan_file_path(json!("/etc/passwd"));
+        let err = parse_task_list_event(&raw).unwrap_err();
+        assert!(err.to_string().contains("repo-relative"));
+    }
+
+    #[test]
+    fn task_list_rejects_dotdot_segment() {
+        let raw = task_list_with_plan_file_path(json!("docs/../../etc/passwd"));
+        let err = parse_task_list_event(&raw).unwrap_err();
+        assert!(err.to_string().contains("'..' segments"));
     }
 }

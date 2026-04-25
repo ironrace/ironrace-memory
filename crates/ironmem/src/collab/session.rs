@@ -15,11 +15,12 @@ pub struct CollabSession {
     pub review_round: u8,
     // v3 coding fields. `tasks_count` is not stored — it is derived from
     // `task_list` via `tasks_count_from_list` so there is a single source of
-    // truth for task cardinality. `task_review_round` and `global_review_round`
-    // are vestigial (v2 held per-task and global verdict cycles; v3 is linear
-    // and never increments them) but remain as columns to avoid a migration.
+    // truth for task cardinality. `task_review_round`, `global_review_round`,
+    // and the DB-only `current_task_index` column are vestigial (v2 held
+    // per-task verdict cycles and a per-task index; v3 batch mode runs all
+    // tasks in a single Claude-driven phase) but remain as columns to avoid
+    // a migration. `current_task_index` is no longer read or written.
     pub task_list: Option<String>,
-    pub current_task_index: Option<u32>,
     pub task_review_round: u8,
     pub global_review_round: u8,
     pub base_sha: Option<String>,
@@ -41,7 +42,6 @@ impl CollabSession {
             codex_review_verdict: None,
             review_round: 0,
             task_list: None,
-            current_task_index: None,
             task_review_round: 0,
             global_review_round: 0,
             base_sha: None,
@@ -73,7 +73,6 @@ impl CollabSession {
             codex_review_verdict: None,
             review_round: 0,
             task_list: None,
-            current_task_index: None,
             task_review_round: 0,
             global_review_round: 0,
             base_sha: Some(base_sha.into()),
@@ -85,34 +84,11 @@ impl CollabSession {
 
     /// Task cardinality derived from the stored `task_list` JSON. Canonical
     /// shape is `{"tasks":[…]}`; any other shape yields `None`. Returns `None`
-    /// when `task_list` is unset (pre-`SubmitTaskList`).
+    /// when `task_list` is unset (pre-`SubmitTaskList`). Used by the MCP
+    /// `collab_status` response for audit visibility — the v3 batch flow does
+    /// not iterate tasks server-side.
     pub fn tasks_count(&self) -> Option<u32> {
         tasks_count_from_list(self.task_list.as_deref())
-    }
-
-    /// Apply the per-task advance rule. Resets `task_review_round` and either
-    /// increments `current_task_index` or transitions into local review.
-    ///
-    /// `task_list` and `current_task_index` are invariants of every
-    /// coding-active phase; if either is missing the state machine has already
-    /// drifted and we panic rather than silently treat it as zero tasks.
-    pub(super) fn advance_task(&mut self) {
-        self.task_review_round = 0;
-        let total = self
-            .tasks_count()
-            .expect("task_list must be set and well-formed in coding-active phase");
-        let current = self
-            .current_task_index
-            .expect("current_task_index must be set in coding-active phase");
-        let next = current.saturating_add(1);
-        if next >= total {
-            self.phase = Phase::CodeReviewLocalPending;
-            self.current_owner = "claude".to_string();
-        } else {
-            self.current_task_index = Some(next);
-            self.phase = Phase::CodeImplementPending;
-            self.current_owner = "claude".to_string();
-        }
     }
 }
 

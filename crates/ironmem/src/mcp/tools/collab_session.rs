@@ -30,7 +30,6 @@ pub(super) fn session_record_json(record: &SessionRecord) -> Value {
         "review_round": record.session.review_round,
         "task_list": record.session.task_list.as_deref(),
         "tasks_count": record.session.tasks_count(),
-        "current_task_index": record.session.current_task_index,
         "task_review_round": record.session.task_review_round,
         "global_review_round": record.session.global_review_round,
         "base_sha": record.session.base_sha.as_deref(),
@@ -55,8 +54,7 @@ pub(super) fn is_known_collab_topic(topic: &str) -> bool {
             | "review"
             | "final"
             | "task_list"
-            | "implement"
-            | "review_fix"
+            | "implementation_done"
             | "review_local"
             | "review_fix_global"
             | "final_review"
@@ -225,7 +223,7 @@ pub(super) fn handle_collab_send(app: &App, args: &Value) -> Result<Value, Memor
             )));
         }
 
-        let event = build_collab_event(topic, content, &session)?;
+        let event = build_collab_event(topic, content)?;
         if matches!(
             (&session.phase, &event),
             (

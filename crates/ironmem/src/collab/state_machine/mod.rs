@@ -151,7 +151,6 @@ pub fn apply_event(
                 return Err(CollabError::MissingBaseSha);
             }
             next.task_list = Some(task_list_json.clone());
-            next.current_task_index = Some(0);
             next.task_review_round = 0;
             next.global_review_round = 0;
             next.base_sha = Some(base_sha.clone());
@@ -159,28 +158,17 @@ pub fn apply_event(
             next.phase = Phase::CodeImplementPending;
             next.current_owner = "claude".to_string();
         }
-        // ── v3: per-task 3-phase linear ───────────────────────────────────
-        // Claude implements → Codex reviews+fixes → Claude final → next task.
-        // No verdict, no debate: Codex writes code directly rather than
-        // handing review notes back for Claude to apply. This both shortens
-        // the loop and removes the `verdict`/`comment` turns where Claude
-        // could steer Codex's conclusion.
-        (Phase::CodeImplementPending, CollabEvent::CodeImplement { head_sha }) => {
+        // ── v3: batch implementation → global review ──────────────────────
+        // Claude orchestrates the per-task subagent run on its side
+        // (superpowers:writing-plans → superpowers:subagent-driven-development).
+        // Codex does not participate per-task; the single transition out of
+        // `CodeImplementPending` jumps straight to global review. Payload
+        // carries only `head_sha` (anti-puppeteering).
+        (Phase::CodeImplementPending, CollabEvent::ImplementationDone { head_sha }) => {
             require_actor(actor, "claude")?;
             next.last_head_sha = Some(head_sha.clone());
-            next.phase = Phase::CodeReviewFixPending;
-            next.current_owner = "codex".to_string();
-        }
-        (Phase::CodeReviewFixPending, CollabEvent::CodeReviewFix { head_sha }) => {
-            require_actor(actor, "codex")?;
-            next.last_head_sha = Some(head_sha.clone());
-            next.phase = Phase::CodeFinalPending;
+            next.phase = Phase::CodeReviewLocalPending;
             next.current_owner = "claude".to_string();
-        }
-        (Phase::CodeFinalPending, CollabEvent::CodeFinal { head_sha }) => {
-            require_actor(actor, "claude")?;
-            next.last_head_sha = Some(head_sha.clone());
-            next.advance_task();
         }
         // ── v3: global review, 3-phase linear ─────────────────────────────
         (Phase::CodeReviewLocalPending, CollabEvent::ReviewLocal { head_sha }) => {

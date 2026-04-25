@@ -1048,24 +1048,19 @@ fn task_list_payload(plan_hash: &str, base_sha: &str, head_sha: &str, n: usize) 
     .to_string()
 }
 
-/// Run implement → review_fix → final, advancing one task (v3 linear).
-fn happy_task_cycle(app: &App, session_id: &str, head: &str) {
-    for (sender, topic) in [
-        ("claude", "implement"),
-        ("codex", "review_fix"),
-        ("claude", "final"),
-    ] {
-        call_tool(
-            app,
-            "collab_send",
-            json!({
-                "session_id": session_id,
-                "sender": sender,
-                "topic": topic,
-                "content": json!({ "head_sha": head }).to_string()
-            }),
-        );
-    }
+/// Send `implementation_done` from Claude, advancing the batch phase to
+/// local review (`CodeReviewLocalPending`).
+fn do_implementation_done(app: &App, session_id: &str, head: &str) {
+    call_tool(
+        app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "implementation_done",
+            "content": json!({ "head_sha": head }).to_string()
+        }),
+    );
 }
 
 #[test]
@@ -1074,7 +1069,8 @@ fn collab_v2_happy_path_reaches_coding_complete() {
     let session_id = drive_to_plan_locked(&app, "final plan text");
     let hash = plan_hash(&app, &session_id);
 
-    // Submit a 2-task list.
+    // Submit a 2-task list — server stores the manifest for audit but
+    // does not iterate it; Claude orchestrates subagents on its side.
     call_tool(
         &app,
         "collab_send",
@@ -1088,17 +1084,13 @@ fn collab_v2_happy_path_reaches_coding_complete() {
     let status = call_tool(&app, "collab_status", json!({ "session_id": &session_id }));
     assert_eq!(status["phase"], "CodeImplementPending");
     assert_eq!(status["tasks_count"], 2);
-    assert_eq!(status["current_task_index"], 0);
     assert_eq!(status["base_sha"], "base0");
 
-    // Task 1 + Task 2 happy path.
-    happy_task_cycle(&app, &session_id, "h1");
-    let status = call_tool(&app, "collab_status", json!({ "session_id": &session_id }));
-    assert_eq!(status["phase"], "CodeImplementPending");
-    assert_eq!(status["current_task_index"], 1);
-    happy_task_cycle(&app, &session_id, "h2");
+    // Single batch send replaces the per-task loop.
+    do_implementation_done(&app, &session_id, "batch_head");
     let status = call_tool(&app, "collab_status", json!({ "session_id": &session_id }));
     assert_eq!(status["phase"], "CodeReviewLocalPending");
+    assert_eq!(status["last_head_sha"], "batch_head");
 
     // Local → global review_fix → final_review (v3 linear, terminal in 3 turns).
     call_tool(
@@ -1152,9 +1144,39 @@ fn collab_v2_happy_path_reaches_coding_complete() {
 }
 
 #[test]
-fn collab_v3_per_task_linear_flow_advances_phases() {
-    // v3: single task → implement (claude) → review_fix (codex) → final (claude)
-    // advances directly to CodeReviewLocalPending. No disagree/debate round.
+fn collab_v3_implementation_done_jumps_to_local_review() {
+    // v3 batch mode: a single `implementation_done` send transitions
+    // `CodeImplementPending` → `CodeReviewLocalPending` with Claude as owner.
+    // No per-task review/fix turns server-side.
+    let app = App::open_for_test().unwrap();
+    let session_id = drive_to_plan_locked(&app, "fp");
+    let hash = plan_hash(&app, &session_id);
+    call_tool(
+        &app,
+        "collab_send",
+        json!({
+            "session_id": session_id,
+            "sender": "claude",
+            "topic": "task_list",
+            "content": task_list_payload(&hash, "b0", "h0", 3)
+        }),
+    );
+    let status = call_tool(&app, "collab_status", json!({ "session_id": &session_id }));
+    assert_eq!(status["phase"], "CodeImplementPending");
+    assert_eq!(status["current_owner"], "claude");
+
+    do_implementation_done(&app, &session_id, "batch_head");
+    let status = call_tool(&app, "collab_status", json!({ "session_id": &session_id }));
+    assert_eq!(status["phase"], "CodeReviewLocalPending");
+    assert_eq!(status["current_owner"], "claude");
+    assert_eq!(status["last_head_sha"], "batch_head");
+}
+
+#[test]
+fn collab_v3_unknown_per_task_topics_rejected() {
+    // The old per-task topics (`implement`, `review_fix`) are no longer
+    // accepted. They must surface a clear "unknown collab topic" error
+    // rather than be silently dispatched.
     let app = App::open_for_test().unwrap();
     let session_id = drive_to_plan_locked(&app, "fp");
     let hash = plan_hash(&app, &session_id);
@@ -1169,12 +1191,8 @@ fn collab_v3_per_task_linear_flow_advances_phases() {
         }),
     );
 
-    for (sender, topic, expected_phase) in [
-        ("claude", "implement", "CodeReviewFixPending"),
-        ("codex", "review_fix", "CodeFinalPending"),
-        ("claude", "final", "CodeReviewLocalPending"),
-    ] {
-        call_tool(
+    for (sender, topic) in [("claude", "implement"), ("codex", "review_fix")] {
+        let err = call_tool_expect_error(
             &app,
             "collab_send",
             json!({
@@ -1184,8 +1202,10 @@ fn collab_v3_per_task_linear_flow_advances_phases() {
                 "content": json!({ "head_sha": "h1" }).to_string()
             }),
         );
-        let status = call_tool(&app, "collab_status", json!({ "session_id": &session_id }));
-        assert_eq!(status["phase"], expected_phase);
+        assert!(
+            err.contains("unknown collab topic"),
+            "expected unknown-topic error for {topic}, got: {err}"
+        );
     }
 }
 
@@ -1215,18 +1235,18 @@ fn collab_v2_end_rejected_in_coding_active_phase() {
         .unwrap_or("")
         .contains("active phase CodeImplementPending"));
 
-    // Session still active — send should work.
+    // Session still active — `implementation_done` should advance it.
     let ok = call_tool(
         &app,
         "collab_send",
         json!({
             "session_id": session_id,
             "sender": "claude",
-            "topic": "implement",
+            "topic": "implementation_done",
             "content": json!({ "head_sha": "h1" }).to_string()
         }),
     );
-    assert_eq!(ok["phase"], "CodeReviewFixPending");
+    assert_eq!(ok["phase"], "CodeReviewLocalPending");
 }
 
 #[test]

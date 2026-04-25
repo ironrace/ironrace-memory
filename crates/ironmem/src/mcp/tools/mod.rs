@@ -231,7 +231,7 @@ pub fn tool_definitions(app: &App) -> Vec<Value> {
         }),
         json!({
             "name": "collab_send",
-            "description": "Send a collab message and advance the bounded state machine. v1 planning topics: draft, canonical, review, final. v3 coding topics: task_list, implement, review_fix, final, review_local, review_fix_global, final_review, failure_report. Topic final is phase-dispatched (v1 plan finalize vs v3 per-task final chosen by current phase).",
+            "description": "Send a collab message and advance the bounded state machine. v1 planning topics: draft, canonical, review, final. v3 coding topics: task_list, implementation_done, review_local, review_fix_global, final_review, failure_report.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

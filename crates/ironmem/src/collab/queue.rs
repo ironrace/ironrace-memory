@@ -103,12 +103,16 @@ pub fn load_session_record(
     conn: &Connection,
     session_id: &str,
 ) -> Result<SessionRecord, MemoryError> {
+    // The `current_task_index` column is intentionally not selected here:
+    // v3 batch mode no longer tracks a per-task index (Claude-side subagents
+    // run all tasks in a single phase). The column remains in the schema
+    // (migration 005) but is unread; new writes set it to NULL.
     conn.query_row(
         "SELECT id, phase, current_owner, repo_path, branch,
                 claude_draft_hash, codex_draft_hash, canonical_plan_hash,
                 final_plan_hash, codex_review_verdict,
                 review_round, task, ended_at,
-                task_list, current_task_index,
+                task_list,
                 task_review_round, global_review_round,
                 base_sha, last_head_sha, pr_url, coding_failure,
                 created_at, updated_at
@@ -127,23 +131,8 @@ pub fn load_session_record(
             let review_round_i: i64 = row.get(10)?;
             let review_round = review_round_i.clamp(0, u8::MAX as i64) as u8;
             let task_list: Option<String> = row.get(13)?;
-            let current_task_index: Option<i64> = row.get(14)?;
-            let current_task_index = current_task_index
-                .map(|i| {
-                    u32::try_from(i).map_err(|_| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            14,
-                            rusqlite::types::Type::Integer,
-                            Box::new(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!("current_task_index out of range: {i}"),
-                            )),
-                        )
-                    })
-                })
-                .transpose()?;
-            let task_review_round_i: i64 = row.get(15)?;
-            let global_review_round_i: i64 = row.get(16)?;
+            let task_review_round_i: i64 = row.get(14)?;
+            let global_review_round_i: i64 = row.get(15)?;
             Ok(SessionRecord {
                 session: CollabSession {
                     id: row.get(0)?,
@@ -156,20 +145,19 @@ pub fn load_session_record(
                     codex_review_verdict: row.get(9)?,
                     review_round,
                     task_list,
-                    current_task_index,
                     task_review_round: task_review_round_i.clamp(0, u8::MAX as i64) as u8,
                     global_review_round: global_review_round_i.clamp(0, u8::MAX as i64) as u8,
-                    base_sha: row.get(17)?,
-                    last_head_sha: row.get(18)?,
-                    pr_url: row.get(19)?,
-                    coding_failure: row.get(20)?,
+                    base_sha: row.get(16)?,
+                    last_head_sha: row.get(17)?,
+                    pr_url: row.get(18)?,
+                    coding_failure: row.get(19)?,
                 },
                 repo_path: row.get(3)?,
                 branch: row.get(4)?,
                 task: row.get(11)?,
                 ended_at: row.get(12)?,
-                created_at: row.get(21)?,
-                updated_at: row.get(22)?,
+                created_at: row.get(20)?,
+                updated_at: row.get(21)?,
             })
         },
     )
@@ -178,6 +166,10 @@ pub fn load_session_record(
 }
 
 pub fn save_session(conn: &Connection, session: &CollabSession) -> Result<(), MemoryError> {
+    // `current_task_index` is set to NULL on every save: v3 batch mode does
+    // not track a per-task index. Keeping the explicit `= NULL` assignment
+    // (rather than dropping the column from UPDATE) ensures any rows
+    // surviving from v2 get nulled out the next time they are touched.
     let updated = conn.execute(
         "UPDATE collab_sessions
          SET phase = ?1,
@@ -189,15 +181,15 @@ pub fn save_session(conn: &Connection, session: &CollabSession) -> Result<(), Me
              codex_review_verdict = ?7,
              review_round = ?8,
              task_list = ?9,
-             current_task_index = ?10,
-             task_review_round = ?11,
-             global_review_round = ?12,
-             base_sha = ?13,
-             last_head_sha = ?14,
-             pr_url = ?15,
-             coding_failure = ?16,
+             current_task_index = NULL,
+             task_review_round = ?10,
+             global_review_round = ?11,
+             base_sha = ?12,
+             last_head_sha = ?13,
+             pr_url = ?14,
+             coding_failure = ?15,
              updated_at = datetime('now')
-        WHERE id = ?17",
+        WHERE id = ?16",
         params![
             session.phase.to_string(),
             session.current_owner.as_str(),
@@ -208,7 +200,6 @@ pub fn save_session(conn: &Connection, session: &CollabSession) -> Result<(), Me
             session.codex_review_verdict.as_deref(),
             session.review_round as i64,
             session.task_list.as_deref(),
-            session.current_task_index.map(|i| i as i64),
             session.task_review_round as i64,
             session.global_review_round as i64,
             session.base_sha.as_deref(),
@@ -546,7 +537,6 @@ mod tests {
         create_session(&db, "sess-v2", "/repo", "main", None).unwrap();
         let mut session = load_session(&db, "sess-v2").unwrap();
         session.task_list = Some(r#"{"plan_hash":"pf","tasks":[{"id":1},{"id":2}]}"#.to_string());
-        session.current_task_index = Some(1);
         session.task_review_round = 1;
         session.global_review_round = 2;
         session.base_sha = Some("abc123".to_string());
@@ -557,7 +547,6 @@ mod tests {
 
         let record = load_session_record(&db, "sess-v2").unwrap();
         let rt = &record.session;
-        assert_eq!(rt.current_task_index, Some(1));
         assert_eq!(rt.task_review_round, 1);
         assert_eq!(rt.global_review_round, 2);
         assert_eq!(rt.base_sha.as_deref(), Some("abc123"));
@@ -574,7 +563,6 @@ mod tests {
         create_session(&db, "sess-fresh", "/repo", "main", None).unwrap();
         let session = load_session(&db, "sess-fresh").unwrap();
         assert!(session.task_list.is_none());
-        assert!(session.current_task_index.is_none());
         assert_eq!(session.task_review_round, 0);
         assert_eq!(session.global_review_round, 0);
         assert!(session.base_sha.is_none());
