@@ -286,10 +286,10 @@ serves as the gate.
         through into the global review loop.
      2. Otherwise, decide based on the failure mode:
         - **Transient (timeout, network, server overload, 5xx)**:
-          re-dispatch by reading `.codex-plugin/prompts/collab.md`
-          again and calling `mcp__codex__codex` once more. Codex
-          will re-enter at `CodeImplementPending`, observe the same
-          `task_list` and `plan_file_path`, and resume the batch.
+          re-dispatch by reading `.codex-plugin/prompts/collab-batch-impl.md`
+          (the slim batch-impl prompt) again and calling `mcp__codex__codex`
+          once more. Codex will re-enter at `CodeImplementPending`, observe
+          the same `task_list` and `plan_file_path`, and resume the batch.
         - **Hard (Codex unregistered, repeated failure, gate
           regression on Codex's side)**: send `failure_report` with
           `sender="claude"`, `topic="failure_report"`,
@@ -386,10 +386,13 @@ remain:
   fields. Codex reads the diff and the writing-plans markdown at
   `plan_file_path` to form its own judgment.
 - When driving Codex via `mcp__codex__codex`, the `prompt` argument is
-  the verbatim expanded `.codex-plugin/prompts/collab.md` with
-  `$ARGUMENTS` substituted. Nothing more. Do not append session
-  context, state summary, or recommendations about what Codex should
-  conclude. See the handoff section below.
+  the verbatim expanded Codex prompt with `$ARGUMENTS` substituted —
+  nothing more. Use `.codex-plugin/prompts/collab-batch-impl.md` for the
+  `CodeImplementPending+codex` turn (slim phase-specific prompt) and
+  `.codex-plugin/prompts/collab.md` for all other Codex-owned phases
+  (v1 planning, global review). Do not append session context, state
+  summary, or recommendations about what Codex should conclude. See the
+  handoff section below.
 - Codex's `review_fix_global` commit stands as its own judgment. If
   Claude disagrees with a fix during `CodeReviewFinalPending`, the right
   response is to amend the code and commit — not to re-litigate in
@@ -452,11 +455,20 @@ Procedure:
    the literal `/collab join <sid>` string would be treated as ordinary
    user text.** So:
 
-   a. Read `.codex-plugin/prompts/collab.md` from the collab repo
-      (`/Users/jeffreycrum/git-repos/ironrace-memory/.codex-plugin/prompts/collab.md`
-      — this repo holds the canonical prompt regardless of the target
-      `repo_path`).
-   b. Substitute `$ARGUMENTS` in that file with `join <session_id>`.
+   a. Select the prompt file based on phase and implementer:
+      - `CodeImplementPending` + `implementer == "codex"` (MCP fallback only —
+        preferred path is background `codex exec`): read
+        `.codex-plugin/prompts/collab-batch-impl.md` (the slim phase-specific
+        prompt — covers only the batch-impl turn so Codex doesn't process
+        unreachable v1/review content).
+      - All other Codex-owned phases (`PlanParallelDrafts`,
+        `PlanCodexReviewPending`, `CodeReviewFixGlobalPending`): read
+        `.codex-plugin/prompts/collab.md`.
+      Both files live at
+      `/Users/jeffreycrum/git-repos/ironrace-memory/.codex-plugin/prompts/`
+      — this repo holds the canonical prompts regardless of the target
+      `repo_path`.
+   b. Substitute `$ARGUMENTS` in the selected file with `join <session_id>`.
    c. Build the `arguments` object:
       - Always include `prompt` (the resolved Codex slash-command text)
         and `cwd` (the session's `repo_path`).
@@ -493,8 +505,8 @@ Procedure:
       Do not pass `model` or any other override — only `config` per the
       matrix. Model swap is intentionally out of scope.
 
-   **The `prompt` argument is the verbatim expanded
-   `.codex-plugin/prompts/collab.md` with `$ARGUMENTS` substituted —
+   **The `prompt` argument is the verbatim expanded Codex prompt file
+   (selected per step 2a above) with `$ARGUMENTS` substituted —
    nothing more.** Do not append, prepend, or inline any session
    context, state summary, recap of Claude's last message, or
    instructions about what Codex should conclude. Codex reads state
@@ -538,9 +550,11 @@ surface real-time progress and detect hangs/failures early.
 
 **Procedure:**
 
-a. Read `.codex-plugin/prompts/collab.md` (from
-   `/Users/jeffreycrum/git-repos/ironrace-memory/.codex-plugin/prompts/collab.md`)
-   and substitute `$ARGUMENTS` with `join <session_id>`. Write the resolved
+a. Read `.codex-plugin/prompts/collab-batch-impl.md` from the collab repo
+   (`/Users/jeffreycrum/git-repos/ironrace-memory/.codex-plugin/prompts/collab-batch-impl.md`
+   — the slim phase-specific prompt; covers only the `CodeImplementPending+codex`
+   turn so Codex doesn't process unreachable v1/review content).
+   Substitute `$ARGUMENTS` with `join <session_id>`. Write the resolved
    prompt to a temp file:
    ```bash
    mkdir -p /tmp/collab-eval && cat > /tmp/codex-prompt-${session_id}.md <<'PROMPT_EOF'

@@ -28,6 +28,11 @@ session record's `implementer` field is `"codex"`.
 
 **Never** call `ironmem_collab_end` during an active phase. See Invariants.
 
+> **Note:** For the `CodeImplementPending` (codex implementer) turn, Claude's
+> dispatcher sends a slim phase-specific prompt at `.codex-plugin/prompts/collab-batch-impl.md`
+> instead of this full file. This file remains canonical for v1 planning,
+> global review, and shortcut sessions.
+
 ## v3 core rule — you write code, not review notes
 
 v3 batch mode gives Codex a single coding turn: **read the full branch
