@@ -133,7 +133,8 @@ if not is_my_turn:
   one more short wait, then either act (if owner flipped) or exit with
   a status line ("not my turn — phase X owner Y"). Do not spin.
 
-recv(session_id, "codex") → ack each message
+recv(session_id, "codex", auto_ack=true)  # atomically acks all returned messages in one round-trip
+# Only fall back to separate collab_ack calls if you need to ack messages selectively.
 act on phase (send exactly one message)
 exit
 ```

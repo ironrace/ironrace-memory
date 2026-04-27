@@ -380,35 +380,49 @@ pub(super) fn handle_collab_recv(app: &App, args: &Value) -> Result<Value, Memor
     let session_id = require_str(args, "session_id")?;
     let receiver = require_agent(require_str(args, "receiver")?)?;
     let limit = (args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize).min(50);
+    let auto_ack = args
+        .get("auto_ack")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
-    // Blind-drafts invariant: during PlanParallelDrafts, an agent must not see
-    // the counterpart's draft until it has submitted its own. This enforces
-    // the "parallel" in parallel drafts at the server boundary so the protocol
-    // doesn't rely on agent-side discipline alone.
-    let session = app.db.collab_load_session(session_id)?;
-    let suppress_drafts = matches!(session.phase, crate::collab::Phase::PlanParallelDrafts)
-        && match receiver {
-            Agent::Claude => session.claude_draft_hash.is_none(),
-            Agent::Codex => session.codex_draft_hash.is_none(),
-        };
+    app.db.with_transaction(|tx| {
+        // Blind-drafts invariant: during PlanParallelDrafts, an agent must not
+        // see the counterpart's draft until it has submitted its own. This
+        // enforces the "parallel" in parallel drafts at the server boundary so
+        // the protocol doesn't rely on agent-side discipline alone.
+        let session = crate::collab::queue::load_session(tx, session_id)?;
+        let suppress_drafts = matches!(session.phase, crate::collab::Phase::PlanParallelDrafts)
+            && match receiver {
+                Agent::Claude => session.claude_draft_hash.is_none(),
+                Agent::Codex => session.codex_draft_hash.is_none(),
+            };
 
-    let messages = app
-        .db
-        .collab_recv_messages(session_id, receiver.as_str(), limit)?;
-    let filtered: Vec<Value> = messages
-        .into_iter()
-        .filter(|message| !(suppress_drafts && message.topic == "draft"))
-        .map(|message| {
-            json!({
-                "id": message.id,
-                "sender": message.sender,
-                "topic": message.topic,
-                "content": message.content,
-                "created_at": message.created_at,
+        let messages =
+            crate::collab::queue::recv_messages(tx, session_id, receiver.as_str(), limit)?;
+        let filtered: Vec<_> = messages
+            .into_iter()
+            .filter(|message| !(suppress_drafts && message.topic == "draft"))
+            .collect();
+
+        if auto_ack && !filtered.is_empty() {
+            let ids: Vec<String> = filtered.iter().map(|m| m.id.clone()).collect();
+            crate::collab::queue::ack_messages_many(tx, session_id, &ids)?;
+        }
+
+        let json_messages: Vec<Value> = filtered
+            .iter()
+            .map(|message| {
+                json!({
+                    "id": message.id,
+                    "sender": message.sender,
+                    "topic": message.topic,
+                    "content": message.content,
+                    "created_at": message.created_at,
+                })
             })
-        })
-        .collect();
-    Ok(json!({ "messages": filtered }))
+            .collect();
+        Ok(json!({ "messages": json_messages }))
+    })
 }
 
 pub(super) fn handle_collab_ack(app: &App, args: &Value) -> Result<Value, MemoryError> {

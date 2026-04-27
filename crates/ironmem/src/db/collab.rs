@@ -70,6 +70,14 @@ impl Database {
         queue::ack_message(&self.conn, session_id, message_id)
     }
 
+    pub fn collab_ack_messages_many(
+        &self,
+        session_id: &str,
+        message_ids: &[String],
+    ) -> Result<usize, MemoryError> {
+        queue::ack_messages_many(&self.conn, session_id, message_ids)
+    }
+
     pub fn collab_register_caps(
         &self,
         session_id: &str,

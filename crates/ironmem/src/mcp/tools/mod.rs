@@ -246,13 +246,14 @@ pub fn tool_definitions(app: &App) -> Vec<Value> {
         }),
         json!({
             "name": "collab_recv",
-            "description": "Read pending collab messages for one agent",
+            "description": "Read pending collab messages for one agent. When auto_ack is true, atomically marks all returned messages as acked in the same transaction, eliminating one round-trip compared to calling collab_ack separately for each message. Default false preserves the existing two-step recv+ack flow.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "session_id": { "type": "string" },
                     "receiver": { "type": "string", "enum": ["claude", "codex"] },
-                    "limit": { "type": "integer", "default": 10 }
+                    "limit": { "type": "integer", "default": 10 },
+                    "auto_ack": { "type": "boolean", "default": false }
                 },
                 "required": ["session_id", "receiver"]
             }

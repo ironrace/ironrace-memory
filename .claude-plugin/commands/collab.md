@@ -134,7 +134,8 @@ loop:
     loop  # re-read status when Codex returns
 
   # current_owner == "claude"
-  recv(session_id, "claude") → ack each message
+  recv(session_id, "claude", auto_ack=true)  # atomically acks all returned messages in one round-trip
+  # Only fall back to separate collab_ack calls if you need to ack messages selectively.
   act on phase (send exactly one message per iteration)
   loop
 ```

@@ -1686,3 +1686,202 @@ fn collab_v2_task_list_rejects_empty_acceptance() {
         .unwrap_or("")
         .contains("acceptance criterion"));
 }
+
+// ── collab_recv auto_ack tests ────────────────────────────────────────────────
+
+/// Helper: start a fresh session and send `count` messages from claude to
+/// codex, returning (session_id, vec_of_message_ids).
+fn setup_session_with_messages(app: &App, count: usize) -> (String, Vec<String>) {
+    let started = call_tool(
+        app,
+        "collab_start",
+        json!({ "repo_path": "/repo", "branch": "main", "initiator": "claude" }),
+    );
+    let session_id = started["session_id"].as_str().unwrap().to_string();
+
+    // Submit claude's draft so the session has pending messages for codex.
+    let mut ids = Vec::new();
+    // We send the first message via collab_send (which also advances state);
+    // then send bare messages directly via the low-level `collab_send` topic
+    // "draft" for the first one.  For a simpler setup we drive through
+    // PlanParallelDrafts and then do extra sends.
+    //
+    // Simpler approach: just send drafts from both sides so the parallel-draft
+    // phase finishes and messages are visible, then query pending messages via
+    // collab_recv. But we want deterministic IDs. Instead we'll use the fact
+    // that after both drafts are submitted the session moves to
+    // PlanSynthesisPending where codex has a pending draft message. We can
+    // also query the recv output to capture the IDs.
+    //
+    // For simplicity: submit both drafts, then read back the IDs from the
+    // first recv (without auto_ack) so we have them for assertions.
+    assert!(count >= 1, "need at least one message for setup");
+
+    call_tool(
+        app,
+        "collab_send",
+        json!({ "session_id": session_id, "sender": "claude", "topic": "draft", "content": "cdraft" }),
+    );
+    // After claude's draft the phase is still PlanParallelDrafts; codex has
+    // no pending messages yet (parallel drafts are blind until codex submits).
+    // Submit codex's draft to unblock visibility.
+    call_tool(
+        app,
+        "collab_send",
+        json!({ "session_id": session_id, "sender": "codex", "topic": "draft", "content": "xdraft" }),
+    );
+    // Now codex can see claude's draft. Collect it.
+    let recv = call_tool(
+        app,
+        "collab_recv",
+        json!({ "session_id": session_id, "receiver": "codex", "limit": 50 }),
+    );
+    for msg in recv["messages"].as_array().unwrap() {
+        ids.push(msg["id"].as_str().unwrap().to_string());
+    }
+    (session_id, ids)
+}
+
+#[test]
+fn recv_auto_ack_true_marks_messages_acked() {
+    let app = App::open_for_test().unwrap();
+    let (session_id, first_ids) = setup_session_with_messages(&app, 1);
+    assert!(
+        !first_ids.is_empty(),
+        "setup must produce at least one message"
+    );
+
+    // First recv without auto_ack to confirm message is visible.
+    let recv1 = call_tool(
+        &app,
+        "collab_recv",
+        json!({ "session_id": session_id, "receiver": "codex", "limit": 50 }),
+    );
+    assert!(
+        !recv1["messages"].as_array().unwrap().is_empty(),
+        "message must be visible before auto_ack"
+    );
+
+    // Recv with auto_ack=true — this atomically marks the messages as acked.
+    let recv2 = call_tool(
+        &app,
+        "collab_recv",
+        json!({ "session_id": session_id, "receiver": "codex", "limit": 50, "auto_ack": true }),
+    );
+    assert!(
+        !recv2["messages"].as_array().unwrap().is_empty(),
+        "auto_ack recv must still return the messages"
+    );
+
+    // Subsequent recv must return nothing — all messages are now acked.
+    let recv3 = call_tool(
+        &app,
+        "collab_recv",
+        json!({ "session_id": session_id, "receiver": "codex", "limit": 50 }),
+    );
+    assert!(
+        recv3["messages"].as_array().unwrap().is_empty(),
+        "no pending messages should remain after auto_ack recv"
+    );
+}
+
+#[test]
+fn recv_auto_ack_false_default_does_not_ack() {
+    let app = App::open_for_test().unwrap();
+    let (session_id, _) = setup_session_with_messages(&app, 1);
+
+    // Recv without auto_ack (default false).
+    let recv1 = call_tool(
+        &app,
+        "collab_recv",
+        json!({ "session_id": session_id, "receiver": "codex", "limit": 50 }),
+    );
+    let count1 = recv1["messages"].as_array().unwrap().len();
+    assert!(count1 > 0, "must have pending messages");
+
+    // Second recv without auto_ack must return the same messages (still pending).
+    let recv2 = call_tool(
+        &app,
+        "collab_recv",
+        json!({ "session_id": session_id, "receiver": "codex", "limit": 50 }),
+    );
+    assert_eq!(
+        recv2["messages"].as_array().unwrap().len(),
+        count1,
+        "messages must still be pending after non-auto_ack recv"
+    );
+}
+
+#[test]
+fn recv_auto_ack_with_limit_only_acks_returned_messages() {
+    // Send 5 draft messages for codex by driving through multiple canonical
+    // sends. For this test we just need multiple unacked messages visible to
+    // codex after both parallel drafts are submitted. We'll accumulate
+    // messages by acking selectively.
+    //
+    // Simpler: after both drafts are submitted, codex has 1 message (claude's
+    // draft). We drive forward to get more: claude sends canonical → codex
+    // reviews → claude sends final → codex has more messages queued.
+    let app = App::open_for_test().unwrap();
+    let started = call_tool(
+        &app,
+        "collab_start",
+        json!({ "repo_path": "/repo", "branch": "main", "initiator": "claude" }),
+    );
+    let session_id = started["session_id"].as_str().unwrap().to_string();
+
+    // Both drafts → PlanSynthesisPending; now codex has 1 pending message.
+    call_tool(
+        &app,
+        "collab_send",
+        json!({ "session_id": session_id, "sender": "claude", "topic": "draft", "content": "cdraft" }),
+    );
+    call_tool(
+        &app,
+        "collab_send",
+        json!({ "session_id": session_id, "sender": "codex", "topic": "draft", "content": "xdraft" }),
+    );
+
+    // Claude sends canonical → codex now has 2 pending messages (draft + canonical).
+    call_tool(
+        &app,
+        "collab_send",
+        json!({ "session_id": session_id, "sender": "claude", "topic": "canonical", "content": "canonical plan" }),
+    );
+
+    // Verify 2 pending messages for codex.
+    let all_recv = call_tool(
+        &app,
+        "collab_recv",
+        json!({ "session_id": session_id, "receiver": "codex", "limit": 50 }),
+    );
+    let total = all_recv["messages"].as_array().unwrap().len();
+    assert!(
+        total >= 2,
+        "need at least 2 messages for this test, got {total}"
+    );
+
+    // Recv with limit=1 and auto_ack=true: only 1 message returned and acked.
+    let limited_recv = call_tool(
+        &app,
+        "collab_recv",
+        json!({ "session_id": session_id, "receiver": "codex", "limit": 1, "auto_ack": true }),
+    );
+    assert_eq!(
+        limited_recv["messages"].as_array().unwrap().len(),
+        1,
+        "limited recv must return exactly 1 message"
+    );
+
+    // The remaining messages (total - 1) must still be pending.
+    let remaining_recv = call_tool(
+        &app,
+        "collab_recv",
+        json!({ "session_id": session_id, "receiver": "codex", "limit": 50 }),
+    );
+    assert_eq!(
+        remaining_recv["messages"].as_array().unwrap().len(),
+        total - 1,
+        "only the returned message should have been acked; others must remain pending"
+    );
+}

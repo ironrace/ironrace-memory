@@ -332,6 +332,35 @@ pub fn ack_message(
     Ok(())
 }
 
+/// Mark a batch of messages as acked in a single UPDATE. All IDs must belong
+/// to `session_id`; any missing ID is silently skipped (idempotent for
+/// already-acked messages). Returns the count of rows actually updated.
+pub fn ack_messages_many(
+    conn: &Connection,
+    session_id: &str,
+    message_ids: &[String],
+) -> Result<usize, MemoryError> {
+    if message_ids.is_empty() {
+        return Ok(0);
+    }
+    // Build a parameterised IN list: `(?1, ?2, …)`. The session_id
+    // occupies slot ?1, message IDs start at ?2.
+    let placeholders: String = (0..message_ids.len())
+        .map(|i| format!("?{}", i + 2))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "UPDATE messages SET status = 'acked' \
+         WHERE session_id = ?1 AND id IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    // Bind session_id as slot 1, then each message_id starting from slot 2.
+    let updated = stmt.execute(rusqlite::params_from_iter(
+        std::iter::once(session_id.to_string()).chain(message_ids.iter().cloned()),
+    ))?;
+    Ok(updated)
+}
+
 pub fn register_caps(
     conn: &Connection,
     session_id: &str,
@@ -601,5 +630,74 @@ mod tests {
         assert!(session.pr_url.is_none());
         assert!(session.coding_failure.is_none());
         assert_eq!(session.tasks_count(), None);
+    }
+
+    // ── ack_messages_many tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_ack_messages_many_marks_all_acked() {
+        let db = open();
+        create_session(&db, "amm-1", "/repo", "main", None, Agent::Claude).unwrap();
+        let m1 = send_message(&db, "amm-1", "claude", "codex", "draft", "msg-a").unwrap();
+        let m2 = send_message(&db, "amm-1", "claude", "codex", "canonical", "msg-b").unwrap();
+
+        let count = ack_messages_many(&db, "amm-1", &[m1.clone(), m2.clone()]).unwrap();
+        assert_eq!(count, 2, "both messages should be updated");
+
+        // A subsequent recv must return nothing — both messages are acked.
+        let remaining = recv_messages(&db, "amm-1", "codex", 10).unwrap();
+        assert!(
+            remaining.is_empty(),
+            "no pending messages should remain after ack_messages_many"
+        );
+    }
+
+    #[test]
+    fn test_ack_messages_many_empty_list_is_noop() {
+        let db = open();
+        create_session(&db, "amm-2", "/repo", "main", None, Agent::Claude).unwrap();
+        send_message(&db, "amm-2", "claude", "codex", "draft", "msg-a").unwrap();
+
+        // Acking an empty list must not touch any rows.
+        let count = ack_messages_many(&db, "amm-2", &[]).unwrap();
+        assert_eq!(count, 0);
+
+        let remaining = recv_messages(&db, "amm-2", "codex", 10).unwrap();
+        assert_eq!(remaining.len(), 1, "message must still be pending");
+    }
+
+    #[test]
+    fn test_ack_messages_many_partial_subset() {
+        let db = open();
+        create_session(&db, "amm-3", "/repo", "main", None, Agent::Claude).unwrap();
+        let m1 = send_message(&db, "amm-3", "claude", "codex", "draft", "first").unwrap();
+        let m2 = send_message(&db, "amm-3", "claude", "codex", "draft", "second").unwrap();
+        let m3 = send_message(&db, "amm-3", "claude", "codex", "draft", "third").unwrap();
+
+        // Ack only the first two; the third must remain pending.
+        let count = ack_messages_many(&db, "amm-3", &[m1, m2]).unwrap();
+        assert_eq!(count, 2);
+
+        let remaining = recv_messages(&db, "amm-3", "codex", 10).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, m3);
+    }
+
+    #[test]
+    fn test_ack_messages_many_wrong_session_skipped() {
+        let db = open();
+        create_session(&db, "amm-4a", "/repo", "main", None, Agent::Claude).unwrap();
+        create_session(&db, "amm-4b", "/repo", "main", None, Agent::Claude).unwrap();
+        let m1 = send_message(&db, "amm-4a", "claude", "codex", "draft", "x").unwrap();
+
+        // Passing the correct message ID but the WRONG session_id: zero rows
+        // updated (no error, but the message is not acked in the correct session).
+        let count = ack_messages_many(&db, "amm-4b", std::slice::from_ref(&m1)).unwrap();
+        assert_eq!(count, 0, "cross-session ack must affect zero rows");
+
+        // Message in the correct session remains unacked.
+        let remaining = recv_messages(&db, "amm-4a", "codex", 10).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, m1);
     }
 }
