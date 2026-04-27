@@ -316,10 +316,10 @@ sequence before building the payload:
    before `review_local` and `final_review` — Codex pushed `review_fix_global`
    right before those phases. Skip reset before `task_list` and
    `implementation_done` — Claude is the only writer in those phases.
-4. Run local gates:
+4. Run local gates (pre-work — fmt + clippy only):
    - `cargo fmt --all -- --check`
    - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-   - `cargo test --workspace`
+   - **No pre-work `cargo test --workspace`.** The receiver just reset to `last_head_sha`, which is the sender-gated commit (every send is post-gated by the sender's harness). Re-running tests on a known-green tree is duplicate work. Branch-drift is already caught at step 2 (`git cat-file -e`). The post-work gate immediately before this turn's `collab_send` runs the full test suite (see step 4 there) — that's where test execution lives.
 5. On any gate failure, send `failure_report` with concrete error message
    (no silent retry). Include the exact error output.
 6. Otherwise, proceed to the phase-specific action below.
