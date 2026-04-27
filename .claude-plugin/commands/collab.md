@@ -285,7 +285,8 @@ serves as the gate.
      `coding_failure: "subagent_failure: <task id>: <concrete reason>"`
      and exit the loop.
 8. **On full success in Claude-implementer mode:** run the pre-send
-   harness once (fetch, fmt --check, clippy -D warnings, test --workspace).
+   harness once (fetch, fmt --check, clippy -D warnings), then run
+   `cargo test --workspace` as the post-work gate.
    On gate failure, send `failure_report`. On green, send
    `implementation_done` with `{"head_sha":"<current HEAD>"}`. Session
    advances to `CodeReviewLocalPending`. (In Codex-implementer mode
@@ -319,7 +320,7 @@ sequence before building the payload:
 4. Run local gates (pre-work — fmt + clippy only):
    - `cargo fmt --all -- --check`
    - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-   - **No pre-work `cargo test --workspace`.** The receiver just reset to `last_head_sha`, which is the sender-gated commit (every send is post-gated by the sender's harness). Re-running tests on a known-green tree is duplicate work. Branch-drift is already caught at step 2 (`git cat-file -e`). The post-work gate immediately before this turn's `collab_send` runs the full test suite (see step 4 there) — that's where test execution lives.
+   - **No pre-work `cargo test --workspace`.** The receiver just reset to `last_head_sha`, which is the sender-gated commit (every send is post-gated by the sender's harness). Re-running tests on a known-green tree is duplicate work. Branch-drift is already caught at step 2 (`git cat-file -e`). The post-work gate immediately before this turn's `collab_send` runs the full test suite — that's where test execution lives.
 5. On any gate failure, send `failure_report` with concrete error message
    (no silent retry). Include the exact error output.
 6. Otherwise, proceed to the phase-specific action below.
