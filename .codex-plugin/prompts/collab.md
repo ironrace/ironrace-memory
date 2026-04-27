@@ -190,6 +190,16 @@ before building the payload:
    pre-PR re-run-gates step).
 7. Proceed to the phase-specific action below.
 
+**Fast path:** Before running steps 3–5, check if the working tree is already correct:
+- `git rev-parse HEAD` equals `last_head_sha`, AND
+- `git rev-parse --abbrev-ref HEAD` equals the session `branch`.
+
+If both hold, skip steps 3 (`git fetch`), 5 (`git checkout` + `git reset --hard`)
+entirely. Step 4 (`git cat-file -e`) still runs as a sanity check (it will pass
+because HEAD already exists locally). This avoids a network round-trip and a
+working-tree reset on the common case where Codex is already at the right SHA
+(e.g., immediate batch-impl start after a fresh `task_list` send).
+
 | Phase | What to do (is_my_turn == true) |
 |---|---|
 | `CodeImplementPending` | Owner depends on `implementer`. If `implementer == "claude"`, this is Claude's batch turn — exit. If `implementer == "codex"`, run the batch implementation action below. |
@@ -215,16 +225,19 @@ own the batch phase. Claude has already published `task_list` with
 4. **Hard stop at the boundary before
    `finishing-a-development-branch`.** That sub-skill prompts the user
    for merge/PR/cleanup, which would create a PR outside the collab
-   protocol and collide with the `final_review` turn. Two guards:
-   (a) tell `subagent-driven-development`'s controller loop explicitly
+   protocol and collide with the `final_review` turn. Tell
+   `subagent-driven-development`'s controller loop explicitly:
    "stop after the last task is implemented, reviewed, and committed;
    do not invoke `finishing-a-development-branch`" — the controller
-   honors that direction; (b) before sending `implementation_done`,
-   verify no PR was opened on this branch:
-   `gh pr list --head <branch> --json number --jq 'length'` must
-   return `0`. If it returns ≥1, send `failure_report` with
-   `coding_failure: "skill_overran_pr_boundary: <pr_number>"` and
-   exit — the protocol invariant has been violated.
+   honors that direction.
+
+   **Codex must not create or check for PRs.** Do NOT call
+   `gh pr create`, `gh pr list`, `git ls-remote refs/pull/*`, or any
+   other PR-related GitHub API operation. Claude owns PR creation
+   (during `final_review`) and is responsible for any PR-boundary
+   sanity check. Skipping these calls also removes Codex's
+   dependency on `api.github.com` reachability for the batch turn,
+   which the smoke run on session 991d3b49 surfaced as a fragility.
 5. Run final gates (project-appropriate: `cargo test`, `pytest`, etc).
    On gate failure or any unrecoverable subagent failure, send
    `failure_report` with `coding_failure: "subagent_failure: <reason>"`
