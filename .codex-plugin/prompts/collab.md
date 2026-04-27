@@ -173,15 +173,17 @@ before building the payload:
 5. `git checkout <branch>` and `git reset --hard <last_head_sha>` so your
    working copy matches what Claude last pushed.
 6. **No pre-work test command.** The receiver just reset to `last_head_sha`,
-   which is the sender's post-work-gated commit (every send is post-gated
-   by the sender's harness). Re-running tests on a known-green tree is
-   duplicate work. Branch-drift was already caught in step 4
-   (`git cat-file -e`). Post-work tests live in the phase-specific action
-   below — for `CodeReviewFixGlobalPending`, run the project's test
-   command after any fixes are applied, immediately before the outgoing
-   `collab_send`; for `CodeImplementPending` (codex implementer), the
-   post-work gate is step 5 of the "Batch implementation
-   (codex-implementer)" sub-section ("Run final gates ...").
+   which is the sender's post-work-gated commit (the protocol invariant:
+   every coding-active `collab_send` is preceded on the *sending* side by
+   a full gate run — the receiver does not need to re-test). Re-running
+   tests on a known-green tree is duplicate work. Branch-drift is caught
+   at step 4 (`git cat-file -e`). For `CodeImplementPending` (codex
+   implementer), the sender-side post-work gate is step 5 of the "Batch
+   implementation (codex-implementer)" sub-section ("Run final gates ...").
+   For `CodeReviewFixGlobalPending`, the table row defines the action
+   directly; Codex's commit+push completes the turn and the next test
+   run lives on the receiving Claude side (in the `CodeReviewFinalPending`
+   pre-PR re-run-gates step).
 7. Proceed to the phase-specific action below.
 
 | Phase | What to do (is_my_turn == true) |
