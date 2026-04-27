@@ -312,7 +312,11 @@ sequence before building the payload:
 2. `git fetch` + `git cat-file -e <last_head_sha>^{commit}` — if the commit
    is missing locally after fetch, send `failure_report` with
    `coding_failure: "branch_drift: last_head_sha=<sha> not found in local repo"`
-   and exit the loop (do not retry silently).
+   and exit the loop (do not retry silently). **Skip the `git fetch`** (keep
+   the `git cat-file -e` check) before `task_list` and `implementation_done`
+   sends — Claude is the only writer in those phases (same condition as
+   the reset-skip in step 3), so there's nothing for Codex to have pushed
+   that needs syncing. The cat-file check still catches local-tree drift.
 3. **Reset only when Codex just pushed.** Run `git reset --hard <last_head_sha>`
    before `review_local` and `final_review` — Codex pushed `review_fix_global`
    right before those phases. Skip reset before `task_list` and

@@ -166,6 +166,10 @@ before building the payload:
    `repo_path`, and `task_list`.
 2. `cd` to `repo_path` (the session's target repo — may not be your cwd).
 3. `git fetch` the session `branch` so `last_head_sha` is locally visible.
+   **Skip the fetch** when `phase == "CodeImplementPending"` and you're
+   entering the batch turn for the first time — Claude's `task_list` send
+   doesn't push commits, so there's nothing new to sync. The cat-file
+   check in step 4 still runs and still catches drift.
 4. `git cat-file -e <last_head_sha>^{commit}` — if the commit is missing,
    send `failure_report` with `coding_failure` containing
    `"branch_drift: last_head_sha=<sha> not found in local repo"` and exit
