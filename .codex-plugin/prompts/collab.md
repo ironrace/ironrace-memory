@@ -214,6 +214,56 @@ When `phase == "CodeImplementPending"` and `implementer == "codex"`, you
 own the batch phase. Claude has already published `task_list` with
 `plan_file_path` pointing at the writing-plans markdown.
 
+**Execution mode branch.** Read `execution_mode` from
+`collab_status.task_list` — it is also surfaced as the top-level
+`execution_mode` field in `collab_status` so you do not need to
+re-parse the JSON blob yourself. Branch immediately:
+
+---
+
+#### Path A — `execution_mode == "mechanical_direct"`
+
+This path applies when `collab_status.execution_mode == "mechanical_direct"`.
+It is for single-task plans whose steps are verbatim bash/code blocks
+requiring no design judgment. Skip `subagent-driven-development` entirely.
+
+1. Run the pre-send harness (steps 1–7 of "v3 Dispatch Loop"), but skip
+   the test command in step 6 — there's no prior commit to validate yet
+   beyond what Claude pushed at `last_head_sha`.
+2. Read the markdown plan from `plan_file_path` (resolved relative to
+   `repo_path`). There is exactly one task (`### Task 1`).
+3. Apply each numbered step in `### Task 1` directly — **do NOT invoke
+   `subagent-driven-development`, do NOT call `spawn_agent`**:
+   - For ` ```bash ` blocks: run them via Bash exactly as written.
+   - For language code blocks (e.g. ` ```rust `, ` ```python `): apply
+     them as file edits at the locations specified in the task's
+     `Files:` block.
+   - For prose steps describing exact text to insert or replace: apply
+     verbatim.
+4. Run the configured gates:
+   - `cargo fmt --all -- --check`
+   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+   - The project test command (e.g. `cargo test --workspace`)
+
+   On any gate failure, send `failure_report` with
+   `coding_failure: "mechanical_direct_gate_failed: <error output>"` and
+   exit. Do not retry silently.
+5. Verify the task's acceptance criteria are met (read them from the
+   `tasks[0].acceptance` array in `collab_status.task_list`).
+6. Commit and push per the task's commit/push instructions in the plan.
+7. Send `collab_send` with `sender="codex"`, `topic="implementation_done"`,
+   `content=<JSON {"head_sha":"<current HEAD after commit>"}>`. Payload
+   carries ONLY `head_sha`.
+8. Exit. The session advances to `CodeReviewLocalPending` with Claude as
+   owner. Skip the `gh pr list` PR-boundary check (Codex never touches PRs).
+
+---
+
+#### Path B — default subagent-driven (absent `execution_mode` or any other value)
+
+This is the existing path. Follow it when `collab_status.execution_mode`
+is `null`/absent (or any value other than `"mechanical_direct"`).
+
 1. Run the pre-send harness (steps 1–7 above), but skip the test command
    in step 6 — there's no prior commit to validate yet beyond what
    Claude pushed at `last_head_sha`.

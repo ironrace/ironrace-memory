@@ -170,6 +170,11 @@ pub(super) fn failure_report_is_off_turn_admissible(content: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Allowed values for `execution_mode` on a `task_list` payload.
+/// Absence means default (subagent-driven). The string `"subagent_driven"` is
+/// intentionally NOT in this set — callers omit the field for the default path.
+const ALLOWED_EXECUTION_MODES: &[&str] = &["mechanical_direct"];
+
 /// Parse and validate the task_list payload shape. Fails fast on missing
 /// fields, empty task array, missing acceptance criteria, or non-array tasks.
 /// The state machine re-checks plan_hash, base_sha presence, and task count.
@@ -178,6 +183,11 @@ pub(super) fn failure_report_is_off_turn_admissible(content: &str) -> bool {
 /// (no leading `/`), and contain no `..` path segments. Persisted on the
 /// session (via the canonicalized `task_list` JSON) so reviewers can locate
 /// the writing-plans markdown that drove subagent execution.
+///
+/// Optional `execution_mode`: if present, must be one of the allowed values in
+/// `ALLOWED_EXECUTION_MODES`. Unknown values are rejected immediately so a
+/// typo in the dispatcher fails at submit time rather than silently defaulting
+/// to subagent-driven behaviour. Absence means the default (subagent-driven).
 pub(super) fn parse_task_list_event(content: &str) -> Result<CollabEvent, MemoryError> {
     let payload: Value = serde_json::from_str(content).map_err(|e| {
         MemoryError::Validation(format!(
@@ -209,6 +219,22 @@ pub(super) fn parse_task_list_event(content: &str) -> Result<CollabEvent, Memory
             MemoryError::Validation("task_list plan_file_path must be a string".to_string())
         })?;
         validate_plan_file_path(path)?;
+    }
+    if let Some(raw) = payload.get("execution_mode") {
+        let mode = raw.as_str().ok_or_else(|| {
+            MemoryError::Validation("task_list execution_mode must be a string".to_string())
+        })?;
+        if !ALLOWED_EXECUTION_MODES.contains(&mode) {
+            return Err(MemoryError::Validation(format!(
+                "task_list execution_mode \"{}\" is not allowed; allowed values: [{}]",
+                mode,
+                ALLOWED_EXECUTION_MODES
+                    .iter()
+                    .map(|v| format!("\"{}\"", v))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )));
+        }
     }
     let tasks = payload
         .get("tasks")
@@ -518,6 +544,80 @@ mod tests {
         };
         assert!(
             task_list_json.contains("docs\\\\plan.md") || task_list_json.contains("docs\\plan")
+        );
+    }
+
+    // ── execution_mode field ──────────────────────────────────────────────────
+
+    fn base_task_list() -> serde_json::Value {
+        json!({
+            "plan_hash": "h",
+            "base_sha": "b",
+            "head_sha": "head",
+            "tasks": [{ "id": 1, "title": "t", "acceptance": ["ok"] }],
+        })
+    }
+
+    #[test]
+    fn task_list_accepts_mechanical_direct() {
+        let mut payload = base_task_list();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("execution_mode".to_string(), json!("mechanical_direct"));
+        let event =
+            parse_task_list_event(&payload.to_string()).expect("mechanical_direct should be valid");
+        let CollabEvent::SubmitTaskList { task_list_json, .. } = event else {
+            panic!("expected SubmitTaskList");
+        };
+        // Field must survive canonicalization so collab_status can return it.
+        assert!(
+            task_list_json.contains("mechanical_direct"),
+            "execution_mode must be preserved in canonical task_list JSON, got: {task_list_json}",
+        );
+    }
+
+    #[test]
+    fn task_list_accepts_omitted_execution_mode_as_default() {
+        // No execution_mode key → should parse successfully (default path).
+        let payload = base_task_list();
+        assert!(
+            !payload.as_object().unwrap().contains_key("execution_mode"),
+            "base_task_list fixture must not include execution_mode"
+        );
+        parse_task_list_event(&payload.to_string())
+            .expect("omitted execution_mode should be accepted as default");
+    }
+
+    #[test]
+    fn task_list_rejects_unknown_execution_mode() {
+        let mut payload = base_task_list();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("execution_mode".to_string(), json!("subagent_driven"));
+        let err = parse_task_list_event(&payload.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("execution_mode"),
+            "error must mention execution_mode, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("not allowed"),
+            "error must say 'not allowed', got: {err}"
+        );
+    }
+
+    #[test]
+    fn task_list_rejects_non_string_execution_mode() {
+        let mut payload = base_task_list();
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("execution_mode".to_string(), json!(42));
+        let err = parse_task_list_event(&payload.to_string()).unwrap_err();
+        assert!(
+            err.to_string().contains("execution_mode must be a string"),
+            "error must say execution_mode must be a string, got: {err}"
         );
     }
 }

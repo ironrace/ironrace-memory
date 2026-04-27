@@ -190,6 +190,22 @@ serves as the gate.
    what success looks like, or the explicit acceptance bullets if the
    skill includes them). If you parse zero tasks, abort with a clear
    error — do not invent a single-task fallback.
+3a. **Detect `mechanical_direct` eligibility.** Before building the
+   `task_list` payload, check ALL of:
+
+   1. The writing-plans markdown produced exactly ONE task (`### Task 1`
+      only — no `### Task 2` or higher heading is present).
+   2. The task's `Files:` block lists one (or zero) files to create or
+      modify.
+   3. The task's steps include at least one ` ```bash ` block OR a
+      ` ```<lang> ` code block with verbatim content meant to be applied
+      as-is (not pseudocode or illustrative snippets).
+   4. No step contains language like "decide", "choose between",
+      "consider alternatives", or other design-judgment cues.
+
+   If ALL four hold, add `"execution_mode": "mechanical_direct"` to the
+   `task_list` payload (step 4 below). Otherwise omit the field entirely
+   (default subagent-driven behavior).
 4. Build `task_list` JSON:
    ```json
    {
@@ -197,12 +213,16 @@ serves as the gate.
      "base_sha": "<current HEAD>",
      "head_sha": "<current HEAD>",
      "plan_file_path": "docs/superpowers/plans/YYYY-MM-DD-<feature>.md",
+     "execution_mode": "mechanical_direct",
      "tasks": [
-       { "id": 1, "title": "...", "acceptance": ["criterion 1"] },
-       ...
+       { "id": 1, "title": "...", "acceptance": ["criterion 1"] }
      ]
    }
    ```
+   Omit `"execution_mode"` when eligibility (step 3a) is not met — the
+   server treats absence as the default subagent-driven path. Do NOT
+   send `"execution_mode": "subagent_driven"` as an explicit value; the
+   server rejects it as an unknown mode.
 5. Call `collab_send(sender="claude", topic="task_list",
    content=<JSON string>)`. Session advances to `CodeImplementPending`.
    The `current_owner` after this transition matches the session's

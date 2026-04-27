@@ -40,6 +40,12 @@ pub(super) fn session_record_json(record: &SessionRecord) -> Value {
         // blob themselves. Returns `None` until `task_list` is sent or
         // when the optional field was omitted.
         "plan_file_path": plan_file_path_from_task_list(record.session.task_list.as_deref()),
+        // `execution_mode` is parsed back out of the canonicalized
+        // `task_list` JSON for the same reason as `plan_file_path`.
+        // Returns `None` when `task_list` is absent, when the field was
+        // omitted (default subagent-driven), or when the payload is
+        // malformed. Consumers treat `None` as the default (subagent-driven).
+        "execution_mode": execution_mode_from_task_list(record.session.task_list.as_deref()),
         "implementer": record.session.implementer.as_str(),
         "task_review_round": record.session.task_review_round,
         "global_review_round": record.session.global_review_round,
@@ -62,6 +68,19 @@ fn plan_file_path_from_task_list(raw: Option<&str>) -> Option<String> {
     let value: Value = serde_json::from_str(raw).ok()?;
     value
         .get("plan_file_path")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Pull `execution_mode` out of a stored `task_list` JSON payload. Returns
+/// `None` when `task_list` is unset, when the field was omitted (default
+/// subagent-driven path), or when the payload is malformed. Consumers treat
+/// `None` the same as the omitted-field default.
+fn execution_mode_from_task_list(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    let value: Value = serde_json::from_str(raw).ok()?;
+    value
+        .get("execution_mode")
         .and_then(Value::as_str)
         .map(str::to_string)
 }
@@ -595,4 +614,82 @@ pub(super) fn handle_collab_end(app: &App, args: &Value) -> Result<Value, Memory
     })?;
 
     Ok(json!({ "ok": true, "session_id": session_id }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collab::queue::SessionRecord;
+    use crate::collab::CollabSession;
+
+    // ── execution_mode_from_task_list ─────────────────────────────────────────
+
+    #[test]
+    fn execution_mode_from_task_list_returns_none_when_absent() {
+        let raw = r#"{"plan_hash":"h","base_sha":"b","head_sha":"x","tasks":[]}"#;
+        assert_eq!(execution_mode_from_task_list(Some(raw)), None);
+    }
+
+    #[test]
+    fn execution_mode_from_task_list_returns_value_when_present() {
+        let raw = r#"{"plan_hash":"h","base_sha":"b","head_sha":"x","execution_mode":"mechanical_direct","tasks":[]}"#;
+        assert_eq!(
+            execution_mode_from_task_list(Some(raw)),
+            Some("mechanical_direct".to_string())
+        );
+    }
+
+    #[test]
+    fn execution_mode_from_task_list_returns_none_for_null_task_list() {
+        assert_eq!(execution_mode_from_task_list(None), None);
+    }
+
+    // ── session_record_json exposes execution_mode ────────────────────────────
+
+    fn make_record(task_list: Option<&str>) -> SessionRecord {
+        let mut session = CollabSession::new("test-session");
+        session.task_list = task_list.map(str::to_string);
+        SessionRecord {
+            session,
+            repo_path: "/tmp/repo".to_string(),
+            branch: "main".to_string(),
+            task: None,
+            ended_at: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn collab_status_returns_execution_mode_when_set() {
+        let task_list_json = r#"{"plan_hash":"h","base_sha":"b","head_sha":"x","execution_mode":"mechanical_direct","tasks":[{"id":1,"title":"t","acceptance":["ok"]}]}"#;
+        let record = make_record(Some(task_list_json));
+        let status = session_record_json(&record);
+        assert_eq!(
+            status["execution_mode"].as_str(),
+            Some("mechanical_direct"),
+            "collab_status must surface execution_mode from canonicalized task_list"
+        );
+    }
+
+    #[test]
+    fn collab_status_returns_null_execution_mode_when_omitted() {
+        let task_list_json = r#"{"plan_hash":"h","base_sha":"b","head_sha":"x","tasks":[{"id":1,"title":"t","acceptance":["ok"]}]}"#;
+        let record = make_record(Some(task_list_json));
+        let status = session_record_json(&record);
+        assert!(
+            status["execution_mode"].is_null(),
+            "collab_status must return null execution_mode when field is absent from task_list"
+        );
+    }
+
+    #[test]
+    fn collab_status_returns_null_execution_mode_when_no_task_list() {
+        let record = make_record(None);
+        let status = session_record_json(&record);
+        assert!(
+            status["execution_mode"].is_null(),
+            "collab_status must return null execution_mode when task_list is not yet set"
+        );
+    }
 }
