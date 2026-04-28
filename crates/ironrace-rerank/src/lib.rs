@@ -5,8 +5,8 @@
 //! wiring it into a search pipeline.
 
 pub mod output;
+pub mod reranker;
 pub mod scorer;
 
+pub use reranker::{model_cache_dir, Reranker};
 pub use scorer::{NoopScorer, RerankerScorer};
-
-// `reranker` module is added in Task 5.
