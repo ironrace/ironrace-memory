@@ -273,8 +273,8 @@ def run_locomo_benchmark(
     }
     if ef_search is not None:
         env["IRONMEM_EF_SEARCH"] = str(ef_search)
-    if rerank == "cross_encoder":
-        env["IRONMEM_RERANK"] = "cross_encoder"
+    if rerank != "none":
+        env["IRONMEM_RERANK"] = rerank
     env["IRONMEM_SHRINKAGE_RERANK"] = "1" if shrinkage == "on" else "0"
 
     client = McpClient(
@@ -452,7 +452,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--rerank",
-        choices=["none", "cross_encoder"],
+        choices=["none", "cross_encoder", "llm_haiku"],
         default="none",
         help="Reranker mode (env: IRONMEM_RERANK)",
     )

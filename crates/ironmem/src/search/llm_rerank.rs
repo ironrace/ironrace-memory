@@ -1,4 +1,7 @@
-//! Optional cross-encoder rerank stage (pipeline step 9).
+//! Optional rerank stage (pipeline step 9). Implementation-agnostic — works
+//! with any `RerankerScorer`. Originally written for an ONNX cross-encoder;
+//! the function name `cross_encoder_rerank` is preserved for git-blame
+//! continuity even though `LlmReranker` is the production scorer today.
 //!
 //! Invariants:
 //!   1. Pre-sort the FULL `scored` vec deterministically (score DESC,

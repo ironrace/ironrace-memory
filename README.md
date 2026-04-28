@@ -159,6 +159,27 @@ Key benchmark flags:
 - Storage is measured after a SQLite WAL `TRUNCATE` checkpoint for a fair comparison
 - Search uses 5x overfetch (minimum 30 candidates) to maintain recall when needle documents are diluted by unrelated context
 
+### LLM rerank (opt-in)
+
+Enable a Claude Haiku rerank pass over the top-K candidates by setting:
+
+```bash
+export IRONMEM_RERANK=llm_haiku
+ironmem serve
+```
+
+| Env var | Default | Effect |
+|---|---|---|
+| `IRONMEM_RERANK` | (unset) | Set to `llm_haiku` to enable the LLM rerank stage. Strict string-enum — `1`/`true` do NOT enable. |
+| `IRONMEM_RERANK_TOP_K` | `20` | How many top candidates feed the reranker. Smaller = faster. |
+| `IRONMEM_LLM_RERANK_MODEL` | `claude-haiku-4-5` | Model alias passed to `claude --model`. |
+| `IRONMEM_LLM_RERANK_TIMEOUT_MS` | `5000` | Wall-clock timeout per rerank call. |
+| `IRONMEM_SHRINKAGE_RERANK` | `1` | Set to `0` to disable the existing lexical shrinkage rerank (eval-only). |
+
+Requires the local `claude` CLI on `PATH` (Claude Code subscription provides auth — no API key needed). On `claude` CLI absent or subprocess error, the search returns the un-reranked candidates and a `WARN` line is logged — graceful degradation, never an error to the caller.
+
+Expected p95 latency with rerank enabled: ~1-3 seconds per query (subprocess startup + Haiku inference). Acceptable for opt-in; off by default.
+
 ## Versioning
 
 This project uses [Semantic Versioning](https://semver.org/). The canonical version is in `crates/ironmem/Cargo.toml`. Plugin JSON files (`.codex-plugin/plugin.json`, `.claude-plugin/plugin.json`) must match this version — enforced by CI. See [CHANGELOG.md](CHANGELOG.md) for release history.

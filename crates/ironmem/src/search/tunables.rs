@@ -128,15 +128,16 @@ pub fn recency_half_life_days() -> f32 {
 
 // ── rerank tunables ──────────────────────────────────────────────────────────
 
-/// `IRONMEM_RERANK=cross_encoder` enables the cross-encoder rerank stage.
+/// `IRONMEM_RERANK=llm_haiku` enables the LLM rerank stage.
+/// `IRONMEM_RERANK=cross_encoder` is also accepted for legacy compatibility
+/// (now routes through the same `LlmReranker` plumbing).
 /// Strict string-enum: any other value (including "1", "true") leaves it OFF.
-/// Reserved for future modes like `llm_haiku`.
 pub fn rerank_enabled() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| {
         matches!(
             std::env::var("IRONMEM_RERANK").as_deref(),
-            Ok("cross_encoder")
+            Ok("cross_encoder") | Ok("llm_haiku")
         )
     })
 }
@@ -153,4 +154,20 @@ pub fn rerank_top_k() -> usize {
 pub fn shrinkage_rerank_enabled() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| env_bool("IRONMEM_SHRINKAGE_RERANK", true))
+}
+
+/// Model alias passed to `claude --model`. Default `"claude-haiku-4-5"`.
+pub fn llm_rerank_model() -> String {
+    static V: OnceLock<String> = OnceLock::new();
+    V.get_or_init(|| {
+        std::env::var("IRONMEM_LLM_RERANK_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string())
+    })
+    .clone()
+}
+
+/// Wall-clock timeout for one `claude -p` subprocess call in milliseconds.
+/// Default 5000 ms. Cap at 60_000 to avoid pathological hangs.
+pub fn llm_rerank_timeout_ms() -> u64 {
+    static V: OnceLock<u64> = OnceLock::new();
+    *V.get_or_init(|| env_usize("IRONMEM_LLM_RERANK_TIMEOUT_MS", 5000).min(60_000) as u64)
 }

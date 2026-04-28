@@ -242,10 +242,11 @@ impl App {
         Ok(())
     }
 
-    /// Lazy-load the production cross-encoder reranker. Called from the
-    /// pipeline on the first search where `tunables::rerank_enabled()` is true
-    /// AND the field is `None`. Failures log + leave the field `None` so we
-    /// degrade to the un-reranked top-K instead of erroring.
+    /// Lazy-construct the production LLM reranker. Called from the pipeline on
+    /// the first search where `tunables::rerank_enabled()` is true AND the field
+    /// is `None`. Construction itself cannot fail — subprocess errors only
+    /// surface on first `score_pairs` call, where the rerank module degrades
+    /// gracefully (logs a `WARN`, returns the un-reranked candidates).
     ///
     /// Wired in from the search pipeline (step 9).
     pub(crate) fn ensure_reranker_loaded(&self) {
@@ -259,16 +260,13 @@ impl App {
         if w.is_some() {
             return; // raced — another thread loaded it
         }
-        match ironrace_rerank::Reranker::new() {
-            Ok(rr) => {
-                *w = Some(Arc::new(rr));
-                tracing::info!("cross-encoder reranker loaded");
-            }
-            Err(e) => {
-                tracing::warn!("cross-encoder reranker load failed: {e}");
-                // leave None — graceful degradation
-            }
-        }
+        let model = crate::search::tunables::llm_rerank_model();
+        let timeout =
+            std::time::Duration::from_millis(crate::search::tunables::llm_rerank_timeout_ms());
+        let client = ironrace_rerank::ClaudeCliClient::new(model.clone(), timeout);
+        let reranker = ironrace_rerank::LlmReranker::new(client);
+        *w = Some(Arc::new(reranker));
+        tracing::info!(model = %model, "LLM reranker loaded");
     }
 
     /// Test-only — production code should use `ensure_reranker_loaded`.

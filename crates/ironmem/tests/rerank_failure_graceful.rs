@@ -46,7 +46,7 @@ fn call(app: &App, tool: &str, args: Value) -> Value {
 
 #[test]
 fn rerank_scorer_error_does_not_fail_search() {
-    std::env::set_var("IRONMEM_RERANK", "cross_encoder");
+    std::env::set_var("IRONMEM_RERANK", "llm_haiku");
 
     let scorer = Arc::new(ErrScorer {
         called: std::sync::atomic::AtomicBool::new(false),
@@ -82,6 +82,6 @@ fn rerank_scorer_error_does_not_fail_search() {
     // graceful-degradation branch is what kept the search alive).
     assert!(
         scorer.called.load(std::sync::atomic::Ordering::SeqCst),
-        "ErrScorer must be invoked when IRONMEM_RERANK=cross_encoder"
+        "ErrScorer must be invoked when IRONMEM_RERANK=llm_haiku"
     );
 }

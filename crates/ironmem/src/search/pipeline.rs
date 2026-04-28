@@ -308,11 +308,11 @@ pub fn search(
         shrinkage_rerank(&mut scored, &rerank_signals);
     }
 
-    // Step 9: Optional cross-encoder rerank.
+    // Step 9: Optional LLM rerank.
     if tunables::rerank_enabled() {
         app.ensure_reranker_loaded();
         if let Some(scorer) = app.reranker.read().unwrap().clone() {
-            crate::search::cross_encoder_rerank::cross_encoder_rerank(
+            crate::search::llm_rerank::cross_encoder_rerank(
                 &scorer,
                 &sanitized.clean_query,
                 &mut scored,
@@ -322,13 +322,13 @@ pub fn search(
 
     // Step 10: Deterministic sort — score desc, then drawer_id asc as tiebreak.
     //
-    // When cross-encoder rerank ran, skip the score-based resort. Cross-encoder
-    // logits (~[-15, +15]) are not commensurable with upstream shrinkage/RRF
-    // scores (~[0, 1]); a mixed sort would let the un-reranked tail's positive
-    // shrinkage scores float above rerank-promoted items with negative logits.
-    // cross_encoder_rerank already sorts [..rerank_top_k] correctly, and the
-    // tail [rerank_top_k..] retains its pre-rerank shrinkage order, so the
-    // current ordering is already what we want.
+    // When the rerank stage ran, skip the score-based resort. Reranker scores
+    // (e.g. LLM logits or cross-encoder logits) are not commensurable with
+    // upstream shrinkage/RRF scores (~[0, 1]); a mixed sort would let the
+    // un-reranked tail's positive shrinkage scores float above rerank-promoted
+    // items. `llm_rerank::cross_encoder_rerank` already sorts [..rerank_top_k]
+    // correctly, and the tail [rerank_top_k..] retains its pre-rerank order,
+    // so the current ordering is already what we want.
     if !tunables::rerank_enabled() {
         scored.sort_by(|a, b| {
             b.score

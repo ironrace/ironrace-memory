@@ -1,4 +1,4 @@
-//! With `IRONMEM_RERANK=cross_encoder` and a deterministic fake scorer,
+//! With `IRONMEM_RERANK=llm_haiku` and a deterministic fake scorer,
 //! the top-K id SET must be invariant (rerank reorders, never drops/adds).
 
 use std::collections::HashSet;
@@ -48,7 +48,7 @@ fn call(app: &App, tool: &str, args: Value) -> Value {
 
 #[test]
 fn rerank_enabled_returns_permutation_of_top_k() {
-    std::env::set_var("IRONMEM_RERANK", "cross_encoder");
+    std::env::set_var("IRONMEM_RERANK", "llm_haiku");
     std::env::set_var("IRONMEM_RERANK_TOP_K", "5");
 
     let scorer = Arc::new(ReverseScorer {
@@ -98,6 +98,6 @@ fn rerank_enabled_returns_permutation_of_top_k() {
     // Scorer must have been called (gating works).
     assert!(
         scorer.called.load(std::sync::atomic::Ordering::SeqCst),
-        "ReverseScorer must be invoked when IRONMEM_RERANK=cross_encoder"
+        "ReverseScorer must be invoked when IRONMEM_RERANK=llm_haiku"
     );
 }
