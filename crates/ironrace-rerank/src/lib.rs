@@ -1,12 +1,13 @@
-//! ironrace-rerank: ONNX cross-encoder reranker.
+//! ironrace-rerank: LLM-based reranker.
 //!
-//! Exposes the `RerankerScorer` trait (implementations: real ONNX `Reranker`
-//! and test-only `NoopScorer`) plus the `Reranker` struct itself for callers
-//! wiring it into a search pipeline.
+//! Exposes the `RerankerScorer` trait (implementations: `LlmReranker` backed by
+//! a `LlmClient`, plus a test-only `NoopScorer`). Production wiring uses
+//! `ClaudeCliClient`; tests use `MockLlmClient`.
 
-pub mod output;
-pub mod reranker;
+pub mod llm_client;
+pub mod llm_reranker;
 pub mod scorer;
 
-pub use reranker::{model_cache_dir, Reranker};
+pub use llm_client::{ClaudeCliClient, LlmClient, MockLlmClient};
+pub use llm_reranker::LlmReranker;
 pub use scorer::{NoopScorer, RerankerScorer};
