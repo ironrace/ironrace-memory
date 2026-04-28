@@ -4,8 +4,9 @@
 //! and test-only `NoopScorer`) plus the `Reranker` struct itself for callers
 //! wiring it into a search pipeline.
 
+pub mod output;
 pub mod scorer;
 
 pub use scorer::{NoopScorer, RerankerScorer};
 
-// `output` and `reranker` modules are added in Tasks 4 and 5 respectively.
+// `reranker` module is added in Task 5.
