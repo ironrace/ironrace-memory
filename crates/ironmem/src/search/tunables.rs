@@ -125,3 +125,32 @@ pub fn recency_half_life_days() -> f32 {
     static V: OnceLock<f32> = OnceLock::new();
     *V.get_or_init(|| env_f32("IRONMEM_RECENCY_HALF_LIFE_DAYS", 30.0))
 }
+
+// ── rerank tunables ──────────────────────────────────────────────────────────
+
+/// `IRONMEM_RERANK=cross_encoder` enables the cross-encoder rerank stage.
+/// Strict string-enum: any other value (including "1", "true") leaves it OFF.
+/// Reserved for future modes like `llm_haiku`.
+pub fn rerank_enabled() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| {
+        matches!(
+            std::env::var("IRONMEM_RERANK").as_deref(),
+            Ok("cross_encoder")
+        )
+    })
+}
+
+/// How many top candidates feed the cross-encoder. Default 20.
+pub fn rerank_top_k() -> usize {
+    static V: OnceLock<usize> = OnceLock::new();
+    *V.get_or_init(|| env_usize("IRONMEM_RERANK_TOP_K", 20))
+}
+
+/// Shrinkage rerank (existing step 8) is on by default. Set
+/// `IRONMEM_SHRINKAGE_RERANK=0` to disable for eval comparisons.
+/// Production default unchanged.
+pub fn shrinkage_rerank_enabled() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| env_bool("IRONMEM_SHRINKAGE_RERANK", true))
+}
