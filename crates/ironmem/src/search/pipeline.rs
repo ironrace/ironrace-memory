@@ -302,10 +302,25 @@ pub fn search(
     kg_boost(&mut scored, &sanitized.clean_query, &kg)?;
 
     // Step 8: Lexical shrinkage rerank (mempalace hybrid-v5 port)
+    // Default ON; disable with IRONMEM_SHRINKAGE_RERANK=0 for eval comparisons.
     let rerank_signals = extract_signals(&sanitized.clean_query);
-    shrinkage_rerank(&mut scored, &rerank_signals);
+    if tunables::shrinkage_rerank_enabled() {
+        shrinkage_rerank(&mut scored, &rerank_signals);
+    }
 
-    // Step 9: Deterministic sort — score desc, then drawer_id asc as tiebreak
+    // Step 9: Optional cross-encoder rerank.
+    if tunables::rerank_enabled() {
+        app.ensure_reranker_loaded();
+        if let Some(scorer) = app.reranker.read().unwrap().clone() {
+            crate::search::cross_encoder_rerank::cross_encoder_rerank(
+                &scorer,
+                &sanitized.clean_query,
+                &mut scored,
+            );
+        }
+    }
+
+    // Step 10: Deterministic sort — score desc, then drawer_id asc as tiebreak
     scored.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)

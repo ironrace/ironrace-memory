@@ -247,9 +247,7 @@ impl App {
     /// AND the field is `None`. Failures log + leave the field `None` so we
     /// degrade to the un-reranked top-K instead of erroring.
     ///
-    /// Wired in from the search pipeline in Task 9 — the `allow(dead_code)`
-    /// suppresses the unused-method warning until then.
-    #[allow(dead_code)]
+    /// Wired in from the search pipeline (step 9).
     pub(crate) fn ensure_reranker_loaded(&self) {
         {
             let r = self.reranker.read().unwrap();
