@@ -5,4 +5,7 @@
 //! wiring it into a search pipeline.
 
 pub mod scorer;
+
+pub use scorer::{NoopScorer, RerankerScorer};
+
 // `output` and `reranker` modules are added in Tasks 4 and 5 respectively.
