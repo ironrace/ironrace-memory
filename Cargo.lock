@@ -1174,7 +1174,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "ureq 2.12.1",
  "uuid",
 ]
 

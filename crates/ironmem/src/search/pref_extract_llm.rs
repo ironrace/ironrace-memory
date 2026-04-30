@@ -91,77 +91,28 @@ pub fn cli_extractor(model: impl Into<String>, timeout: Duration) -> LlmPreferen
     LlmPreferenceExtractor::new(client)
 }
 
-/// Direct HTTP client for the Anthropic Messages API. One in-process HTTPS
-/// call per `LlmClient::call` — no subprocess, no MCP fan-out, no shell. Use
-/// this when running benchmarks or other batch ingest where the per-call
-/// overhead of `claude -p` (claude-code init + nested MCP boot) is
-/// prohibitive.
+/// Build an `AnthropicApiClient`-backed extractor (one in-process HTTPS call
+/// per `extract`, no subprocess fan-out). Reuses the canonical
+/// `ironrace_rerank::AnthropicApiClient` so we have one HTTP client across
+/// rerank and pref-extract.
 ///
-/// Auth: reads the API key from `ANTHROPIC_API_KEY` first, then
-/// `IRONMEM_ANTHROPIC_API_KEY` as a scoped fallback. Returns an error from
-/// `call` (which the extractor treats as "no synth this drawer") when both
-/// are unset.
-pub struct ApiClient {
-    pub model: String,
-    pub max_tokens: u32,
-    pub timeout: Duration,
-}
-
-impl ApiClient {
-    pub fn new(model: impl Into<String>, max_tokens: u32, timeout: Duration) -> Self {
-        Self {
-            model: model.into(),
-            max_tokens,
-            timeout,
-        }
-    }
-}
-
-impl LlmClient for ApiClient {
-    fn call(&self, prompt: &str) -> anyhow::Result<String> {
-        let key = std::env::var("ANTHROPIC_API_KEY")
-            .or_else(|_| std::env::var("IRONMEM_ANTHROPIC_API_KEY"))
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "ANTHROPIC_API_KEY (or IRONMEM_ANTHROPIC_API_KEY) must be set for the api backend"
-                )
-            })?;
-
-        let body = serde_json::json!({
-            "model": self.model,
-            "max_tokens": self.max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
-        });
-
-        let agent = ureq::AgentBuilder::new().timeout(self.timeout).build();
-
-        let resp = agent
-            .post("https://api.anthropic.com/v1/messages")
-            .set("x-api-key", &key)
-            .set("anthropic-version", "2023-06-01")
-            .set("content-type", "application/json")
-            .send_json(body);
-
-        let body_text = match resp {
-            Ok(r) => r.into_string()?,
-            Err(ureq::Error::Status(code, r)) => {
-                let body = r.into_string().unwrap_or_default();
-                anyhow::bail!("anthropic api {code}: {body}");
-            }
-            Err(e) => anyhow::bail!("anthropic api transport: {e}"),
-        };
-        Ok(body_text)
-    }
-}
-
-/// Build an `ApiClient`-backed extractor.
+/// Panics if neither `ANTHROPIC_API_KEY` nor `IRONMEM_ANTHROPIC_API_KEY` is
+/// set — matches `App::ensure_reranker_loaded` for consistency. Misconfig
+/// surfaces immediately rather than silently degrading.
 pub fn api_extractor(
     model: impl Into<String>,
     max_tokens: u32,
     timeout: Duration,
 ) -> LlmPreferenceExtractor {
-    let client: Arc<dyn LlmClient> = Arc::new(ApiClient::new(model, max_tokens, timeout));
-    LlmPreferenceExtractor::new(client)
+    let key = crate::search::tunables::anthropic_api_key().unwrap_or_else(|| {
+        panic!(
+            "IRONMEM_PREF_LLM_BACKEND=api requires ANTHROPIC_API_KEY or \
+             IRONMEM_ANTHROPIC_API_KEY to be set"
+        );
+    });
+    let client =
+        ironrace_rerank::AnthropicApiClient::new(key, model, timeout).with_max_tokens(max_tokens);
+    LlmPreferenceExtractor::new(Arc::new(client))
 }
 
 #[cfg(test)]
