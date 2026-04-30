@@ -78,7 +78,7 @@ fn count_drawers(app: &App) -> usize {
 
 #[test]
 fn enrich_off_inserts_only_one_row() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::remove_var("IRONMEM_PREF_ENRICH");
     let app = App::open_for_test().expect("build app");
     let added = call(
@@ -96,7 +96,7 @@ fn enrich_off_inserts_only_one_row() {
 
 #[test]
 fn enrich_on_inserts_parent_plus_synthetic() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("IRONMEM_PREF_ENRICH", "1");
     let app = App::open_for_test().expect("build app");
     let added = call(
@@ -129,7 +129,7 @@ fn enrich_on_inserts_parent_plus_synthetic() {
 
 #[test]
 fn enrich_on_skips_non_conversational_input() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("IRONMEM_PREF_ENRICH", "1");
     let app = App::open_for_test().expect("build app");
     let rust_source = "fn main() { let x = 42; println!(\"{}\", x); }";

@@ -79,7 +79,15 @@ pub(super) fn handle_add_drawer(app: &App, args: &Value) -> Result<Value, Memory
 
     app.insert_into_index(&id, &embedding)?;
     if let Some((sid, _, semb)) = synth.as_ref() {
-        app.insert_into_index(sid, semb)?;
+        if let Err(e) = app.insert_into_index(sid, semb) {
+            tracing::warn!(
+                error = %e,
+                parent = %id,
+                synth = %sid,
+                "pref_enrich index insert failed; marking dirty for rebuild"
+            );
+            app.mark_dirty();
+        }
     }
 
     Ok(json!({
