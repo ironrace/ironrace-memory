@@ -174,8 +174,27 @@ impl Database {
     }
 
     pub(crate) fn delete_drawer_tx(tx: &Transaction<'_>, id: &str) -> Result<bool, MemoryError> {
+        // Cascade: any synthetic sibling drawer points back via source_file = "pref:<id>".
+        Self::delete_drawers_by_parent_tx(tx, id)?;
         let count = Self::delete_drawer_conn(tx, id)?;
         Ok(count > 0)
+    }
+
+    pub(crate) fn delete_drawers_by_parent_tx(
+        tx: &Transaction<'_>,
+        parent_id: &str,
+    ) -> Result<usize, MemoryError> {
+        let sentinel = format!("pref:{parent_id}");
+        let _ = tx.execute(
+            "DELETE FROM drawers_fts WHERE drawer_id IN \
+             (SELECT id FROM drawers WHERE source_file = ?1)",
+            params![sentinel],
+        );
+        let n = tx.execute(
+            "DELETE FROM drawers WHERE source_file = ?1",
+            params![sentinel],
+        )?;
+        Ok(n)
     }
 
     pub(crate) fn delete_drawers_by_source_file_tx(
