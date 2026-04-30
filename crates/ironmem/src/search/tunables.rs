@@ -171,3 +171,14 @@ pub fn llm_rerank_timeout_ms() -> u64 {
     static V: OnceLock<u64> = OnceLock::new();
     *V.get_or_init(|| env_usize("IRONMEM_LLM_RERANK_TIMEOUT_MS", 5000).min(60_000) as u64)
 }
+
+// ── E5: preference enrichment (off by default) ───────────────────────────────
+
+/// `IRONMEM_PREF_ENRICH=1` enables the synthetic-preference-doc enrichment
+/// at ingest time and the search-pipeline collapse step that hides the
+/// synthetic from results. Default OFF; the LongMemEval bench flips it on
+/// to measure the recall lift on `single-session-preference` questions.
+pub fn pref_enrich_enabled() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| env_bool("IRONMEM_PREF_ENRICH", false))
+}
