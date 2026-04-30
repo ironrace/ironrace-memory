@@ -124,10 +124,15 @@ fn build_synthetic(
     let phrases: Vec<String> = match crate::search::tunables::pref_extractor() {
         "llm" => {
             let timeout = Duration::from_millis(crate::search::tunables::pref_llm_timeout_ms());
-            let extractor = crate::search::pref_extract_llm::cli_extractor(
-                crate::search::tunables::pref_llm_model(),
-                timeout,
-            );
+            let model = crate::search::tunables::pref_llm_model();
+            let extractor = match crate::search::tunables::pref_llm_backend() {
+                "api" => crate::search::pref_extract_llm::api_extractor(
+                    model,
+                    crate::search::tunables::pref_llm_max_tokens(),
+                    timeout,
+                ),
+                _ => crate::search::pref_extract_llm::cli_extractor(model, timeout),
+            };
             extractor.extract(content)
         }
         _ => RegexPreferenceExtractor.extract(content),

@@ -217,3 +217,22 @@ pub fn pref_llm_timeout_ms() -> u64 {
     static V: OnceLock<u64> = OnceLock::new();
     *V.get_or_init(|| env_usize("IRONMEM_PREF_LLM_TIMEOUT_MS", 15_000).min(60_000) as u64)
 }
+
+/// Transport for the LLM preference extractor. `cli` (default) shells out to
+/// `claude -p`; `api` POSTs directly to `api.anthropic.com/v1/messages`. The
+/// API path avoids the heavy claude-code subprocess fan-out (~13s overhead
+/// per call) at the cost of a billable API key.
+pub fn pref_llm_backend() -> &'static str {
+    static V: OnceLock<String> = OnceLock::new();
+    V.get_or_init(|| {
+        std::env::var("IRONMEM_PREF_LLM_BACKEND").unwrap_or_else(|_| "cli".to_string())
+    })
+    .as_str()
+}
+
+/// `max_tokens` for the API backend. Default 200 — enough for the
+/// 1-2 sentence summary prompt with margin. Ignored by the CLI backend.
+pub fn pref_llm_max_tokens() -> u32 {
+    static V: OnceLock<u32> = OnceLock::new();
+    *V.get_or_init(|| env_usize("IRONMEM_PREF_LLM_MAX_TOKENS", 200) as u32)
+}
