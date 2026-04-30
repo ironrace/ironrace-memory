@@ -172,6 +172,48 @@ pub fn llm_rerank_timeout_ms() -> u64 {
     *V.get_or_init(|| env_usize("IRONMEM_LLM_RERANK_TIMEOUT_MS", 5000).min(60_000) as u64)
 }
 
+/// LLM rerank backend. `"cli"` (default) uses the local `claude` CLI and the
+/// user's subscription auth — free per call but ~1-3s of subprocess startup.
+/// `"api"` POSTs directly to `api.anthropic.com/v1/messages` — faster but
+/// bills the API key. Any other value falls back to `"cli"`.
+pub fn llm_rerank_backend() -> &'static str {
+    static V: OnceLock<String> = OnceLock::new();
+    V.get_or_init(|| {
+        std::env::var("IRONMEM_LLM_RERANK_BACKEND").unwrap_or_else(|_| "cli".to_string())
+    })
+    .as_str()
+}
+
+/// `max_tokens` for the Anthropic Messages API call. Default 8 — matches
+/// mempalace's pinned value. The pick-one prompt asks for a bare integer,
+/// and at temperature=0 Haiku emits one directly without preamble. Bumping
+/// this only helps if the model is allowed to ramble first (it isn't, here).
+/// Ignored by the CLI backend (the CLI does not expose this knob).
+pub fn llm_rerank_max_tokens() -> u32 {
+    static V: OnceLock<u32> = OnceLock::new();
+    *V.get_or_init(|| env_usize("IRONMEM_LLM_RERANK_MAX_TOKENS", 8) as u32)
+}
+
+/// Resolve the Anthropic API key for any in-process Anthropic Messages API
+/// call (rerank or pref-extract). Order:
+///   1. `ANTHROPIC_API_KEY` (the standard convention).
+///   2. `IRONMEM_ANTHROPIC_API_KEY` (scoped fallback for users who want to
+///      keep the standard var unset so their `claude` CLI keeps using
+///      subscription auth).
+///
+/// Returns `None` if neither is set; the caller is responsible for hard-failing
+/// when `IRONMEM_LLM_RERANK_BACKEND=api` AND the key is missing.
+pub fn anthropic_api_key() -> Option<String> {
+    static V: OnceLock<Option<String>> = OnceLock::new();
+    V.get_or_init(|| {
+        std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("IRONMEM_ANTHROPIC_API_KEY").ok())
+            .filter(|s| !s.is_empty())
+    })
+    .clone()
+}
+
 // ── E5: preference enrichment (off by default) ───────────────────────────────
 
 /// `IRONMEM_PREF_ENRICH=1` enables the synthetic-preference-doc enrichment

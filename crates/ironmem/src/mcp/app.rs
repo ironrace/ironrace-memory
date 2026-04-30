@@ -263,10 +263,33 @@ impl App {
         let model = crate::search::tunables::llm_rerank_model();
         let timeout =
             std::time::Duration::from_millis(crate::search::tunables::llm_rerank_timeout_ms());
-        let client = ironrace_rerank::ClaudeCliClient::new(model.clone(), timeout);
-        let reranker = ironrace_rerank::LlmReranker::new(client);
-        *w = Some(Arc::new(reranker));
-        tracing::info!(model = %model, "LLM reranker loaded");
+        let backend = crate::search::tunables::llm_rerank_backend();
+
+        // Backend selection: "api" → direct Anthropic Messages API (billed,
+        // requires a key); anything else → local `claude` CLI via subscription
+        // auth (free per call, ~1-3s subprocess startup).
+        match backend {
+            "api" => {
+                let key = crate::search::tunables::anthropic_api_key().unwrap_or_else(|| {
+                    panic!(
+                        "IRONMEM_LLM_RERANK_BACKEND=api requires ANTHROPIC_API_KEY or \
+                         IRONMEM_ANTHROPIC_API_KEY to be set"
+                    );
+                });
+                let max_tokens = crate::search::tunables::llm_rerank_max_tokens();
+                let client = ironrace_rerank::AnthropicApiClient::new(key, model.clone(), timeout)
+                    .with_max_tokens(max_tokens);
+                let reranker = ironrace_rerank::LlmReranker::new(client);
+                *w = Some(Arc::new(reranker));
+                tracing::info!(model = %model, backend = "api", max_tokens, "LLM reranker loaded");
+            }
+            _ => {
+                let client = ironrace_rerank::ClaudeCliClient::new(model.clone(), timeout);
+                let reranker = ironrace_rerank::LlmReranker::new(client);
+                *w = Some(Arc::new(reranker));
+                tracing::info!(model = %model, backend = "cli", "LLM reranker loaded");
+            }
+        }
     }
 
     /// Test-only — production code should use `ensure_reranker_loaded`.
