@@ -6,3 +6,5 @@ pub mod pipeline;
 pub mod rerank;
 pub mod sanitizer;
 pub mod tunables;
+
+pub use pipeline::collapse_synthetic_into_parents;
