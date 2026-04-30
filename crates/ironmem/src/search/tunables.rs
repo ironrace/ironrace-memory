@@ -179,6 +179,11 @@ pub fn llm_rerank_timeout_ms() -> u64 {
 /// synthetic from results. Default OFF; the LongMemEval bench flips it on
 /// to measure the recall lift on `single-session-preference` questions.
 pub fn pref_enrich_enabled() -> bool {
-    static V: OnceLock<bool> = OnceLock::new();
-    *V.get_or_init(|| env_bool("IRONMEM_PREF_ENRICH", false))
+    // Not OnceLock-cached: the integration tests need to flip it per-test.
+    // Runtime cost is one env-var read per add_drawer / search call, which is
+    // negligible vs an embed or HNSW probe.
+    matches!(
+        std::env::var("IRONMEM_PREF_ENRICH").as_deref(),
+        Ok("1") | Ok("true")
+    )
 }

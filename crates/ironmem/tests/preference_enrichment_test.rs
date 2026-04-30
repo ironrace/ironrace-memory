@@ -4,6 +4,12 @@ use ironmem::mcp::app::App;
 use ironmem::mcp::protocol::JsonRpcRequest;
 use ironmem::mcp::server::dispatch;
 use serde_json::{json, Value};
+use std::sync::Mutex;
+
+// Serializes the IRONMEM_PREF_ENRICH-touching tests because the tunable was
+// formerly process-cached. Even after switching to per-call env reads, we
+// keep the mutex to prevent racy interleaving when tests set/unset the var.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn request(method: &str, params: Value) -> JsonRpcRequest {
     serde_json::from_value(json!({
@@ -60,4 +66,80 @@ fn deleting_parent_cascades_to_synthetic_sibling() {
     // Synthetic sibling must be gone too.
     let got = app.db.get_drawer(&synth_id).unwrap();
     assert!(got.is_none(), "synthetic sibling should cascade-delete");
+}
+
+const CONVERSATIONAL_BODY: &str = "I've been having trouble with the battery life on my phone lately. \
+I prefer carrying a small power bank when I travel. Lately, I've been thinking about switching to a \
+phone with a removable battery. I usually plug in overnight.";
+
+fn count_drawers(app: &App) -> usize {
+    app.db.count_drawers(None).unwrap()
+}
+
+#[test]
+fn enrich_off_inserts_only_one_row() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::remove_var("IRONMEM_PREF_ENRICH");
+    let app = App::open_for_test().expect("build app");
+    let added = call(
+        &app,
+        "add_drawer",
+        json!({
+            "content": CONVERSATIONAL_BODY,
+            "wing": "diary",
+            "room": "general"
+        }),
+    );
+    assert_eq!(added["success"], true);
+    assert_eq!(count_drawers(&app), 1);
+}
+
+#[test]
+fn enrich_on_inserts_parent_plus_synthetic() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("IRONMEM_PREF_ENRICH", "1");
+    let app = App::open_for_test().expect("build app");
+    let added = call(
+        &app,
+        "add_drawer",
+        json!({
+            "content": CONVERSATIONAL_BODY,
+            "wing": "diary",
+            "room": "general"
+        }),
+    );
+    assert_eq!(added["success"], true);
+
+    // Two rows: the parent, and a sibling whose source_file is "pref:<parent>".
+    assert_eq!(count_drawers(&app), 2);
+    let parent_id = added["id"].as_str().unwrap();
+    let sentinel = format!("pref:{parent_id}");
+    let siblings = app
+        .db
+        .get_drawers(None, None, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|d| d.source_file == sentinel)
+        .collect::<Vec<_>>();
+    assert_eq!(siblings.len(), 1, "exactly one synthetic sibling");
+    assert!(siblings[0].content.starts_with("User has mentioned: "));
+
+    std::env::remove_var("IRONMEM_PREF_ENRICH");
+}
+
+#[test]
+fn enrich_on_skips_non_conversational_input() {
+    let _g = ENV_LOCK.lock().unwrap();
+    std::env::set_var("IRONMEM_PREF_ENRICH", "1");
+    let app = App::open_for_test().expect("build app");
+    let rust_source = "fn main() { let x = 42; println!(\"{}\", x); }";
+    let added = call(
+        &app,
+        "add_drawer",
+        json!({ "content": rust_source, "wing": "code", "room": "rust" }),
+    );
+    assert_eq!(added["success"], true);
+    assert_eq!(count_drawers(&app), 1, "non-conversational → no sibling");
+
+    std::env::remove_var("IRONMEM_PREF_ENRICH");
 }
