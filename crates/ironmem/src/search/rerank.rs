@@ -484,4 +484,3 @@ mod tests {
         assert!(!token_hit("a clean setup_thing", &m));
     }
 }
-// NOTAFILE2
