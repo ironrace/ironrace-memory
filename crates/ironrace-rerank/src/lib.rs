@@ -8,6 +8,6 @@ pub mod llm_client;
 pub mod llm_reranker;
 pub mod scorer;
 
-pub use llm_client::{ClaudeCliClient, LlmClient, MockLlmClient};
+pub use llm_client::{AnthropicApiClient, ClaudeCliClient, LlmClient, MockLlmClient};
 pub use llm_reranker::LlmReranker;
 pub use scorer::{NoopScorer, RerankerScorer};
