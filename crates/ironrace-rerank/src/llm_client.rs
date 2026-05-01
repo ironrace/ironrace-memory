@@ -101,12 +101,12 @@ impl LlmClient for ClaudeCliClient {
 /// Response is wrapped into the same `{"result": "<text>"}` envelope produced
 /// by `claude -p --output-format json` so callers can share one parser.
 pub struct AnthropicApiClient {
-    pub api_key: String,
-    pub model: String,
-    pub max_tokens: u32,
-    pub timeout: Duration,
+    pub(crate) api_key: String,
+    pub(crate) model: String,
+    pub(crate) max_tokens: u32,
+    pub(crate) timeout: Duration,
     /// Defaults to `https://api.anthropic.com`. Test seam.
-    pub base_url: String,
+    pub(crate) base_url: String,
 }
 
 impl AnthropicApiClient {
