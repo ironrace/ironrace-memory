@@ -275,6 +275,14 @@ pub fn shrinkage_rerank(candidates: &mut [ScoredDrawer], signals: &RerankSignals
     } else {
         Vec::new()
     };
+    let name_matchers: Vec<Regex> = if use_boundary {
+        effective_names
+            .iter()
+            .map(|n| compile_token_matcher(&n.to_lowercase()))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     for c in candidates.iter_mut() {
         let doc = c.drawer.content.to_lowercase();
@@ -308,6 +316,9 @@ pub fn shrinkage_rerank(candidates: &mut [ScoredDrawer], signals: &RerankSignals
         // Name overlap fraction
         let name_boost = if effective_names.is_empty() {
             0.0
+        } else if use_boundary {
+            let hits = name_matchers.iter().filter(|m| token_hit(&doc, m)).count();
+            hits as f32 / effective_names.len() as f32
         } else {
             let hits = effective_names
                 .iter()
@@ -473,3 +484,4 @@ mod tests {
         assert!(!token_hit("a clean setup_thing", &m));
     }
 }
+// NOTAFILE2

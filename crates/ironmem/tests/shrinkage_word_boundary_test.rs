@@ -147,3 +147,53 @@ fn legacy_substring_still_inflates_when_disabled() {
 
     std::env::remove_var("IRONMEM_SHRINKAGE_WORD_BOUNDARY");
 }
+
+#[test]
+fn boundary_name_does_not_match_unrelated_substring() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("IRONMEM_SHRINKAGE_WORD_BOUNDARY", "1");
+
+    // Name "Sam" must NOT inflate a drawer whose content has only "sample".
+    //
+    // Design: query has ONLY a name signal ("Sam") with no predicate keywords
+    // that distinguish the two target drawers. Under the buggy legacy-substring
+    // path, both drawers score the same name_boost because "sam".contains("sam")
+    // matches both "Sam was here" and "a sample". Under the boundary path only
+    // the exact-word drawer gets boosted.
+    //
+    // We use 6 candidates so the IDF filter keeps "Sam": threshold =
+    // ceil(6 * 0.80) = 5; "sam" appears in only 2 of 6 docs → survives.
+    //
+    // The two target drawers start equal (0.50). Four padding drawers (also
+    // 0.50) don't mention "sam" or any distinguishing keyword, so they won't
+    // interfere. The query "Who is Sam?" contains no predicate content words
+    // that appear in either target drawer, so name_boost is the sole signal.
+    let mut cs = vec![
+        make("Sam was present at the event", 0.50),
+        make("a sample of the data was collected", 0.50),
+        make("the weather was fine on Tuesday", 0.50),
+        make("dinner reservations confirmed for Friday", 0.50),
+        make("the quarterly report looked promising", 0.50),
+        make("bike ride along the river trail yesterday", 0.50),
+    ];
+    let signals = extract_signals("Who is Sam?");
+    shrinkage_rerank(&mut cs, &signals);
+
+    let sam_score = cs
+        .iter()
+        .find(|c| c.drawer.content.starts_with("Sam was present"))
+        .map(|c| c.score)
+        .unwrap();
+    let sample_score = cs
+        .iter()
+        .find(|c| c.drawer.content.starts_with("a sample"))
+        .map(|c| c.score)
+        .unwrap();
+
+    assert!(
+        sam_score > sample_score,
+        "name 'Sam' must not substring-match 'sample' under boundary mode ({sam_score} vs {sample_score})"
+    );
+
+    std::env::remove_var("IRONMEM_SHRINKAGE_WORD_BOUNDARY");
+}
