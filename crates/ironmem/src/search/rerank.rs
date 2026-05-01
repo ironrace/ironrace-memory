@@ -349,14 +349,23 @@ pub fn shrinkage_rerank(candidates: &mut [ScoredDrawer], signals: &RerankSignals
 
 /// Filter a token list to those appearing in fewer than `threshold` candidates.
 fn idf_filter(tokens: &[String], candidates: &[ScoredDrawer], threshold: usize) -> Vec<String> {
+    let use_boundary = tunables::shrinkage_word_boundary_enabled();
     tokens
         .iter()
         .filter(|t| {
             let t_lower = t.to_lowercase();
-            let df = candidates
-                .iter()
-                .filter(|c| c.drawer.content.to_lowercase().contains(t_lower.as_str()))
-                .count();
+            let df = if use_boundary {
+                let m = compile_token_matcher(&t_lower);
+                candidates
+                    .iter()
+                    .filter(|c| m.is_match(&c.drawer.content.to_lowercase()))
+                    .count()
+            } else {
+                candidates
+                    .iter()
+                    .filter(|c| c.drawer.content.to_lowercase().contains(t_lower.as_str()))
+                    .count()
+            };
             df < threshold
         })
         .cloned()
