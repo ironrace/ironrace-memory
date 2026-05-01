@@ -186,12 +186,13 @@ impl LlmClient for AnthropicApiClient {
                     return wrap_anthropic_response(&parsed);
                 }
                 Err(ureq::Error::Status(code, resp)) => {
-                    // Don't retry config errors. Sanitize the body — Anthropic
-                    // error responses do NOT echo the prompt, but be paranoid.
-                    let body_preview = resp
-                        .into_string()
-                        .unwrap_or_else(|_| "<unreadable>".to_string());
-                    tracing::trace!(status = code, body = %body_preview, "anthropic API non-2xx");
+                    // Don't retry config errors. We deliberately do NOT log
+                    // the response body: 401/403 responses from Anthropic
+                    // can echo a partial API-key suffix or an org id, and
+                    // even trace-level logs may be persisted by diagnostics
+                    // pipelines. Discard the body without inspection.
+                    drop(resp);
+                    tracing::trace!(status = code, "anthropic API non-2xx (body suppressed)");
                     bail!("anthropic API returned HTTP {code}");
                 }
                 Err(ureq::Error::Transport(t)) => {
@@ -209,7 +210,7 @@ impl LlmClient for AnthropicApiClient {
 
 /// Test-only client. Returns a pre-canned response (or Err) on every `call`.
 pub struct MockLlmClient {
-    pub response: Result<String>,
+    pub(crate) response: Result<String>,
 }
 
 impl MockLlmClient {
