@@ -56,7 +56,7 @@ pub(super) fn handle_add_drawer(app: &App, args: &Value) -> Result<Value, Memory
             tx, &id, content, &embedding, &wing, &room, "", "mcp",
         )?;
         if let Some((sid, scontent, semb)) = synth.as_ref() {
-            let parent_ref = format!("pref:{id}");
+            let parent_ref = format!("{}{id}", crate::db::drawers::PREF_SENTINEL);
             crate::db::schema::Database::insert_drawer_tx(
                 tx,
                 sid,

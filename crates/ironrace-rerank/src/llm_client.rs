@@ -26,9 +26,9 @@ pub trait LlmClient: Send + Sync {
 ///        --tools "" --disable-slash-commands -p <prompt>
 /// ```
 pub struct ClaudeCliClient {
-    pub binary: String,
-    pub model: String,
-    pub timeout: Duration,
+    pub(crate) binary: String,
+    pub(crate) model: String,
+    pub(crate) timeout: Duration,
 }
 
 impl ClaudeCliClient {
