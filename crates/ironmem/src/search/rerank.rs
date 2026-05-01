@@ -59,7 +59,6 @@ static QUOTED_RE: LazyLock<Regex> =
 /// - The optional suffix group covers verb→noun and tense inflections
 ///   common in English. `-ly` (adverbial) is intentionally excluded so
 ///   "current" does NOT match "currently".
-#[allow(dead_code)]
 fn compile_token_matcher(token: &str) -> Regex {
     let escaped = regex::escape(token);
     Regex::new(&format!(
@@ -71,7 +70,6 @@ fn compile_token_matcher(token: &str) -> Regex {
 /// Boundary-aware version of `doc.contains(token)`. Thin wrapper over
 /// `Regex::is_match` so callers (the scorer and the IDF filter) share a
 /// single hit-test seam.
-#[allow(dead_code)]
 fn token_hit(doc_lower: &str, matcher: &Regex) -> bool {
     matcher.is_match(doc_lower)
 }
@@ -268,12 +266,25 @@ pub fn shrinkage_rerank(candidates: &mut [ScoredDrawer], signals: &RerankSignals
     let effective_kws = idf_filter(&signals.predicate_kws, candidates, threshold);
     let effective_names = idf_filter(&signals.names, candidates, threshold);
 
+    let use_boundary = tunables::shrinkage_word_boundary_enabled();
+    let kw_matchers: Vec<Regex> = if use_boundary {
+        effective_kws
+            .iter()
+            .map(|kw| compile_token_matcher(kw))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     for c in candidates.iter_mut() {
         let doc = c.drawer.content.to_lowercase();
 
         // Predicate keyword overlap fraction
         let kw_boost = if effective_kws.is_empty() {
             0.0
+        } else if use_boundary {
+            let hits = kw_matchers.iter().filter(|m| token_hit(&doc, m)).count();
+            hits as f32 / effective_kws.len() as f32
         } else {
             let hits = effective_kws
                 .iter()
