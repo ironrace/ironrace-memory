@@ -61,10 +61,23 @@ static QUOTED_RE: LazyLock<Regex> =
 ///   "current" does NOT match "currently".
 fn compile_token_matcher(token: &str) -> Regex {
     let escaped = regex::escape(token);
-    Regex::new(&format!(
-        r"(?i)(?:^|[^a-zA-Z0-9_]){escaped}(?:s|es|ed|ing|ion|ions)?(?:[^a-zA-Z0-9_]|$)"
-    ))
-    .expect("token regex must compile after escape")
+
+    // English e-dropping morphology: tokens ending in 'e' (e.g. "bake")
+    // form their -ed/-ing inflections by dropping the final 'e' first
+    // ("baked", "baking"). Without this branch the matcher would miss
+    // those inflected forms — observed regressing one multi-session
+    // LongMemEval question ("bake" did not match "baked").
+    let pattern = if let Some(stem) = token.strip_suffix('e') {
+        // Stem with the final 'e' removed, escaped.
+        let stem_no_e = regex::escape(stem);
+        format!(
+            r"(?i)(?:^|[^a-zA-Z0-9_])(?:{escaped}(?:s|es|ed|ing|ion|ions)?|{stem_no_e}(?:ed|ing))(?:[^a-zA-Z0-9_]|$)"
+        )
+    } else {
+        format!(r"(?i)(?:^|[^a-zA-Z0-9_]){escaped}(?:s|es|ed|ing|ion|ions)?(?:[^a-zA-Z0-9_]|$)")
+    };
+
+    Regex::new(&pattern).expect("token regex must compile after escape")
 }
 
 /// Boundary-aware version of `doc.contains(token)`. Thin wrapper over
@@ -491,5 +504,30 @@ mod tests {
         let m = compile_token_matcher("setup");
         assert!(token_hit("a clean setup of tools", &m));
         assert!(!token_hit("a clean setup_thing", &m));
+    }
+
+    #[test]
+    fn token_matcher_handles_e_dropping_inflections() {
+        // English "drop-final-e, add -ed/-ing": bake -> baked, baking
+        let m = compile_token_matcher("bake");
+        for body in [
+            "i bake every weekend",
+            "i baked egg tarts last week",
+            "she is baking cookies",
+            "he bakes pies on sundays",
+        ] {
+            assert!(m.is_match(body), "expected to match in {body:?}");
+        }
+        // Negative cases for e-dropping path: must still respect boundaries.
+        assert!(!compile_token_matcher("bake").is_match("rebake the cake"));
+        assert!(!compile_token_matcher("bake").is_match("a bakery item"));
+    }
+
+    #[test]
+    fn token_matcher_no_e_dropping_for_non_e_tokens() {
+        // "current" does NOT end in `e` — pattern unchanged.
+        let m = compile_token_matcher("current");
+        assert!(m.is_match("the current state"));
+        assert!(!m.is_match("we are currently shipping"));
     }
 }
