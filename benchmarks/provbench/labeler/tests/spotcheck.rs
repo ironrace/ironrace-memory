@@ -1,6 +1,6 @@
 use provbench_labeler::label::Label;
 use provbench_labeler::output::OutputRow;
-use provbench_labeler::spotcheck::sample;
+use provbench_labeler::spotcheck::{sample, wilson_lower_bound_95};
 
 #[test]
 fn deterministic_sampler_returns_same_indices_across_runs() {
@@ -42,4 +42,22 @@ fn rare_classes_meet_min_floor() {
         .filter(|r| matches!(r.row.label, Label::StaleSymbolRenamed { .. }))
         .count();
     assert!(renamed >= 10, "rare class under-sampled: got {renamed}");
+}
+
+#[test]
+fn wilson_lower_bound_at_perfect_score() {
+    let lb = wilson_lower_bound_95(200, 200);
+    assert!(lb > 0.98, "got {lb}");
+}
+
+#[test]
+fn wilson_lower_bound_at_95_point_estimate() {
+    let lb = wilson_lower_bound_95(190, 200);
+    // analytic: ~0.910
+    assert!(lb > 0.90 && lb < 0.93, "got {lb}");
+}
+
+#[test]
+fn wilson_lower_bound_zero_total_returns_zero() {
+    assert_eq!(wilson_lower_bound_95(0, 0), 0.0);
 }

@@ -100,3 +100,42 @@ fn csv_escape(s: &str) -> String {
         s.to_string()
     }
 }
+
+/// Wilson score lower bound at 95% confidence (z=1.95996398454).
+pub fn wilson_lower_bound_95(success: u32, total: u32) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    let n = total as f64;
+    let p = success as f64 / n;
+    let z: f64 = 1.955_963_984_54;
+    let denom = 1.0 + (z * z) / n;
+    let center = p + (z * z) / (2.0 * n);
+    let margin = z * ((p * (1.0 - p) + (z * z) / (4.0 * n)) / n).sqrt();
+    (center - margin) / denom
+}
+
+#[derive(Debug, Clone)]
+pub struct SpotCheckReport {
+    pub total: u32,
+    pub agree: u32,
+    pub point_estimate: f64,
+    pub wilson_lower_95: f64,
+    pub gate_passed: bool,
+}
+
+pub fn report(agree: u32, total: u32) -> SpotCheckReport {
+    let p = if total == 0 {
+        0.0
+    } else {
+        agree as f64 / total as f64
+    };
+    let wlb = wilson_lower_bound_95(agree, total);
+    SpotCheckReport {
+        total,
+        agree,
+        point_estimate: p,
+        wilson_lower_95: wlb,
+        gate_passed: p >= 0.95 && total >= 200,
+    }
+}
