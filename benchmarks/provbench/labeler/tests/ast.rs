@@ -1,4 +1,44 @@
 use provbench_labeler::ast::{spans::content_hash, RustAst};
+use provbench_labeler::facts::field;
+use provbench_labeler::facts::function_signature;
+use provbench_labeler::facts::Fact;
+
+#[test]
+fn struct_fields_each_emit_one_fact() {
+    let src = b"pub struct Foo { pub a: u32, b: String }\n";
+    let ast = provbench_labeler::ast::RustAst::parse(src).unwrap();
+    let facts: Vec<_> = field::extract(&ast, std::path::Path::new("a.rs")).collect();
+    assert_eq!(facts.len(), 2);
+    let names: Vec<_> = facts
+        .iter()
+        .map(|f| {
+            #[allow(unreachable_patterns)]
+            match f {
+                Fact::Field {
+                    qualified_path,
+                    type_text,
+                    ..
+                } => (qualified_path.clone(), type_text.clone()),
+                _ => panic!(),
+            }
+        })
+        .collect();
+    assert!(names.contains(&("Foo::a".into(), "u32".into())));
+    assert!(names.contains(&("Foo::b".into(), "String".into())));
+}
+
+#[test]
+fn enum_struct_variant_fields_qualified_with_variant() {
+    let src = b"pub enum E { V { x: i32 } }\n";
+    let ast = provbench_labeler::ast::RustAst::parse(src).unwrap();
+    let facts: Vec<_> = field::extract(&ast, std::path::Path::new("a.rs")).collect();
+    assert_eq!(facts.len(), 1);
+    #[allow(unreachable_patterns)]
+    match &facts[0] {
+        Fact::Field { qualified_path, .. } => assert_eq!(qualified_path, "E::V::x"),
+        _ => panic!(),
+    }
+}
 
 #[test]
 fn parses_function_and_returns_signature_span() {
@@ -22,9 +62,6 @@ fn content_hash_is_stable_for_same_bytes() {
     assert_ne!(h1, content_hash(b"fn y() {}"));
     assert_eq!(h1.len(), 64);
 }
-
-use provbench_labeler::facts::function_signature;
-use provbench_labeler::facts::Fact;
 
 #[test]
 fn signature_includes_visibility_and_attrs() {

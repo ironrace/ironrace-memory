@@ -1,6 +1,7 @@
 //! Closed enum of fact kinds (SPEC §3.1). Adding a kind is a §11 spec
 //! change — do not extend silently.
 
+pub mod field;
 pub mod function_signature;
 
 use crate::ast::spans::Span;
@@ -13,6 +14,13 @@ pub enum Fact {
     FunctionSignature {
         qualified_name: String,
         source_path: PathBuf,
+        span: Span,
+        content_hash: String,
+    },
+    Field {
+        qualified_path: String,
+        source_path: PathBuf,
+        type_text: String,
         span: Span,
         content_hash: String,
     },
