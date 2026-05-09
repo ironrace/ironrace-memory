@@ -1,6 +1,7 @@
 use provbench_labeler::ast::{spans::content_hash, RustAst};
 use provbench_labeler::facts::field;
 use provbench_labeler::facts::function_signature;
+use provbench_labeler::facts::symbol_existence;
 use provbench_labeler::facts::Fact;
 
 #[test]
@@ -100,4 +101,42 @@ fn nested_module_qualified_name() {
         }
         _ => panic!(),
     }
+}
+
+#[test]
+fn pub_items_emit_public_symbol_facts() {
+    let src = b"pub fn f() {} pub struct S; pub(crate) fn private() {}\n";
+    let ast = provbench_labeler::ast::RustAst::parse(src).unwrap();
+    let facts: Vec<_> = symbol_existence::extract(&ast, std::path::Path::new("lib.rs")).collect();
+    let names: Vec<_> = facts
+        .iter()
+        .filter_map(|f| {
+            #[allow(unreachable_patterns)]
+            match f {
+                Fact::PublicSymbol { qualified_name, .. } => Some(qualified_name.clone()),
+                _ => None,
+            }
+        })
+        .collect();
+    assert!(names.contains(&"f".to_string()));
+    assert!(names.contains(&"S".to_string()));
+    assert!(!names.contains(&"private".to_string()));
+}
+
+#[test]
+fn pub_use_reexport_emits_symbol() {
+    let src = b"mod m { pub fn inner() {} } pub use m::inner;\n";
+    let ast = provbench_labeler::ast::RustAst::parse(src).unwrap();
+    let facts: Vec<_> = symbol_existence::extract(&ast, std::path::Path::new("lib.rs")).collect();
+    let names: Vec<_> = facts
+        .iter()
+        .filter_map(|f| {
+            #[allow(unreachable_patterns)]
+            match f {
+                Fact::PublicSymbol { qualified_name, .. } => Some(qualified_name.clone()),
+                _ => None,
+            }
+        })
+        .collect();
+    assert!(names.contains(&"inner".to_string()), "got {names:?}");
 }

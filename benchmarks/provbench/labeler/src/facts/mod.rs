@@ -3,6 +3,7 @@
 
 pub mod field;
 pub mod function_signature;
+pub mod symbol_existence;
 
 use crate::ast::spans::Span;
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,12 @@ pub enum Fact {
         qualified_path: String,
         source_path: PathBuf,
         type_text: String,
+        span: Span,
+        content_hash: String,
+    },
+    PublicSymbol {
+        qualified_name: String,
+        source_path: PathBuf,
         span: Span,
         content_hash: String,
     },
