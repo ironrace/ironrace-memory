@@ -22,3 +22,45 @@ fn content_hash_is_stable_for_same_bytes() {
     assert_ne!(h1, content_hash(b"fn y() {}"));
     assert_eq!(h1.len(), 64);
 }
+
+use provbench_labeler::facts::function_signature;
+use provbench_labeler::facts::Fact;
+
+#[test]
+fn signature_includes_visibility_and_attrs() {
+    let src = b"#[inline]\npub fn add(a: i32) -> i32 { a }\n";
+    let ast = provbench_labeler::ast::RustAst::parse(src).unwrap();
+    let facts: Vec<_> = function_signature::extract(&ast, std::path::Path::new("a.rs")).collect();
+    assert_eq!(facts.len(), 1);
+    #[allow(unreachable_patterns)]
+    match &facts[0] {
+        Fact::FunctionSignature {
+            qualified_name,
+            span,
+            content_hash,
+            source_path,
+        } => {
+            assert_eq!(qualified_name, "add");
+            assert_eq!(source_path, std::path::Path::new("a.rs"));
+            let body = &src[span.byte_range.clone()];
+            assert!(body.starts_with(b"#[inline]"));
+            assert!(content_hash.len() == 64);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn nested_module_qualified_name() {
+    let src = b"mod a { mod b { pub fn deep() {} } }\n";
+    let ast = provbench_labeler::ast::RustAst::parse(src).unwrap();
+    let facts: Vec<_> = function_signature::extract(&ast, std::path::Path::new("lib.rs")).collect();
+    assert_eq!(facts.len(), 1);
+    #[allow(unreachable_patterns)]
+    match &facts[0] {
+        Fact::FunctionSignature { qualified_name, .. } => {
+            assert_eq!(qualified_name, "a::b::deep");
+        }
+        _ => panic!(),
+    }
+}
