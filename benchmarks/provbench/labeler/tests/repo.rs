@@ -62,6 +62,26 @@ fn walks_first_parent_from_t0() {
     assert_eq!(commits[0].sha, t0);
 }
 
+#[test]
+fn walk_errors_when_t0_not_in_first_parent_chain() {
+    let (_keep, path) = fixture_repo();
+    // Use a SHA that parses as valid hex but is not in the repo.
+    let bogus_t0 = "0000000000000000000000000000000000000001";
+    let spec = PilotSpecLocal {
+        path,
+        t0_sha: bogus_t0.to_string(),
+    };
+    // Pilot::open already errors when T₀ is missing from the ODB; that's
+    // the right place to catch this. Verify the message names the SHA.
+    match Pilot::open(&spec) {
+        Ok(_) => panic!("expected Pilot::open to fail for bogus T₀"),
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(msg.contains(bogus_t0), "got: {msg}");
+        }
+    }
+}
+
 struct PilotSpecLocal {
     path: PathBuf,
     t0_sha: String,

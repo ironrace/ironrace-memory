@@ -55,50 +55,59 @@ impl Pilot {
     /// Returns commits in chronological order (oldest first).
     pub fn walk_first_parent(&self) -> Result<impl Iterator<Item = CommitRef> + '_> {
         let head = self.repo.head_commit().context("resolve HEAD")?;
-        let mut chain: Vec<ObjectId> = Vec::new();
+        // Store (commit_id, first_parent_id) so we don't re-read from the ODB
+        // in the output map and can avoid any silent error swallowing.
+        let mut chain: Vec<(ObjectId, Option<ObjectId>)> = Vec::new();
         // head.id is the public ObjectId field on Commit<'_>
         let mut cur = Some(head.id);
         while let Some(id) = cur {
-            chain.push(id);
-            if id == self.t0_sha {
-                break;
-            }
             let commit = self
                 .repo
                 .find_commit(id)
                 .with_context(|| format!("walk: find {id}"))?;
             // parent_ids() yields gix::Id<'_>; detach() extracts the inner ObjectId
-            cur = commit.parent_ids().next().map(|p| p.detach());
+            let parent_id = commit.parent_ids().next().map(|p| p.detach());
+            chain.push((id, parent_id));
+            if id == self.t0_sha {
+                break;
+            }
+            cur = parent_id;
         }
-        if chain.last() != Some(&self.t0_sha) {
+        if chain.last().map(|(id, _)| id) != Some(&self.t0_sha) {
             return Err(anyhow!(
                 "first-parent chain from HEAD does not contain T₀ {}; rebased history?",
                 self.t0_sha
             ));
         }
         chain.reverse();
-        let repo = &self.repo;
-        Ok(chain.into_iter().map(move |id: ObjectId| {
-            let parent = repo
-                .find_commit(id)
-                .ok()
-                .and_then(|c| c.parent_ids().next().map(|p| p.detach().to_string()));
-            CommitRef {
-                sha: id.to_string(),
-                parent_sha: parent,
-            }
+        Ok(chain.into_iter().map(|(id, parent)| CommitRef {
+            sha: id.to_string(),
+            parent_sha: parent.map(|p| p.to_string()),
         }))
     }
 
     pub fn read_blob_at(&self, commit_sha: &str, path: &Path) -> Result<Option<Vec<u8>>> {
-        let id = ObjectId::from_hex(commit_sha.as_bytes())?;
-        let commit = self.repo.find_commit(id)?;
-        let tree = commit.tree()?;
-        let entry = tree.lookup_entry_by_path(path, &mut Vec::new())?;
+        let id = ObjectId::from_hex(commit_sha.as_bytes())
+            .with_context(|| format!("read_blob_at: invalid sha {commit_sha}"))?;
+        let commit = self
+            .repo
+            .find_commit(id)
+            .with_context(|| format!("read_blob_at: commit {commit_sha} not in repo"))?;
+        let tree = commit
+            .tree()
+            .with_context(|| format!("read_blob_at: tree for {commit_sha}"))?;
+        let entry = tree
+            .lookup_entry_by_path(path, &mut Vec::new())
+            .with_context(|| format!("read_blob_at: lookup {} @ {commit_sha}", path.display()))?;
         match entry {
             None => Ok(None),
             Some(e) => {
-                let obj = e.object()?;
+                let obj = e.object().with_context(|| {
+                    format!(
+                        "read_blob_at: load object for {} @ {commit_sha}",
+                        path.display()
+                    )
+                })?;
                 Ok(Some(obj.data.clone()))
             }
         }
