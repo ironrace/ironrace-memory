@@ -8,6 +8,7 @@
 pub mod ast;
 pub mod facts;
 pub mod repo;
+pub mod resolve;
 pub mod tooling;
 
 pub fn labeler_stamp() -> String {
