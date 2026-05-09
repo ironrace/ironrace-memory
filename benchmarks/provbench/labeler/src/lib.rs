@@ -6,6 +6,7 @@
 //! reproducible artifact.
 
 pub mod ast;
+pub mod diff;
 pub mod facts;
 pub mod repo;
 pub mod resolve;
