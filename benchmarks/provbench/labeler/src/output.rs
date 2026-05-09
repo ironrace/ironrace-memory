@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::io::Write;
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OutputRow {
     pub fact_id: String,
     pub commit_sha: String,

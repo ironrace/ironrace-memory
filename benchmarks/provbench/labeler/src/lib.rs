@@ -13,6 +13,7 @@ pub mod output;
 pub mod replay;
 pub mod repo;
 pub mod resolve;
+pub mod spotcheck;
 pub mod tooling;
 
 pub fn labeler_stamp() -> String {
