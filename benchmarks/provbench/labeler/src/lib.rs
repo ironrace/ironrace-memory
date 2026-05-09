@@ -4,6 +4,9 @@
 //! depend on `ironmem` or any workspace crate — Phase 0 lives outside the
 //! system code so the corpus and labeler can be released as a standalone
 //! reproducible artifact.
+
+pub mod ast;
+pub mod facts;
 pub mod repo;
 pub mod tooling;
 
