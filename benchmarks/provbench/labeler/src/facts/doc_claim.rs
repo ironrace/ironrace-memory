@@ -49,8 +49,8 @@ fn fact_lookup_key(f: &Fact) -> Option<(&str, &Span, &str)> {
             span,
             content_hash.as_str(),
         )),
-        // DocClaim itself has no source span to resolve against.
-        DocClaim { .. } => None,
+        // DocClaim and TestAssertion have no source span to resolve against.
+        DocClaim { .. } | TestAssertion { .. } => None,
     }
 }
 

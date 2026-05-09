@@ -182,3 +182,31 @@ fn unresolvable_mention_is_not_emitted() {
         doc_claim::extract(md, std::path::Path::new("README.md"), &known).collect();
     assert_eq!(claims.len(), 0);
 }
+
+// ── Task 9: test-assertion fact extractor ────────────────────────────────────
+
+use provbench_labeler::facts::test_assertion;
+
+#[test]
+fn test_assertion_referencing_known_fn_emits_fact() {
+    let src = b"pub fn add(a: i32, b: i32) -> i32 { a + b }\n#[test]\nfn t() { assert_eq!(add(1, 2), 3); }\n";
+    let ast = RustAst::parse(src).unwrap();
+    let known: Vec<_> =
+        provbench_labeler::facts::function_signature::extract(&ast, std::path::Path::new("a.rs"))
+            .collect();
+    let facts: Vec<_> =
+        test_assertion::extract(&ast, std::path::Path::new("a.rs"), &known).collect();
+    assert_eq!(facts.len(), 1);
+    #[allow(unreachable_patterns)]
+    match &facts[0] {
+        Fact::TestAssertion {
+            test_fn,
+            asserted_symbol,
+            ..
+        } => {
+            assert_eq!(test_fn, "t");
+            assert_eq!(asserted_symbol.as_deref(), Some("add"));
+        }
+        _ => panic!(),
+    }
+}
