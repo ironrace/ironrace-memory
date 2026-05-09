@@ -140,3 +140,45 @@ fn pub_use_reexport_emits_symbol() {
         .collect();
     assert!(names.contains(&"inner".to_string()), "got {names:?}");
 }
+
+// ── Task 8: doc-claim extractor ──────────────────────────────────────────────
+
+use provbench_labeler::facts::doc_claim;
+
+#[test]
+fn inline_code_mention_resolving_to_known_symbol_emits_doc_claim() {
+    let rs = b"pub fn search() {}\n";
+    let md = b"# rg\n\nUse `search` to scan files.\n";
+    let ast = RustAst::parse(rs).unwrap();
+    let known: Vec<_> =
+        provbench_labeler::facts::symbol_existence::extract(&ast, std::path::Path::new("lib.rs"))
+            .collect();
+    let claims: Vec<_> =
+        doc_claim::extract(md, std::path::Path::new("README.md"), &known).collect();
+    assert_eq!(claims.len(), 1);
+    #[allow(unreachable_patterns)]
+    match &claims[0] {
+        Fact::DocClaim {
+            qualified_name,
+            doc_path,
+            ..
+        } => {
+            assert_eq!(qualified_name, "search");
+            assert_eq!(doc_path, std::path::Path::new("README.md"));
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn unresolvable_mention_is_not_emitted() {
+    let rs = b"pub fn search() {}\n";
+    let md = b"`nonexistent` is great.\n";
+    let ast = RustAst::parse(rs).unwrap();
+    let known: Vec<_> =
+        provbench_labeler::facts::symbol_existence::extract(&ast, std::path::Path::new("lib.rs"))
+            .collect();
+    let claims: Vec<_> =
+        doc_claim::extract(md, std::path::Path::new("README.md"), &known).collect();
+    assert_eq!(claims.len(), 0);
+}
