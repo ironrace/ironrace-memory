@@ -53,13 +53,20 @@ pub struct ResolvedTooling {
     pub tree_sitter: std::path::PathBuf,
 }
 
+fn resolve_binary(name: &str, fallback: &str) -> Result<std::path::PathBuf> {
+    let path = match which::which(name) {
+        Ok(p) => p,
+        Err(_) => std::path::PathBuf::from(fallback),
+    };
+    if !path.exists() {
+        anyhow::bail!("{name} not found on PATH and not present at {fallback}");
+    }
+    Ok(path)
+}
+
 pub fn resolve_from_env() -> Result<ResolvedTooling> {
-    let rust_analyzer = which::which("rust-analyzer")
-        .or_else(|_| -> Result<_, which::Error> {
-            Ok(std::path::PathBuf::from("/opt/homebrew/bin/rust-analyzer"))
-        })
-        .context("rust-analyzer must be on PATH or at /opt/homebrew/bin/rust-analyzer")?;
-    let tree_sitter = std::path::PathBuf::from("/opt/homebrew/bin/tree-sitter");
+    let rust_analyzer = resolve_binary("rust-analyzer", "/opt/homebrew/bin/rust-analyzer")?;
+    let tree_sitter = resolve_binary("tree-sitter", "/opt/homebrew/bin/tree-sitter")?;
     verify_binary_hash(&rust_analyzer, &RUST_ANALYZER)?;
     verify_binary_hash(&tree_sitter, &TREE_SITTER)?;
     Ok(ResolvedTooling {

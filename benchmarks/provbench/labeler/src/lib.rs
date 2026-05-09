@@ -1,4 +1,9 @@
 //! ProvBench Phase 0b mechanical labeler.
+//!
+//! Frozen contract: `benchmarks/provbench/SPEC.md`. This crate does not
+//! depend on `ironmem` or any workspace crate — Phase 0 lives outside the
+//! system code so the corpus and labeler can be released as a standalone
+//! reproducible artifact.
 pub mod tooling;
 
 pub fn labeler_stamp() -> String {
