@@ -37,18 +37,29 @@ pub struct CommitRef {
 
 pub struct Pilot {
     repo: gix::Repository,
+    repo_path: PathBuf,
     t0_sha: ObjectId,
 }
 
 impl Pilot {
     pub fn open<S: PilotRepoSpec>(spec: &S) -> Result<Self> {
-        let repo = gix::open(spec.local_clone_path())
-            .with_context(|| format!("open pilot repo at {}", spec.local_clone_path().display()))?;
+        let repo_path = spec.local_clone_path().to_path_buf();
+        let repo = gix::open(&repo_path)
+            .with_context(|| format!("open pilot repo at {}", repo_path.display()))?;
         let t0_sha = ObjectId::from_hex(spec.t0_sha().as_bytes())
             .with_context(|| format!("parse t0 sha {}", spec.t0_sha()))?;
         repo.find_object(t0_sha)
             .with_context(|| format!("t0 commit {} not present in clone", spec.t0_sha()))?;
-        Ok(Self { repo, t0_sha })
+        Ok(Self {
+            repo,
+            repo_path,
+            t0_sha,
+        })
+    }
+
+    /// Return the filesystem path the repo was opened from.
+    pub fn repo_path(&self) -> &Path {
+        &self.repo_path
     }
 
     /// Walk first-parent linear history from T₀ forward up to HEAD.
