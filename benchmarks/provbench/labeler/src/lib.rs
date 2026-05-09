@@ -8,6 +8,7 @@
 pub mod ast;
 pub mod diff;
 pub mod facts;
+pub mod label;
 pub mod repo;
 pub mod resolve;
 pub mod tooling;
