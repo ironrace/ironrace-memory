@@ -1,5 +1,12 @@
 //! Per-commit replay: read blobs at each commit, compute post-commit state
 //! per fact, classify, emit `FactAtCommit` rows.
+//!
+//! [`Replay::run`] is the production entry point: it extracts the T₀ fact
+//! set across every `.rs` and eligible `.md` file in the pilot tree,
+//! walks the first-parent commit chain, and applies the SPEC §5 rule
+//! engine ([`crate::label::classify`]) to each (fact, commit) pair.
+//! Output is unsorted; deterministic ordering is the writer's
+//! responsibility (see [`crate::output::write_jsonl`]).
 
 use crate::ast::{
     spans::{content_hash, Span},
@@ -17,6 +24,11 @@ use std::path::{Path, PathBuf};
 
 // ── Public surface ────────────────────────────────────────────────────────────
 
+/// One row of the SPEC §3 `fact_at_commit` corpus: a fact ID paired with
+/// the label it carries at a specific first-parent descendant of T₀.
+///
+/// Stamped with the labeler git SHA at write time by
+/// [`crate::output::write_jsonl`]; the in-memory form here is unstamped.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FactAtCommit {
     /// `"{kind}::{qualified}::{source}::{line_start}"`
@@ -25,6 +37,7 @@ pub struct FactAtCommit {
     pub label: Label,
 }
 
+/// Inputs to [`Replay::run`].
 pub struct ReplayConfig {
     pub repo_path: PathBuf,
     pub t0_sha: String,
@@ -35,6 +48,7 @@ pub struct ReplayConfig {
     pub skip_symbol_resolution: bool,
 }
 
+/// Stateless entry point — see [`Replay::run`].
 pub struct Replay;
 
 struct ObservedFact {
@@ -43,6 +57,20 @@ struct ObservedFact {
 }
 
 impl Replay {
+    /// Run the full T₀-anchored replay and return one [`FactAtCommit`] row
+    /// per (fact, commit) pair.
+    ///
+    /// Steps:
+    /// 1. Verify pinned tooling (when not in `skip_symbol_resolution`
+    ///    mode) and spawn the rust-analyzer LSP client.
+    /// 2. Extract the closed enum of facts from every `.rs` file present at
+    ///    `cfg.t0_sha`, then doc-claim facts from eligible markdown files.
+    /// 3. Walk first-parent descendants of T₀ and classify every fact
+    ///    against each commit's blobs via the SPEC §5 rule engine.
+    ///
+    /// Fail-closed: returns `Err` on tooling-pin mismatch, rust-analyzer
+    /// indexing timeout, or invalid UTF-8 in a markdown blob (any of these
+    /// silently degrading would corrupt the corpus).
     pub fn run(cfg: &ReplayConfig) -> Result<Vec<FactAtCommit>> {
         let mut resolver: Option<RustAnalyzer> = if cfg.skip_symbol_resolution {
             None
@@ -229,6 +257,10 @@ fn is_replay_doc_path(path: &Path, rust_dirs: &std::collections::BTreeSet<PathBu
             .unwrap_or(false)
 }
 
+/// Reject anything that isn't exactly 40 lowercase hex characters.
+///
+/// Used as a defence-in-depth check before passing a SHA into
+/// `git ls-tree` so a malformed value cannot reach a subprocess argv.
 pub fn validate_sha_hex(sha: &str) -> Result<()> {
     if sha.len() != 40
         || !sha

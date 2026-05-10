@@ -8,9 +8,13 @@ use crate::facts::Fact;
 use std::path::Path;
 use tree_sitter::Node;
 
-/// Backwards-compat iterator returning (qualified_name, signature_span)
-/// pairs. Used by `RustAst::function_signature_spans` (kept for API
-/// stability with Task 4's tests). Source path is empty.
+/// Back-compat shim returning `(qualified_name, signature_span)` pairs.
+///
+/// Retained only so [`RustAst::function_signature_spans`] (used by
+/// pre-extractor tests) keeps compiling. New callers must use
+/// [`extract`] directly. The shim feeds `extract` an empty source path
+/// and discards the resulting [`Fact`] structure.
+#[doc(hidden)]
 pub fn iter(ast: &RustAst) -> impl Iterator<Item = (String, crate::ast::spans::Span)> + '_ {
     extract(ast, Path::new(""))
         .filter_map(|f| {
@@ -31,6 +35,13 @@ pub fn iter(ast: &RustAst) -> impl Iterator<Item = (String, crate::ast::spans::S
         .into_iter()
 }
 
+/// Yield one [`Fact::FunctionSignature`] per `fn` declaration in `ast`,
+/// tagged with `source_path` for `fact_id` formatting.
+///
+/// The signature span runs from any leading attributes / doc comments
+/// through the end of `fn NAME(...) -> R` and stops before the body
+/// brace; trailing whitespace inside that range is trimmed so the span
+/// always ends on a non-whitespace byte.
 pub fn extract<'a>(ast: &'a RustAst, source_path: &'a Path) -> impl Iterator<Item = Fact> + 'a {
     let mut out = Vec::new();
     let src = ast.source();

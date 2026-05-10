@@ -69,6 +69,38 @@ Phase 0b is accepted iff:
   the gate but required by §9.1).
 - The determinism check is byte-identical.
 
+## Behavior
+
+The labeler is **fail-closed** by design. Silently producing labels in any
+of the following situations would corrupt the corpus, so each surfaces as
+an error and aborts the run:
+
+- **Tooling-pin mismatch.** `verify-tooling` and `Replay::run` both call
+  `tooling::resolve_from_env()`, which hard-fails when a binary on `PATH`
+  (or at the documented fallback) does not match the SHA-256 in
+  `PINNED_BINARIES` for the current platform. Distros patch — version
+  strings are not enough.
+- **rust-analyzer indexing timeout.** When the LSP client observes a
+  `$/progress` `begin` but the matching `end` does not arrive before the
+  hard wall-clock deadline, replay returns `Err` rather than answering
+  symbol queries against an incomplete index. The error message includes
+  the workspace root.
+- **Invalid UTF-8 in markdown.** The doc-claim extractor refuses to
+  silently produce zero facts on a corrupted README; it returns `Err`
+  with the offending file path so reviewers can locate the bad blob.
+- **Malformed git SHA.** `validate_sha_hex` rejects anything that isn't
+  exactly 40 lowercase hex characters before that string is passed to
+  `git ls-tree`, so a malformed value cannot reach a subprocess argv.
+- **Cross-platform `fact_id`s.** Source paths are normalized to forward
+  slashes via a pure-string transform (`normalize_path_for_fact_id`)
+  before they enter a `fact_id`. The single `Path::canonicalize` call in
+  the labeler runs once, on the repo root, in `Pilot::open`. No absolute
+  filesystem path can leak into a `fact_id` regardless of `pwd`.
+
+The spot-check CSV is written via the `csv` crate, not hand-rolled
+formatting, so a stray comma or newline in a `disagreement_notes` cell
+round-trips through reader/writer correctly.
+
 ## Limitations
 
 - v1 supports Rust only. The held-out Python repo (`flask`) is **not**
