@@ -465,9 +465,15 @@ pub(crate) fn path_to_uri(path: &Path) -> String {
 }
 
 pub(crate) fn uri_to_path(uri: &str) -> Result<std::path::PathBuf> {
-    let path_str = uri
-        .strip_prefix("file://")
-        .with_context(|| format!("URI does not start with file://: {uri}"))?;
+    let path_str = uri.strip_prefix("file://").with_context(|| {
+        let preview: String = uri.chars().take(120).collect();
+        let truncated = if uri.chars().count() > 120 {
+            " (truncated)"
+        } else {
+            ""
+        };
+        format!("URI does not start with file://{truncated}: {preview}")
+    })?;
     Ok(std::path::PathBuf::from(percent_decode(path_str)?))
 }
 
@@ -496,7 +502,14 @@ pub(crate) fn percent_decode(s: &str) -> Result<String> {
         out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8(out).with_context(|| format!("invalid UTF-8 in percent-decoded URI: {s:?}"))
+    let preview: String = s.chars().take(120).collect();
+    let truncated = if s.chars().count() > 120 {
+        " (truncated)"
+    } else {
+        ""
+    };
+    String::from_utf8(out)
+        .with_context(|| format!("invalid UTF-8 in percent-decoded URI{truncated}: {preview:?}"))
 }
 
 #[cfg(test)]

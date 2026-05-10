@@ -6,61 +6,20 @@
 //! UTF-8 error context, field-fact label classification) is caught at
 //! integration level, not just at the unit level.
 
+mod common;
+
+use common::{commit_all_with_date_no_verify as commit_all_with_date, git, rev_parse_head};
 use provbench_labeler::label::Label;
 use provbench_labeler::output::{write_jsonl, OutputRow};
 use provbench_labeler::replay::{FactAtCommit, Replay, ReplayConfig};
 use std::path::Path;
 
 // ── shared synthetic-repo helpers ────────────────────────────────────────────
-
-fn git(repo: &Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .status()
-        .unwrap();
-    assert!(status.success(), "git {args:?}");
-}
-
-fn commit_all_with_date(repo: &Path, message: &str, date: &str) {
-    git(repo, &["add", "."]);
-    // `--no-verify` disables any user-global git hook (e.g. a pre-commit
-    // formatter) that might choke on synthetic invalid-UTF-8 README
-    // bytes used by the hardening regression tests.
-    let status = std::process::Command::new("git")
-        .args([
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "commit",
-            "--no-verify",
-            "--date",
-            date,
-            "-m",
-            message,
-        ])
-        .env("GIT_AUTHOR_DATE", date)
-        .env("GIT_COMMITTER_DATE", date)
-        .current_dir(repo)
-        .status()
-        .unwrap();
-    assert!(status.success(), "git commit failed");
-}
-
-fn rev_parse_head(repo: &Path) -> String {
-    String::from_utf8(
-        std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repo)
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap()
-    .trim()
-    .to_string()
-}
+//
+// Hardening fixtures here include invalid-UTF-8 bytes that some
+// user-global pre-commit hooks reject; we therefore use
+// `commit_all_with_date_no_verify` (re-aliased as `commit_all_with_date`
+// at this crate scope to keep call sites unchanged).
 
 fn to_output_rows(rows: Vec<FactAtCommit>) -> Vec<OutputRow> {
     rows.into_iter()

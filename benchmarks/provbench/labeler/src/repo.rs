@@ -70,6 +70,15 @@ pub struct CommitRef {
     pub parent_sha: Option<String>,
 }
 
+/// An opened pilot repository handle plus its canonicalized root and
+/// resolved T₀ object id.
+///
+/// `repo_path` is the result of the **single** filesystem-resolving
+/// canonicalization the labeler performs (see [`Pilot::open`]); every
+/// per-fact path used downstream is normalized purely lexically (see
+/// the crate-private `normalize_path_for_fact_id` helper) so T₀ replay
+/// determinism is preserved for files that have since been moved or
+/// deleted.
 pub struct Pilot {
     repo: gix::Repository,
     repo_path: PathBuf,
@@ -77,6 +86,14 @@ pub struct Pilot {
 }
 
 impl Pilot {
+    /// Open an already-cloned pilot repo and resolve its T₀ commit.
+    ///
+    /// This is the **single** site in the labeler that calls
+    /// `Path::canonicalize`; the resulting `repo_path` is stored once
+    /// and all per-fact paths are normalized purely lexically thereafter
+    /// (via the crate-private `normalize_path_for_fact_id` helper) so
+    /// that fact ids stay deterministic across runs and across hosts
+    /// even when source files have been moved or deleted since T₀.
     pub fn open<S: PilotRepoSpec>(spec: &S) -> Result<Self> {
         // Canonicalize the user-supplied repo root exactly once. This is the
         // ONLY filesystem-resolving canonicalization in the labeler; per-fact

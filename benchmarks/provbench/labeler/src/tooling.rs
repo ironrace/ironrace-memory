@@ -115,6 +115,10 @@ pub(crate) const PINNED_BINARIES: &[PinnedBinary] = &[
 /// the unsupported-platform error message.
 pub(crate) const SUPPORTED_PLATFORMS: &[&str] = &["aarch64-darwin", "x86_64-linux-gnu"];
 
+/// SHA-256 the bytes at `path` and compare against
+/// `expected.sha256_hex`. Fails closed on mismatch — distros patch
+/// upstream tools, so a version-string match alone is not sufficient
+/// to keep Phase 0b labels reproducible.
 pub fn verify_binary_hash(path: &Path, expected: &ExpectedTool) -> Result<()> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("read {} at {}", expected.name, path.display()))?;
@@ -133,6 +137,13 @@ pub fn verify_binary_hash(path: &Path, expected: &ExpectedTool) -> Result<()> {
     Ok(())
 }
 
+/// Filesystem locations of the pinned, hash-verified external tools
+/// the labeler depends on at runtime.
+///
+/// Only populated by [`resolve_from_env`] after every binary's SHA-256
+/// matches the freeze record in `PINNED_BINARIES`. Construction is
+/// fail-closed: callers either get a fully verified `ResolvedTooling`
+/// or a hard error.
 #[derive(Debug, Clone)]
 pub struct ResolvedTooling {
     pub rust_analyzer: std::path::PathBuf,
@@ -193,6 +204,14 @@ pub(crate) fn resolve_one(
     Ok(path)
 }
 
+/// Resolve and hash-verify both pinned tools (`rust-analyzer` and
+/// `tree-sitter`) for the current host platform.
+///
+/// Fail-closed semantics: returns an error listing the supported
+/// platforms (`SUPPORTED_PLATFORMS`) on any unsupported `(os, arch)`
+/// pair, and returns a hash-mismatch error if either resolved binary's
+/// SHA-256 does not match its freeze record. There is no "best effort"
+/// fallback.
 pub fn resolve_from_env() -> Result<ResolvedTooling> {
     let target_os = std::env::consts::OS;
     let target_arch = std::env::consts::ARCH;

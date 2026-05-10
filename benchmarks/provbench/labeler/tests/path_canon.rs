@@ -6,60 +6,11 @@
 //!      tests in `src/repo.rs` since the helper is `pub(crate)`.)
 //!   2. No emitted `fact_id` ever embeds an absolute filesystem path.
 
+mod common;
+
+use common::{commit_all_with_date, git, rev_parse_head};
 use provbench_labeler::replay::{Replay, ReplayConfig};
 use std::path::Path;
-
-fn git(repo: &Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .status()
-        .unwrap();
-    assert!(status.success(), "git {args:?}");
-}
-
-fn commit_all_with_date(repo: &Path, message: &str, date: &str) {
-    git(repo, &["add", "."]);
-    // Pin author and committer name/email plus the author/committer
-    // date so two independent tempdirs that receive the same file
-    // bytes produce structurally identical commits. fact_ids are
-    // derived from repo-relative source paths (not commit SHAs), so
-    // the assertion below tests the "different absolute path → same
-    // fact_id" property regardless of whether the SHAs match — but we
-    // pin the date anyway to keep the per-row comparison stable.
-    let status = std::process::Command::new("git")
-        .args([
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "commit",
-            "--date",
-            date,
-            "-m",
-            message,
-        ])
-        .env("GIT_AUTHOR_DATE", date)
-        .env("GIT_COMMITTER_DATE", date)
-        .current_dir(repo)
-        .status()
-        .unwrap();
-    assert!(status.success(), "git commit failed");
-}
-
-fn rev_parse_head(repo: &Path) -> String {
-    String::from_utf8(
-        std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repo)
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap()
-    .trim()
-    .to_string()
-}
 
 /// Build a synthetic two-commit repo with deterministic content. Returns
 /// the T0 SHA. The same `date_a`/`date_b` values produce the same commit

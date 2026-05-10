@@ -32,6 +32,16 @@ pub struct Sampled {
     pub bucket: String,
 }
 
+/// Stratified deterministic sample of `n` rows drawn from `rows`,
+/// bucketed by label.
+///
+/// Sampling is seeded with the fixed `SEED` constant so re-running over
+/// the same input produces the same output — important for human
+/// reviewers who fill in `human_label` over multiple sessions. Each
+/// label class gets at least a small floor (`per_class_floor`); any
+/// remaining budget is filled from a shuffled deficit pool. The
+/// returned vec is sorted by `(fact_id, commit_sha)` for stable
+/// comparison.
 pub fn sample(rows: &[OutputRow], n: usize) -> Vec<Sampled> {
     use std::collections::BTreeMap;
     let mut buckets: BTreeMap<String, Vec<&OutputRow>> = BTreeMap::new();
@@ -89,6 +99,13 @@ fn label_bucket(label: &crate::label::Label) -> String {
     }
 }
 
+/// Write the spot-check samples to `path` as RFC-4180 CSV via the
+/// `csv` crate.
+///
+/// All quoting (commas, embedded `"`, `\n`, `\r` inside
+/// `disagreement_notes`) is handled by the `csv` writer, so reviewer
+/// notes containing quoted newlines round-trip correctly through
+/// [`read_report_counts`] without column drift.
 pub fn write_csv(path: &std::path::Path, samples: &[Sampled]) -> anyhow::Result<()> {
     let f = std::fs::File::create(path)?;
     write_csv_to(f, samples)
@@ -140,6 +157,11 @@ pub(crate) fn read_report_counts_from<R: std::io::Read>(r: R) -> anyhow::Result<
 }
 
 /// Wilson score lower bound at 95% confidence (z=1.95996398454).
+///
+/// Used as the human-agreement gate metric: a Wilson lower bound is
+/// preferred over a raw point estimate at small `total` because the
+/// raw ratio `success/total` is upward-biased on small samples.
+/// Returns `0.0` when `total == 0`.
 pub fn wilson_lower_bound_95(success: u32, total: u32) -> f64 {
     if total == 0 {
         return 0.0;
@@ -162,6 +184,12 @@ pub struct SpotCheckReport {
     pub gate_passed: bool,
 }
 
+/// Build a [`SpotCheckReport`] from `(agree, total)` reviewer counts.
+///
+/// `gate_passed` is `true` only when both the point-estimate
+/// agreement is at least 95% and `total` is at least 200 — the per-SPEC
+/// minimum sample size below which the agreement metric is not
+/// considered binding.
 pub fn report(agree: u32, total: u32) -> SpotCheckReport {
     let p = if total == 0 {
         0.0

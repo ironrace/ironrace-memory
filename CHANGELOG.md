@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **ProvBench labeler — Phase 0b hardening pass 2 (2026-05-10).**
+- **ProvBench labeler — Phase 0b hardening pass 2 (2026-05-09).**
   Deterministic `fact_id`s via pure-string path normalization (no
   `pwd`-sensitive canonicalization), fail-closed behavior on
   rust-analyzer indexing timeout, explicit invalid-UTF-8 error in the
