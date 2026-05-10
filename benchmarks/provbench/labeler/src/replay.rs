@@ -88,6 +88,7 @@ impl PilotRepoSpec for AdHocSpec {
 
 /// Return all `.rs` file paths present in the git tree at `sha`.
 fn rust_paths_at(pilot: &Pilot, sha: &str) -> Result<Vec<PathBuf>> {
+    validate_sha_hex(sha)?;
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(pilot.repo_path())
@@ -105,6 +106,17 @@ fn rust_paths_at(pilot: &Pilot, sha: &str) -> Result<Vec<PathBuf>> {
         .filter(|l| l.ends_with(".rs"))
         .map(PathBuf::from)
         .collect())
+}
+
+pub fn validate_sha_hex(sha: &str) -> Result<()> {
+    if sha.len() != 40
+        || !sha
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        anyhow::bail!("git commit sha must be exactly 40 lowercase hex characters: {sha}");
+    }
+    Ok(())
 }
 
 /// Stable, unique ID for a fact — used as the primary key in output rows.

@@ -8,7 +8,14 @@
 //! signature hash is identical across both commits.  Both rows should be
 //! `Label::Valid`.
 
-use provbench_labeler::replay::{Replay, ReplayConfig};
+use provbench_labeler::replay::{validate_sha_hex, Replay, ReplayConfig};
+
+#[test]
+fn validate_sha_hex_rejects_argument_like_and_non_hex_values() {
+    assert!(validate_sha_hex("-p HEAD:./evil").is_err());
+    assert!(validate_sha_hex("01234567890123456789012345678901234567zz").is_err());
+    assert!(validate_sha_hex("0123456789012345678901234567890123456789").is_ok());
+}
 
 #[test]
 fn replay_over_synthetic_repo_emits_fact_at_commit_rows() {
