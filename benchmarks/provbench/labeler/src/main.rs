@@ -107,28 +107,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Cmd::Report { csv }) => {
-            let content = std::fs::read_to_string(&csv)?;
-            let mut lines = content.lines();
-            // Skip header row.
-            lines.next();
-            let mut total: u32 = 0;
-            let mut agree: u32 = 0;
-            for line in lines {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let fields = split_csv_line(line);
-                // Columns: fact_id(0), commit_sha(1), bucket(2), predicted_label(3), human_label(4), disagreement_notes(5)
-                let human = fields.get(4).map(|s| s.as_str()).unwrap_or("").trim();
-                if human.is_empty() {
-                    continue;
-                }
-                total += 1;
-                let predicted = fields.get(3).map(|s| s.as_str()).unwrap_or("").trim();
-                if human == predicted {
-                    agree += 1;
-                }
-            }
+            let (agree, total) = provbench_labeler::spotcheck::read_report_counts(&csv)?;
             let r = provbench_labeler::spotcheck::report(agree, total);
             println!("Total reviewed: {}", r.total);
             println!("Agreements: {}", r.agree);
@@ -141,37 +120,4 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
-}
-
-/// Split a single CSV line respecting double-quote escaping.
-fn split_csv_line(line: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-    let mut chars = line.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' if in_quotes => {
-                if chars.peek() == Some(&'"') {
-                    // Escaped quote inside quoted field.
-                    chars.next();
-                    current.push('"');
-                } else {
-                    in_quotes = false;
-                }
-            }
-            '"' => {
-                in_quotes = true;
-            }
-            ',' if !in_quotes => {
-                fields.push(current.clone());
-                current.clear();
-            }
-            other => {
-                current.push(other);
-            }
-        }
-    }
-    fields.push(current);
-    fields
 }
