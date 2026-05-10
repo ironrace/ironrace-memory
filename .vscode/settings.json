@@ -1,0 +1,6 @@
+{
+  "rust-analyzer.linkedProjects": [
+    "Cargo.toml",
+    "benchmarks/provbench/labeler/Cargo.toml"
+  ]
+}

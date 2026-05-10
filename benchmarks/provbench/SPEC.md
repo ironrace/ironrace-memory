@@ -1,6 +1,6 @@
 # ProvBench-CodeContext: Benchmark Spec (v0, Phase 0a)
 
-> **Status:** DRAFT, pre-freeze. Phase 0b/0c MUST NOT begin until this document is marked `Status: FROZEN` with a date and the spec hash recorded.
+> **Status:** FROZEN 2026-05-09. Phase 0b/0c MUST NOT begin until this document is marked `Status: FROZEN` with a date and the spec hash recorded.
 >
 > **Purpose:** This document is the contract for evaluating provenance-driven invalidation in code-agent memory. Every fact type, label, rule, prompt, metric, threshold, and gate is fixed here before any labeler or system code is written. If a system change later requires a spec change, the change must be **dated, justified, and called out** in §11 — never silently absorbed.
 

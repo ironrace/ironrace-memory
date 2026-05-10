@@ -16,3 +16,6 @@ docs/collab_*.md
 .playwright-mcp/
 __pycache__/
 *.pyc
+
+benchmarks/provbench/work/
+benchmarks/provbench/labeler/target/

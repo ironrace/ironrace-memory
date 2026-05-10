@@ -1,0 +1,212 @@
+use provbench_labeler::ast::{spans::content_hash, RustAst};
+use provbench_labeler::facts::field;
+use provbench_labeler::facts::function_signature;
+use provbench_labeler::facts::symbol_existence;
+use provbench_labeler::facts::Fact;
+
+#[test]
+fn struct_fields_each_emit_one_fact() {
+    let src = b"pub struct Foo { pub a: u32, b: String }\n";
+    let ast = provbench_labeler::ast::RustAst::parse(src).unwrap();
+    let facts: Vec<_> = field::extract(&ast, std::path::Path::new("a.rs")).collect();
+    assert_eq!(facts.len(), 2);
+    let names: Vec<_> = facts
+        .iter()
+        .map(|f| {
+            #[allow(unreachable_patterns)]
+            match f {
+                Fact::Field {
+                    qualified_path,
+                    type_text,
+                    ..
+                } => (qualified_path.clone(), type_text.clone()),
+                _ => panic!(),
+            }
+        })
+        .collect();
+    assert!(names.contains(&("Foo::a".into(), "u32".into())));
+    assert!(names.contains(&("Foo::b".into(), "String".into())));
+}
+
+#[test]
+fn enum_struct_variant_fields_qualified_with_variant() {
+    let src = b"pub enum E { V { x: i32 } }\n";
+    let ast = provbench_labeler::ast::RustAst::parse(src).unwrap();
+    let facts: Vec<_> = field::extract(&ast, std::path::Path::new("a.rs")).collect();
+    assert_eq!(facts.len(), 1);
+    #[allow(unreachable_patterns)]
+    match &facts[0] {
+        Fact::Field { qualified_path, .. } => assert_eq!(qualified_path, "E::V::x"),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn parses_function_and_returns_signature_span() {
+    let src = b"fn add(a: i32, b: i32) -> i32 { a + b }\n";
+    let ast = RustAst::parse(src).unwrap();
+    let fns: Vec<_> = ast.function_signature_spans().collect();
+    assert_eq!(fns.len(), 1);
+    let (name, span) = &fns[0];
+    assert_eq!(name, "add");
+    let bytes = &src[span.byte_range.clone()];
+    let text = std::str::from_utf8(bytes).unwrap();
+    assert!(text.starts_with("fn add"));
+    assert!(text.ends_with("-> i32"), "got: {text}");
+}
+
+#[test]
+fn content_hash_is_stable_for_same_bytes() {
+    let h1 = content_hash(b"fn x() {}");
+    let h2 = content_hash(b"fn x() {}");
+    assert_eq!(h1, h2);
+    assert_ne!(h1, content_hash(b"fn y() {}"));
+    assert_eq!(h1.len(), 64);
+}
+
+#[test]
+fn signature_includes_visibility_and_attrs() {
+    let src = b"#[inline]\npub fn add(a: i32) -> i32 { a }\n";
+    let ast = provbench_labeler::ast::RustAst::parse(src).unwrap();
+    let facts: Vec<_> = function_signature::extract(&ast, std::path::Path::new("a.rs")).collect();
+    assert_eq!(facts.len(), 1);
+    #[allow(unreachable_patterns)]
+    match &facts[0] {
+        Fact::FunctionSignature {
+            qualified_name,
+            span,
+            content_hash,
+            source_path,
+        } => {
+            assert_eq!(qualified_name, "add");
+            assert_eq!(source_path, std::path::Path::new("a.rs"));
+            let body = &src[span.byte_range.clone()];
+            assert!(body.starts_with(b"#[inline]"));
+            assert!(content_hash.len() == 64);
+        }
+        _ => panic!("wrong variant"),
+    }
+}
+
+#[test]
+fn nested_module_qualified_name() {
+    let src = b"mod a { mod b { pub fn deep() {} } }\n";
+    let ast = provbench_labeler::ast::RustAst::parse(src).unwrap();
+    let facts: Vec<_> = function_signature::extract(&ast, std::path::Path::new("lib.rs")).collect();
+    assert_eq!(facts.len(), 1);
+    #[allow(unreachable_patterns)]
+    match &facts[0] {
+        Fact::FunctionSignature { qualified_name, .. } => {
+            assert_eq!(qualified_name, "a::b::deep");
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn pub_items_emit_public_symbol_facts() {
+    let src = b"pub fn f() {} pub struct S; pub(crate) fn private() {}\n";
+    let ast = provbench_labeler::ast::RustAst::parse(src).unwrap();
+    let facts: Vec<_> = symbol_existence::extract(&ast, std::path::Path::new("lib.rs")).collect();
+    let names: Vec<_> = facts
+        .iter()
+        .filter_map(|f| {
+            #[allow(unreachable_patterns)]
+            match f {
+                Fact::PublicSymbol { qualified_name, .. } => Some(qualified_name.clone()),
+                _ => None,
+            }
+        })
+        .collect();
+    assert!(names.contains(&"f".to_string()));
+    assert!(names.contains(&"S".to_string()));
+    assert!(!names.contains(&"private".to_string()));
+}
+
+#[test]
+fn pub_use_reexport_emits_symbol() {
+    let src = b"mod m { pub fn inner() {} } pub use m::inner;\n";
+    let ast = provbench_labeler::ast::RustAst::parse(src).unwrap();
+    let facts: Vec<_> = symbol_existence::extract(&ast, std::path::Path::new("lib.rs")).collect();
+    let names: Vec<_> = facts
+        .iter()
+        .filter_map(|f| {
+            #[allow(unreachable_patterns)]
+            match f {
+                Fact::PublicSymbol { qualified_name, .. } => Some(qualified_name.clone()),
+                _ => None,
+            }
+        })
+        .collect();
+    assert!(names.contains(&"inner".to_string()), "got {names:?}");
+}
+
+// ── Task 8: doc-claim extractor ──────────────────────────────────────────────
+
+use provbench_labeler::facts::doc_claim;
+
+#[test]
+fn inline_code_mention_resolving_to_known_symbol_emits_doc_claim() {
+    let rs = b"pub fn search() {}\n";
+    let md = b"# rg\n\nUse `search` to scan files.\n";
+    let ast = RustAst::parse(rs).unwrap();
+    let known: Vec<_> =
+        provbench_labeler::facts::symbol_existence::extract(&ast, std::path::Path::new("lib.rs"))
+            .collect();
+    let claims: Vec<_> =
+        doc_claim::extract(md, std::path::Path::new("README.md"), &known).collect();
+    assert_eq!(claims.len(), 1);
+    #[allow(unreachable_patterns)]
+    match &claims[0] {
+        Fact::DocClaim {
+            qualified_name,
+            doc_path,
+            ..
+        } => {
+            assert_eq!(qualified_name, "search");
+            assert_eq!(doc_path, std::path::Path::new("README.md"));
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn unresolvable_mention_is_not_emitted() {
+    let rs = b"pub fn search() {}\n";
+    let md = b"`nonexistent` is great.\n";
+    let ast = RustAst::parse(rs).unwrap();
+    let known: Vec<_> =
+        provbench_labeler::facts::symbol_existence::extract(&ast, std::path::Path::new("lib.rs"))
+            .collect();
+    let claims: Vec<_> =
+        doc_claim::extract(md, std::path::Path::new("README.md"), &known).collect();
+    assert_eq!(claims.len(), 0);
+}
+
+// ── Task 9: test-assertion fact extractor ────────────────────────────────────
+
+use provbench_labeler::facts::test_assertion;
+
+#[test]
+fn test_assertion_referencing_known_fn_emits_fact() {
+    let src = b"pub fn add(a: i32, b: i32) -> i32 { a + b }\n#[test]\nfn t() { assert_eq!(add(1, 2), 3); }\n";
+    let ast = RustAst::parse(src).unwrap();
+    let known: Vec<_> =
+        provbench_labeler::facts::function_signature::extract(&ast, std::path::Path::new("a.rs"))
+            .collect();
+    let facts: Vec<_> =
+        test_assertion::extract(&ast, std::path::Path::new("a.rs"), &known).collect();
+    assert_eq!(facts.len(), 1);
+    #[allow(unreachable_patterns)]
+    match &facts[0] {
+        Fact::TestAssertion {
+            test_fn,
+            asserted_symbol,
+            ..
+        } => {
+            assert_eq!(test_fn, "t");
+            assert_eq!(asserted_symbol.as_deref(), Some("add"));
+        }
+        _ => panic!(),
+    }
+}
