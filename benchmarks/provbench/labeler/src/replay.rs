@@ -9,6 +9,7 @@ use crate::diff::{is_whitespace_or_comment_only, rename_candidate};
 use crate::facts::{doc_claim, field, function_signature, symbol_existence, test_assertion, Fact};
 use crate::label::{classify, Label, PostCommitState};
 use crate::repo::{CommitRef, Pilot, PilotRepoSpec};
+use crate::resolve::{rust_analyzer::RustAnalyzer, SymbolResolver};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -43,6 +44,16 @@ struct ObservedFact {
 
 impl Replay {
     pub fn run(cfg: &ReplayConfig) -> Result<Vec<FactAtCommit>> {
+        let mut resolver: Option<RustAnalyzer> = if cfg.skip_symbol_resolution {
+            None
+        } else {
+            crate::tooling::resolve_from_env()?;
+            // TODO(phase-0b-pilot): replay production labeling against a
+            // per-commit worktree before each rust-analyzer query so the LSP
+            // view matches the commit being classified.
+            Some(RustAnalyzer::spawn(&cfg.repo_path)?)
+        };
+
         let pilot = Pilot::open(&AdHocSpec {
             path: cfg.repo_path.clone(),
             t0_sha: cfg.t0_sha.clone(),
@@ -107,6 +118,9 @@ impl Replay {
                     .as_ref()
                     .and_then(|bytes| RustAst::parse(bytes).ok());
                 for observed in facts_at_path {
+                    let resolver_ref = resolver
+                        .as_mut()
+                        .map(|resolver| resolver as &mut dyn SymbolResolver);
                     let label = classify_against_commit(
                         &observed.fact,
                         path,
@@ -114,6 +128,7 @@ impl Replay {
                         post_ast.as_ref(),
                         &observed.t0_span_bytes,
                         cfg,
+                        resolver_ref,
                     )?;
                     rows.push(FactAtCommit {
                         fact_id: fact_id(&observed.fact),
@@ -342,6 +357,7 @@ fn classify_against_commit(
     post_ast: Option<&RustAst>,
     t0_span_bytes: &[u8],
     cfg: &ReplayConfig,
+    resolver: Option<&mut dyn SymbolResolver>,
 ) -> Result<Label> {
     let state = match post_blob {
         // File was deleted at this commit.
@@ -382,6 +398,22 @@ fn classify_against_commit(
                             rename: None,
                         }
                     } else {
+                        if let Some(resolver) = resolver {
+                            let resolved = resolver.resolve(qualified_name_for(fact))?;
+                            if resolved.is_some() {
+                                return Ok(classify(
+                                    fact,
+                                    &CommitState {
+                                        file_exists: true,
+                                        post_span_hash: None,
+                                        structurally_classifiable: false,
+                                        whitespace_or_comment_only: false,
+                                        symbol_resolves: true,
+                                        rename: None,
+                                    },
+                                ));
+                            }
+                        }
                         // Production mode: attempt rename detection.
                         let candidates = rename_candidates_for(fact, path, post_bytes, post_ast);
                         let rename = rename_candidate(t0_span_bytes, &candidates, 0.6);
@@ -584,7 +616,6 @@ fn observed_hash_for(fact: &Fact) -> &str {
     }
 }
 
-#[allow(dead_code)]
 fn qualified_name_for(fact: &Fact) -> &str {
     match fact {
         Fact::FunctionSignature { qualified_name, .. } => qualified_name,
