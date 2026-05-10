@@ -58,6 +58,12 @@ fn wilson_lower_bound_at_95_point_estimate() {
 }
 
 #[test]
+fn wilson_lower_bound_at_perfect_score_is_above_correct_threshold() {
+    let lb = wilson_lower_bound_95(199, 200);
+    assert!((lb - 0.972_226_295_6).abs() < 0.000_05, "got {lb}");
+}
+
+#[test]
 fn wilson_lower_bound_zero_total_returns_zero() {
     assert_eq!(wilson_lower_bound_95(0, 0), 0.0);
 }

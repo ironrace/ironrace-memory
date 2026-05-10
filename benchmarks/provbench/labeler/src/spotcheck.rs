@@ -108,7 +108,7 @@ pub fn wilson_lower_bound_95(success: u32, total: u32) -> f64 {
     }
     let n = total as f64;
     let p = success as f64 / n;
-    let z: f64 = 1.955_963_984_54;
+    let z: f64 = 1.959_963_984_54;
     let denom = 1.0 + (z * z) / n;
     let center = p + (z * z) / (2.0 * n);
     let margin = z * ((p * (1.0 - p) + (z * z) / (4.0 * n)) / n).sqrt();
