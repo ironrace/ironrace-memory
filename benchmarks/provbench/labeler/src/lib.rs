@@ -17,7 +17,9 @@ pub mod spotcheck;
 pub mod tooling;
 
 pub fn labeler_stamp() -> String {
-    option_env!("PROVBENCH_LABELER_GIT_SHA")
-        .unwrap_or("unstamped")
-        .to_string()
+    let sha = option_env!("PROVBENCH_LABELER_GIT_SHA").unwrap_or("unstamped");
+    match option_env!("PROVBENCH_LABELER_DIRTY") {
+        Some("true") if sha != "unstamped" => format!("{sha}-dirty"),
+        _ => sha.to_string(),
+    }
 }

@@ -45,17 +45,3 @@ pub fn write_jsonl(path: &Path, rows: &[OutputRow], labeler_git_sha: &str) -> Re
     f.flush()?;
     Ok(())
 }
-
-pub fn current_labeler_sha() -> Result<String> {
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "git rev-parse HEAD failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    Ok(String::from_utf8(out.stdout)?.trim().to_string())
-}

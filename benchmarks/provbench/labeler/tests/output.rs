@@ -2,6 +2,13 @@ use provbench_labeler::label::Label;
 use provbench_labeler::output::{write_jsonl, OutputRow};
 
 #[test]
+fn labeler_stamp_is_baked_by_real_build() {
+    let stamp = provbench_labeler::labeler_stamp();
+    assert!(!stamp.is_empty());
+    assert_ne!(stamp, "unstamped");
+}
+
+#[test]
 fn rows_serialize_sorted_with_labeler_stamp() {
     let rows = vec![
         OutputRow {

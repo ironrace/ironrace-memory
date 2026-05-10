@@ -86,7 +86,7 @@ fn main() -> anyhow::Result<()> {
                         label: r.label,
                     })
                     .collect();
-            let sha = provbench_labeler::output::current_labeler_sha()?;
+            let sha = provbench_labeler::labeler_stamp();
             provbench_labeler::output::write_jsonl(&out, &rows, &sha)?;
             println!("wrote {} rows to {}", rows.len(), out.display());
             Ok(())
