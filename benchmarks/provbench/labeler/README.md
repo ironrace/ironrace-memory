@@ -77,3 +77,36 @@ Phase 0b is accepted iff:
 - `rust-analyzer` is invoked over LSP stdio per commit. Wall-clock cost
   scales with commit count; the pilot run on ripgrep at T₀ → T₀+~600
   commits is expected to take 30–90 minutes on an M-series Mac.
+
+## Reproducibility / supported platforms
+
+The pinned-binary table in `src/tooling.rs` covers exactly two platforms:
+
+| Platform                  | rust-analyzer install path                                   | tree-sitter install path                              |
+|---------------------------|--------------------------------------------------------------|-------------------------------------------------------|
+| `aarch64-darwin` (macOS)  | rustup `stable-aarch64-apple-darwin` component               | Homebrew (`brew install tree-sitter`)                 |
+| `x86_64-linux-gnu` (CI)   | Decompressed `rust-analyzer-x86_64-unknown-linux-gnu.gz`     | Decompressed `tree-sitter-linux-x64.gz`               |
+
+For `x86_64-linux-gnu` (the `ubuntu-latest` GitHub runner), the pinned
+hashes correspond to the **decompressed** binaries published as `.gz`
+artifacts on each tool's GitHub release. CI must install the tools by
+downloading the upstream `.gz`, gunzipping, and placing the resulting
+binary on `PATH` (or at the documented fallback under `/usr/local/bin/`).
+Installs via `apt`, `snap`, or `rustup` may produce different on-disk
+bytes and **will fail hash verification**.
+
+Upstream artifact URLs for the Linux pin:
+
+- `rust-analyzer` 1.85.0:
+  `https://github.com/rust-lang/rust-analyzer/releases/download/2025-02-17/rust-analyzer-x86_64-unknown-linux-gnu.gz`
+- `tree-sitter` 0.25.6:
+  `https://github.com/tree-sitter/tree-sitter/releases/download/v0.25.6/tree-sitter-linux-x64.gz`
+
+`x86_64-darwin` (Intel Mac) and `aarch64-linux` (e.g. ARM CI runners)
+are explicitly **out of scope** for this hardening pass. Adding them
+requires running `shasum -a 256` against the decompressed upstream
+artifact and committing the result to `PINNED_BINARIES` — never copy a
+hash from a secondary source.
+
+Phase 0b labels remain valid only when produced on a supported
+platform. `resolve_from_env()` hard-fails on any other host.
