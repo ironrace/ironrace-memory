@@ -1,4 +1,4 @@
-//! Per SPEC §5.3: whitespace-only or comment-only diffs do not invalidate
+//! Per SPEC §5 rule 3: whitespace-only or comment-only diffs do not invalidate
 //! a fact even when content hashes differ. Implementation tokenizes both
 //! sides with tree-sitter, drops trivia, and compares the residual.
 
@@ -41,7 +41,7 @@ fn collect_significant_tokens<'a>(node: Node<'_>, src: &'a [u8], out: &mut Vec<&
     }
 }
 
-/// Per SPEC §5.2: when a symbol no longer resolves, search post-commit
+/// Per SPEC §5 rule 2: when a symbol no longer resolves, search post-commit
 /// candidates for one whose Myers-diff similarity (via
 /// `similar::TextDiff::ratio()`) is ≥ `min_ratio` over symbol-bearing lines.
 /// Returns the best (highest-ratio) candidate name above the threshold, or
