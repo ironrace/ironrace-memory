@@ -411,37 +411,44 @@ impl SymbolResolver for RustAnalyzer {
 
 // ── URI helpers ───────────────────────────────────────────────────────────────
 
-fn path_to_uri(path: &Path) -> String {
+pub(crate) fn path_to_uri(path: &Path) -> String {
     let s = path.to_string_lossy();
     format!("file://{s}")
 }
 
-fn uri_to_path(uri: &str) -> Result<std::path::PathBuf> {
+pub(crate) fn uri_to_path(uri: &str) -> Result<std::path::PathBuf> {
     let path_str = uri
         .strip_prefix("file://")
         .with_context(|| format!("URI does not start with file://: {uri}"))?;
-    Ok(std::path::PathBuf::from(percent_decode(path_str)))
+    Ok(std::path::PathBuf::from(percent_decode(path_str)?))
 }
 
-/// Minimal percent-decoding for file URIs (handles `%20`, `%3A`, etc.).
-fn percent_decode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+/// Minimal percent-decoding for file URIs (handles `%20`, `%3A`, multi-byte
+/// UTF-8 sequences like `%E2%94%80`, etc.).
+///
+/// Decoded bytes are accumulated into a `Vec<u8>` and validated as UTF-8 at
+/// the end so that multi-byte sequences (e.g. `─` = `E2 94 80`) round-trip
+/// correctly. Per-byte `as char` conversion would corrupt these by emitting
+/// one `char` per raw byte (each in U+0080..=U+00FF) instead of decoding the
+/// full code point.
+pub(crate) fn percent_decode(s: &str) -> Result<String> {
     let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
             if let Ok(byte) =
                 u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
             {
-                out.push(byte as char);
+                out.push(byte);
                 i += 3;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
+        out.push(bytes[i]);
         i += 1;
     }
-    out
+    String::from_utf8(out).with_context(|| format!("invalid UTF-8 in percent-decoded URI: {s:?}"))
 }
 
 #[cfg(test)]
@@ -457,5 +464,64 @@ mod tests {
             err.to_string().contains("exceeds cap"),
             "unexpected error: {err}"
         );
+    }
+
+    // ── percent-decoding (UTF-8 safety) ──────────────────────────────────────
+
+    #[test]
+    fn percent_decode_handles_multibyte_utf8_box_drawing() {
+        // `─` (U+2500) is `E2 94 80` in UTF-8; two of them in a directory name.
+        let decoded = percent_decode("/tmp/%E2%94%80%E2%94%80/foo.rs").unwrap();
+        assert_eq!(decoded, "/tmp/──/foo.rs");
+    }
+
+    #[test]
+    fn percent_decode_handles_multibyte_utf8_latin1_e_acute() {
+        // `é` (U+00E9) is `C3 A9` in UTF-8 (2 bytes).
+        let decoded = percent_decode("/tmp/caf%C3%A9/menu.rs").unwrap();
+        assert_eq!(decoded, "/tmp/café/menu.rs");
+    }
+
+    #[test]
+    fn percent_decode_preserves_space_encoding() {
+        let decoded = percent_decode("/tmp/foo%20bar.rs").unwrap();
+        assert_eq!(decoded, "/tmp/foo bar.rs");
+    }
+
+    #[test]
+    fn percent_decode_preserves_unencoded_bytes() {
+        let decoded = percent_decode("/plain/path/no_escapes.rs").unwrap();
+        assert_eq!(decoded, "/plain/path/no_escapes.rs");
+    }
+
+    #[test]
+    fn percent_decode_rejects_invalid_utf8_sequence() {
+        // `%C3` alone (without a continuation byte) is an invalid UTF-8 prefix.
+        let err = percent_decode("/tmp/bad%C3.rs").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid UTF-8 in percent-decoded URI"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    // ── uri_to_path ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn uri_to_path_decodes_multibyte_utf8() {
+        let path = uri_to_path("file:///tmp/%E2%94%80%E2%94%80/foo.rs").unwrap();
+        assert_eq!(path, std::path::PathBuf::from("/tmp/──/foo.rs"));
+    }
+
+    #[test]
+    fn uri_to_path_decodes_space() {
+        let path = uri_to_path("file:///tmp/foo%20bar.rs").unwrap();
+        assert_eq!(path, std::path::PathBuf::from("/tmp/foo bar.rs"));
+    }
+
+    #[test]
+    fn uri_to_path_rejects_non_file_scheme() {
+        let err = uri_to_path("https://example.com/foo.rs").unwrap_err();
+        assert!(format!("{err:#}").contains("URI does not start with file://"));
     }
 }
