@@ -18,6 +18,8 @@ use serde_json::{json, Value};
 
 use super::{ResolvedLocation, SymbolResolver};
 
+const MAX_LSP_MSG: usize = 64 * 1024 * 1024;
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /// An LSP client backed by a spawned `rust-analyzer` subprocess.
@@ -62,6 +64,9 @@ fn read_message(reader: &mut impl BufRead) -> Result<Value> {
         }
     }
     let len = content_length.context("LSP message missing Content-Length header")?;
+    if len > MAX_LSP_MSG {
+        anyhow::bail!("LSP Content-Length {len} exceeds cap {MAX_LSP_MSG}");
+    }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).context("read LSP body bytes")?;
     serde_json::from_slice(&buf).context("parse LSP JSON body")
@@ -437,4 +442,20 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn read_message_rejects_content_length_above_cap() {
+        let input = format!("Content-Length: {}\r\n\r\n", MAX_LSP_MSG + 1);
+        let err = read_message(&mut Cursor::new(input)).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds cap"),
+            "unexpected error: {err}"
+        );
+    }
 }
