@@ -182,12 +182,21 @@ pub(crate) fn pinned_for(
 /// can exercise it without depending on the real host platform.
 pub(crate) fn unsupported_platform_error(target_os: &str, target_arch: &str) -> anyhow::Error {
     anyhow!(
-        "unsupported platform {}-{} for provbench labeler tooling pins; \
+        "unsupported platform {} for provbench labeler tooling pins; \
          supported platforms: {}",
-        target_arch,
-        target_os,
+        platform_label(target_os, target_arch),
         SUPPORTED_PLATFORMS.join(", "),
     )
+}
+
+fn platform_label(target_os: &str, target_arch: &str) -> String {
+    match (target_os, target_arch) {
+        ("macos", "aarch64") => "aarch64-darwin".to_string(),
+        ("macos", "x86_64") => "x86_64-darwin".to_string(),
+        ("linux", "x86_64") => "x86_64-linux-gnu".to_string(),
+        ("linux", "aarch64") => "aarch64-linux".to_string(),
+        _ => format!("{target_arch}-{target_os}"),
+    }
 }
 
 /// Resolve and hash-verify a single pinned binary for the given
@@ -291,6 +300,25 @@ mod tests {
         assert!(msg.contains("riscv64"), "missing host arch: {msg}");
         assert!(msg.contains("aarch64-darwin"), "missing macos pin: {msg}");
         assert!(msg.contains("x86_64-linux-gnu"), "missing linux pin: {msg}");
+    }
+
+    #[test]
+    fn explicitly_out_of_scope_platforms_are_rejected_with_documented_labels() {
+        for (target_os, target_arch, label) in [
+            ("linux", "aarch64", "aarch64-linux"),
+            ("macos", "x86_64", "x86_64-darwin"),
+        ] {
+            let err = resolve_one(target_os, target_arch, "rust-analyzer").unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains(label),
+                "missing documented unsupported-platform label {label}: {msg}"
+            );
+            assert!(
+                msg.contains("aarch64-darwin") && msg.contains("x86_64-linux-gnu"),
+                "missing supported-platform list: {msg}"
+            );
+        }
     }
 
     #[test]

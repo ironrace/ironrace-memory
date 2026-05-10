@@ -82,14 +82,13 @@ const INDEXING_QUIET_MS: u64 = 1_000;
 /// `|d| self.rx.recv_timeout(d)` and tests can pass a synthetic queue.
 ///
 /// Behavior:
-/// - Returns `Ok(())` once a `$/progress` `end` is seen following a prior
-///   `begin`/`report`.
+/// - Returns `Ok(())` once every observed `$/progress` token has ended.
 /// - Returns `Ok(())` if no messages arrive for `INDEXING_QUIET_MS` AND no
-///   `begin` has yet been observed (small workspaces that finish indexing
+///   progress token is active (small workspaces that finish indexing
 ///   instantly never emit progress).
-/// - Returns `Err(_)` if a `begin` was observed but the hard deadline elapses
-///   before a matching `end` (fail-closed: replay must not silently proceed
-///   with possibly incomplete symbol data). The error message includes the
+/// - Returns `Err(_)` if any progress token is still active when the hard
+///   deadline elapses (fail-closed: replay must not silently proceed with
+///   possibly incomplete symbol data). The error message includes the
 ///   workspace root.
 /// - Returns `Err(_)` if the message channel disconnects mid-wait.
 fn run_indexing_state_machine<F>(
@@ -100,12 +99,12 @@ fn run_indexing_state_machine<F>(
 where
     F: FnMut(Duration) -> std::result::Result<Value, mpsc::RecvTimeoutError>,
 {
-    let mut progress_started = false;
+    let mut active_progress = std::collections::BTreeSet::<String>::new();
 
     loop {
         let now = Instant::now();
         if now >= hard_deadline {
-            if progress_started {
+            if !active_progress.is_empty() {
                 anyhow::bail!(
                     "rust-analyzer indexing timed out at {}",
                     workspace_root.display()
@@ -127,7 +126,7 @@ where
         let msg = match recv_timeout(wait) {
             Ok(m) => m,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if progress_started {
+                if !active_progress.is_empty() {
                     // We started getting progress but it stopped — keep waiting
                     // for an explicit end up to the hard deadline.
                     continue;
@@ -142,27 +141,39 @@ where
             }
         };
 
-        if let Some(method) = msg.get("method").and_then(Value::as_str) {
-            if method == "$/progress" {
-                if let Some(kind) = msg
-                    .get("params")
-                    .and_then(|p| p.get("value"))
-                    .and_then(|v| v.get("kind"))
-                    .and_then(Value::as_str)
-                {
-                    match kind {
-                        "begin" | "report" => {
-                            progress_started = true;
-                        }
-                        "end" if progress_started => {
+        if msg.get("method").and_then(Value::as_str) == Some("$/progress") {
+            if let Some(kind) = msg
+                .get("params")
+                .and_then(|p| p.get("value"))
+                .and_then(|v| v.get("kind"))
+                .and_then(Value::as_str)
+            {
+                let token = progress_token_key(&msg);
+                match kind {
+                    "begin" | "report" => {
+                        active_progress.insert(token);
+                    }
+                    "end" => {
+                        active_progress.remove(&token);
+                        if active_progress.is_empty() {
                             return Ok(());
                         }
-                        _ => {}
                     }
+                    _ => {}
                 }
             }
         }
     }
+}
+
+fn progress_token_key(msg: &Value) -> String {
+    msg.get("params")
+        .and_then(|p| p.get("token"))
+        .map(|token| match token.as_str() {
+            Some(s) => s.to_string(),
+            None => token.to_string(),
+        })
+        .unwrap_or_else(|| "<missing-token>".to_string())
 }
 
 // ── Implementation ────────────────────────────────────────────────────────────
@@ -244,8 +255,8 @@ impl RustAnalyzer {
         Ok(())
     }
 
-    /// Drain incoming messages until we see `$/progress` `kind: "end"` after a
-    /// prior `begin`/`report`, OR until the message stream goes quiet for
+    /// Drain incoming messages until every observed `$/progress` token has
+    /// reached `kind: "end"`, OR until the message stream goes quiet for
     /// `QUIET_MS` milliseconds (indicating RA finished indexing without sending
     /// progress), OR until the hard 30 s wall-clock deadline elapses.
     ///
@@ -254,9 +265,9 @@ impl RustAnalyzer {
     /// after the quiet period and proceed directly to `workspace/symbol`.
     ///
     /// **Fail-closed semantics:** if RA emitted at least one `$/progress`
-    /// `begin`/`report` but never reached `end` before the hard 30 s deadline,
-    /// return an error rather than silently proceeding with possibly
-    /// incomplete symbol resolution.
+    /// `begin`/`report` token but that token never reached `end` before the
+    /// hard 30 s deadline, return an error rather than silently proceeding
+    /// with possibly incomplete symbol resolution.
     fn wait_for_indexing(&mut self, workspace_root: &Path) -> Result<()> {
         let hard_deadline = Instant::now() + Duration::from_secs(30);
         run_indexing_state_machine(workspace_root, hard_deadline, |timeout| {
@@ -601,23 +612,27 @@ mod tests {
     }
 
     fn progress(kind: &str) -> Value {
+        progress_with_token("ra/indexing", kind)
+    }
+
+    fn progress_with_token(token: &str, kind: &str) -> Value {
         json!({
             "jsonrpc": "2.0",
             "method": "$/progress",
-            "params": { "token": "ra/indexing", "value": { "kind": kind } }
+            "params": { "token": token, "value": { "kind": kind } }
         })
     }
 
     #[test]
     fn wait_for_indexing_fails_closed_when_begin_without_end_before_deadline() {
-        // Begin observed, but no end. The loop must process `begin` (setting
-        // progress_started = true) BEFORE the deadline check fires, otherwise
+        // Begin observed, but no end. The loop must process `begin` (recording
+        // an active token) BEFORE the deadline check fires, otherwise
         // we'd take the quiet-period branch. We achieve that by:
         //   1. Letting `recv_timeout` return `begin` on the first call.
         //   2. Returning `Timeout` thereafter, which falls into the
-        //      `progress_started ? continue : Ok(())` branch.
+        //      `active_progress ? continue : Ok(())` branch.
         //   3. Setting a near-future deadline (500 ms) so the next loop turn
-        //      trips the `now >= hard_deadline` check with progress_started=true.
+        //      trips the `now >= hard_deadline` check with an active token.
         //
         // We use 500 ms deadline + 800 ms sleep (300 ms slack) to absorb CI
         // scheduler jitter on shared GitHub Actions runners (15-50 ms typical,
@@ -632,7 +647,7 @@ mod tests {
                 return Ok(progress("begin"));
             }
             // Sleep well past the deadline so the next loop turn observes
-            // `now >= hard_deadline` while progress_started is true.
+            // `now >= hard_deadline` while the token is active.
             std::thread::sleep(Duration::from_millis(800));
             Err(mpsc::RecvTimeoutError::Timeout)
         };
@@ -651,9 +666,35 @@ mod tests {
     }
 
     #[test]
+    fn wait_for_indexing_does_not_accept_end_for_different_token() {
+        let workspace_root = std::path::PathBuf::from("/tmp/fake-ws-root-token");
+        let hard_deadline = Instant::now() + Duration::from_millis(500);
+
+        let mut step = 0;
+        let recv = move |_d: Duration| -> std::result::Result<Value, mpsc::RecvTimeoutError> {
+            step += 1;
+            match step {
+                1 => Ok(progress_with_token("ra/indexing", "begin")),
+                2 => Ok(progress_with_token("ra/unrelated", "end")),
+                _ => {
+                    std::thread::sleep(Duration::from_millis(800));
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                }
+            }
+        };
+
+        let err = run_indexing_state_machine(&workspace_root, hard_deadline, recv).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("rust-analyzer indexing timed out"),
+            "expected timeout error for unmatched progress token, got: {msg}"
+        );
+    }
+
+    #[test]
     fn wait_for_indexing_returns_ok_when_no_progress_messages_within_quiet_period() {
-        // Empty queue → recv_timeout always returns Timeout → progress_started
-        // never set → quiet-period success path returns Ok(()).
+        // Empty queue → recv_timeout always returns Timeout → no active token
+        // is recorded → quiet-period success path returns Ok(()).
         let queue: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Value>>> =
             std::rc::Rc::new(std::cell::RefCell::new(std::collections::VecDeque::new()));
 
