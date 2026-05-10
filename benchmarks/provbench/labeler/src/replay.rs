@@ -8,7 +8,7 @@ use crate::ast::{
 use crate::diff::{is_whitespace_or_comment_only, rename_candidate};
 use crate::facts::{doc_claim, field, function_signature, symbol_existence, test_assertion, Fact};
 use crate::label::{classify, Label, PostCommitState};
-use crate::repo::{CommitRef, Pilot, PilotRepoSpec};
+use crate::repo::{normalize_path_for_fact_id, CommitRef, Pilot, PilotRepoSpec};
 use crate::resolve::{rust_analyzer::RustAnalyzer, SymbolResolver};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -239,6 +239,11 @@ pub fn validate_sha_hex(sha: &str) -> Result<()> {
 }
 
 /// Stable, unique ID for a fact — used as the primary key in output rows.
+///
+/// Source paths are normalized via [`normalize_path_for_fact_id`] (a pure
+/// string transform) so that no absolute filesystem path can ever leak
+/// into a `fact_id`, regardless of the user's `pwd` or where the repo
+/// lives on disk.
 fn fact_id(fact: &Fact) -> String {
     match fact {
         Fact::FunctionSignature {
@@ -249,7 +254,7 @@ fn fact_id(fact: &Fact) -> String {
         } => {
             format!(
                 "FunctionSignature::{qualified_name}::{}::{}",
-                source_path.display(),
+                normalize_path_for_fact_id(source_path),
                 span.line_start
             )
         }
@@ -261,7 +266,7 @@ fn fact_id(fact: &Fact) -> String {
         } => {
             format!(
                 "Field::{qualified_path}::{}::{}",
-                source_path.display(),
+                normalize_path_for_fact_id(source_path),
                 span.line_start
             )
         }
@@ -273,7 +278,7 @@ fn fact_id(fact: &Fact) -> String {
         } => {
             format!(
                 "PublicSymbol::{qualified_name}::{}::{}",
-                source_path.display(),
+                normalize_path_for_fact_id(source_path),
                 span.line_start
             )
         }
@@ -285,7 +290,7 @@ fn fact_id(fact: &Fact) -> String {
         } => {
             format!(
                 "DocClaim::{qualified_name}::{}::{}",
-                doc_path.display(),
+                normalize_path_for_fact_id(doc_path),
                 mention_span.line_start
             )
         }
@@ -297,7 +302,7 @@ fn fact_id(fact: &Fact) -> String {
         } => {
             format!(
                 "TestAssertion::{test_fn}::{}::{}",
-                source_path.display(),
+                normalize_path_for_fact_id(source_path),
                 span.line_start
             )
         }

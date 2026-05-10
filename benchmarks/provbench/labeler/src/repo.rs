@@ -23,6 +23,28 @@ pub(crate) fn read_blob_at_call_count() -> usize {
 pub const RIPGREP_T0_SHA: &str = "af6b6c543b224d348a8876f0c06245d9ea7929c5";
 pub const RIPGREP_URL: &str = "https://github.com/BurntSushi/ripgrep";
 
+/// Stable, repo-relative string form of a git tree path, suitable for
+/// embedding in a `fact_id`.
+///
+/// This helper is **pure**: it performs zero filesystem I/O. The input
+/// is treated as a repo-relative path produced by `git ls-tree` (which
+/// is always forward-slash separated), but on Windows a `PathBuf` may
+/// internally use `\\`; we normalize those to `/` so the resulting
+/// `fact_id` is stable across platforms.
+///
+/// The single allowed `Path::canonicalize` call lives in [`Pilot::open`]
+/// and applies only to the repo root; per-fact paths must stay string-only
+/// or T₀ replay determinism breaks for files that have since been moved
+/// or deleted.
+pub(crate) fn normalize_path_for_fact_id(rel_git_path: &Path) -> String {
+    let s = rel_git_path.to_string_lossy();
+    if s.contains('\\') {
+        s.replace('\\', "/")
+    } else {
+        s.into_owned()
+    }
+}
+
 pub trait PilotRepoSpec {
     fn local_clone_path(&self) -> &Path;
     fn t0_sha(&self) -> &str;
@@ -56,7 +78,14 @@ pub struct Pilot {
 
 impl Pilot {
     pub fn open<S: PilotRepoSpec>(spec: &S) -> Result<Self> {
-        let repo_path = spec.local_clone_path().to_path_buf();
+        // Canonicalize the user-supplied repo root exactly once. This is the
+        // ONLY filesystem-resolving canonicalization in the labeler; per-fact
+        // paths are normalized purely lexically by `normalize_path_for_fact_id`
+        // so that T₀ replay stays deterministic for moved/deleted files.
+        let raw_path = spec.local_clone_path();
+        let repo_path = raw_path
+            .canonicalize()
+            .with_context(|| format!("canonicalize pilot repo root {}", raw_path.display()))?;
         let repo = gix::open(&repo_path)
             .with_context(|| format!("open pilot repo at {}", repo_path.display()))?;
         let t0_sha = ObjectId::from_hex(spec.t0_sha().as_bytes())
@@ -138,5 +167,42 @@ impl Pilot {
                 Ok(Some(obj.data.clone()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_path_for_fact_id_preserves_utf8_and_spaces_without_filesystem() {
+        // The helper is documented as pure: zero filesystem I/O. Use a path
+        // that does not exist anywhere to make sure no canonicalize() syscall
+        // is hiding inside.
+        let weird = PathBuf::from("does/not/exist/héllo wörld/файл.rs");
+        let out = normalize_path_for_fact_id(&weird);
+        assert_eq!(out, "does/not/exist/héllo wörld/файл.rs");
+
+        let with_spaces = PathBuf::from("a b/c d.rs");
+        assert_eq!(normalize_path_for_fact_id(&with_spaces), "a b/c d.rs");
+
+        // git ls-tree paths are already forward-slashed; the helper must
+        // be a no-op on those.
+        let unix_like = PathBuf::from("src/lib.rs");
+        assert_eq!(normalize_path_for_fact_id(&unix_like), "src/lib.rs");
+    }
+
+    #[test]
+    fn normalize_path_for_fact_id_normalizes_backslashes_to_forward_slashes() {
+        // PathBuf::from on Unix won't produce backslash separators — but the
+        // helper is also documented to normalize them so Windows PathBufs
+        // round-trip correctly. Verify the string-level transformation.
+        let raw = PathBuf::from("src\\sub\\file.rs");
+        let out = normalize_path_for_fact_id(&raw);
+        assert!(
+            !out.contains('\\'),
+            "expected no backslash in fact_id segment: {out}"
+        );
+        assert_eq!(out, "src/sub/file.rs");
     }
 }
