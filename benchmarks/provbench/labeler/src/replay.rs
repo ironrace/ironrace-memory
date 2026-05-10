@@ -1,13 +1,12 @@
 //! Per-commit replay: read blobs at each commit, compute post-commit state
 //! per fact, classify, emit `FactAtCommit` rows.
-//!
-//! v1 limitation: only `Fact::FunctionSignature` facts are extracted at T₀.
-//! Other extractors (Field, PublicSymbol, DocClaim, TestAssertion) will be
-//! wired in a follow-up task once the integration surface is stable.
 
-use crate::ast::RustAst;
+use crate::ast::{
+    spans::{content_hash, Span},
+    RustAst,
+};
 use crate::diff::{is_whitespace_or_comment_only, rename_candidate};
-use crate::facts::{function_signature, Fact};
+use crate::facts::{doc_claim, field, function_signature, symbol_existence, test_assertion, Fact};
 use crate::label::{classify, Label, PostCommitState};
 use crate::repo::{CommitRef, Pilot, PilotRepoSpec};
 use anyhow::{Context, Result};
@@ -51,18 +50,48 @@ impl Replay {
         let commits: Vec<CommitRef> = pilot.walk_first_parent()?.collect();
 
         // Extract the fact set at T₀ across every .rs file present at T₀.
-        // v1: FunctionSignature facts only.
         let mut facts: Vec<ObservedFact> = Vec::new();
-        for path in rust_paths_at(&pilot, &cfg.t0_sha)? {
-            if let Some(blob) = pilot.read_blob_at(&cfg.t0_sha, &path)? {
+        let rust_paths = rust_paths_at(&pilot, &cfg.t0_sha)?;
+        let mut facts_so_far: Vec<Fact> = Vec::new();
+        for path in &rust_paths {
+            if let Some(blob) = pilot.read_blob_at(&cfg.t0_sha, path)? {
                 let ast = RustAst::parse(&blob)
                     .with_context(|| format!("parse {} @ T0", path.display()))?;
-                facts.extend(
-                    function_signature::extract(&ast, &path).map(|fact| ObservedFact {
-                        t0_span_bytes: observed_span_bytes(&blob, &fact),
-                        fact,
-                    }),
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    function_signature::extract(&ast, path),
                 );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    field::extract(&ast, path),
+                );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    symbol_existence::extract(&ast, path),
+                );
+                let test_facts: Vec<Fact> =
+                    test_assertion::extract(&ast, path, &facts_so_far).collect();
+                push_observed_facts(&mut facts, &mut facts_so_far, &blob, test_facts);
+            }
+        }
+        let rust_dirs = rust_paths
+            .iter()
+            .filter_map(|p| p.parent().map(Path::to_path_buf))
+            .collect::<std::collections::BTreeSet<_>>();
+        for path in markdown_paths_at(&pilot, &cfg.t0_sha)?
+            .into_iter()
+            .filter(|p| is_replay_doc_path(p, &rust_dirs))
+        {
+            if let Some(blob) = pilot.read_blob_at(&cfg.t0_sha, &path)? {
+                let doc_facts: Vec<Fact> =
+                    doc_claim::extract(&blob, &path, &facts_so_far).collect();
+                push_observed_facts(&mut facts, &mut facts_so_far, &blob, doc_facts);
             }
         }
 
@@ -98,6 +127,21 @@ impl Replay {
     }
 }
 
+fn push_observed_facts(
+    facts: &mut Vec<ObservedFact>,
+    facts_so_far: &mut Vec<Fact>,
+    blob: &[u8],
+    extracted: impl IntoIterator<Item = Fact>,
+) {
+    for fact in extracted {
+        facts.push(ObservedFact {
+            t0_span_bytes: observed_span_bytes(blob, &fact),
+            fact: fact.clone(),
+        });
+        facts_so_far.push(fact);
+    }
+}
+
 fn group_facts_by_source_path(facts: &[ObservedFact]) -> BTreeMap<PathBuf, Vec<&ObservedFact>> {
     let mut grouped: BTreeMap<PathBuf, Vec<&ObservedFact>> = BTreeMap::new();
     for observed in facts {
@@ -127,6 +171,20 @@ impl PilotRepoSpec for AdHocSpec {
 
 /// Return all `.rs` file paths present in the git tree at `sha`.
 fn rust_paths_at(pilot: &Pilot, sha: &str) -> Result<Vec<PathBuf>> {
+    Ok(tree_paths_at(pilot, sha)?
+        .into_iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"))
+        .collect())
+}
+
+fn markdown_paths_at(pilot: &Pilot, sha: &str) -> Result<Vec<PathBuf>> {
+    Ok(tree_paths_at(pilot, sha)?
+        .into_iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+        .collect())
+}
+
+fn tree_paths_at(pilot: &Pilot, sha: &str) -> Result<Vec<PathBuf>> {
     validate_sha_hex(sha)?;
     let out = std::process::Command::new("git")
         .arg("-C")
@@ -142,9 +200,16 @@ fn rust_paths_at(pilot: &Pilot, sha: &str) -> Result<Vec<PathBuf>> {
     }
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter(|l| l.ends_with(".rs"))
         .map(PathBuf::from)
         .collect())
+}
+
+fn is_replay_doc_path(path: &Path, rust_dirs: &std::collections::BTreeSet<PathBuf>) -> bool {
+    path.components().count() == 1
+        || path
+            .parent()
+            .map(|parent| rust_dirs.contains(parent))
+            .unwrap_or(false)
 }
 
 pub fn validate_sha_hex(sha: &str) -> Result<()> {
@@ -284,22 +349,11 @@ fn classify_against_commit(
 
         Some(post_bytes) => {
             let observed_hash = observed_hash_for(fact);
-            let qualified_name = qualified_name_for(fact);
 
-            // Parse the post-commit blob and search for the same symbol.
-            let post_sig = post_ast.and_then(|ast| {
-                function_signature::extract(ast, path).find_map(|f| match f {
-                    Fact::FunctionSignature {
-                        qualified_name: q,
-                        span,
-                        content_hash,
-                        ..
-                    } if q == qualified_name => Some((span, content_hash)),
-                    _ => None,
-                })
-            });
+            // Search the post-commit file for the same fact kind/key.
+            let post_fact = matching_post_fact(fact, path, post_bytes, post_ast);
 
-            match post_sig {
+            match post_fact {
                 Some((post_span, post_hash)) => {
                     // Symbol found — compute whitespace/structural deltas.
                     let after_bytes = &post_bytes[post_span.byte_range.clone()];
@@ -329,22 +383,7 @@ fn classify_against_commit(
                         }
                     } else {
                         // Production mode: attempt rename detection.
-                        let candidates: Vec<(String, Vec<u8>)> = post_ast
-                            .iter()
-                            .flat_map(|ast| {
-                                function_signature::extract(ast, path).filter_map(|f| match f {
-                                    Fact::FunctionSignature {
-                                        qualified_name: q,
-                                        span,
-                                        ..
-                                    } => {
-                                        let bytes = post_bytes[span.byte_range].to_vec();
-                                        Some((q, bytes))
-                                    }
-                                    _ => None,
-                                })
-                            })
-                            .collect();
+                        let candidates = rename_candidates_for(fact, path, post_bytes, post_ast);
                         let rename = rename_candidate(t0_span_bytes, &candidates, 0.6);
                         CommitState {
                             file_exists: true,
@@ -367,42 +406,191 @@ fn observed_span_bytes(blob: &[u8], fact: &Fact) -> Vec<u8> {
     blob[span_for(fact).byte_range.clone()].to_vec()
 }
 
-fn span_for(fact: &Fact) -> &crate::ast::spans::Span {
+fn matching_post_fact(
+    fact: &Fact,
+    path: &Path,
+    post_bytes: &[u8],
+    post_ast: Option<&RustAst>,
+) -> Option<(Span, String)> {
     match fact {
-        Fact::FunctionSignature { span, .. }
-        | Fact::Field { span, .. }
-        | Fact::PublicSymbol { span, .. }
-        | Fact::TestAssertion { span, .. } => span,
+        Fact::FunctionSignature { qualified_name, .. } => post_ast.and_then(|ast| {
+            function_signature::extract(ast, path).find_map(|f| match f {
+                Fact::FunctionSignature {
+                    qualified_name: q,
+                    span,
+                    content_hash,
+                    ..
+                } if q == *qualified_name => Some((span, content_hash)),
+                Fact::FunctionSignature { .. }
+                | Fact::Field { .. }
+                | Fact::PublicSymbol { .. }
+                | Fact::DocClaim { .. }
+                | Fact::TestAssertion { .. } => None,
+            })
+        }),
+        Fact::Field { qualified_path, .. } => post_ast.and_then(|ast| {
+            field::extract(ast, path).find_map(|f| match f {
+                Fact::Field {
+                    qualified_path: q,
+                    span,
+                    content_hash,
+                    ..
+                } if q == *qualified_path => Some((span, content_hash)),
+                Fact::FunctionSignature { .. }
+                | Fact::Field { .. }
+                | Fact::PublicSymbol { .. }
+                | Fact::DocClaim { .. }
+                | Fact::TestAssertion { .. } => None,
+            })
+        }),
+        Fact::PublicSymbol { qualified_name, .. } => post_ast.and_then(|ast| {
+            symbol_existence::extract(ast, path).find_map(|f| match f {
+                Fact::PublicSymbol {
+                    qualified_name: q,
+                    span,
+                    content_hash,
+                    ..
+                } if q == *qualified_name => Some((span, content_hash)),
+                Fact::FunctionSignature { .. }
+                | Fact::Field { .. }
+                | Fact::PublicSymbol { .. }
+                | Fact::DocClaim { .. }
+                | Fact::TestAssertion { .. } => None,
+            })
+        }),
+        Fact::DocClaim { mention_span, .. } => {
+            let range = mention_span.byte_range.clone();
+            if range.end > post_bytes.len() {
+                return None;
+            }
+            Some((
+                Span {
+                    byte_range: range.clone(),
+                    line_start: mention_span.line_start,
+                    line_end: mention_span.line_end,
+                },
+                content_hash(&post_bytes[range]),
+            ))
+        }
+        Fact::TestAssertion { test_fn, .. } => post_ast.and_then(|ast| {
+            test_assertion::extract(ast, path, &[]).find_map(|f| match f {
+                Fact::TestAssertion {
+                    test_fn: q,
+                    span,
+                    content_hash,
+                    ..
+                } if q == *test_fn => Some((span, content_hash)),
+                Fact::FunctionSignature { .. }
+                | Fact::Field { .. }
+                | Fact::PublicSymbol { .. }
+                | Fact::DocClaim { .. }
+                | Fact::TestAssertion { .. } => None,
+            })
+        }),
+    }
+}
+
+fn rename_candidates_for(
+    fact: &Fact,
+    path: &Path,
+    post_bytes: &[u8],
+    post_ast: Option<&RustAst>,
+) -> Vec<(String, Vec<u8>)> {
+    let Some(ast) = post_ast else {
+        return Vec::new();
+    };
+    match fact {
+        Fact::FunctionSignature { .. } => function_signature::extract(ast, path)
+            .filter_map(|f| match f {
+                Fact::FunctionSignature {
+                    qualified_name,
+                    span,
+                    ..
+                } => Some((qualified_name, post_bytes[span.byte_range].to_vec())),
+                Fact::Field { .. }
+                | Fact::PublicSymbol { .. }
+                | Fact::DocClaim { .. }
+                | Fact::TestAssertion { .. } => None,
+            })
+            .collect(),
+        Fact::Field { .. } => field::extract(ast, path)
+            .filter_map(|f| match f {
+                Fact::Field {
+                    qualified_path,
+                    span,
+                    ..
+                } => Some((qualified_path, post_bytes[span.byte_range].to_vec())),
+                Fact::FunctionSignature { .. }
+                | Fact::PublicSymbol { .. }
+                | Fact::DocClaim { .. }
+                | Fact::TestAssertion { .. } => None,
+            })
+            .collect(),
+        Fact::PublicSymbol { .. } => symbol_existence::extract(ast, path)
+            .filter_map(|f| match f {
+                Fact::PublicSymbol {
+                    qualified_name,
+                    span,
+                    ..
+                } => Some((qualified_name, post_bytes[span.byte_range].to_vec())),
+                Fact::FunctionSignature { .. }
+                | Fact::Field { .. }
+                | Fact::DocClaim { .. }
+                | Fact::TestAssertion { .. } => None,
+            })
+            .collect(),
+        Fact::DocClaim { .. } => Vec::new(),
+        Fact::TestAssertion { .. } => test_assertion::extract(ast, path, &[])
+            .filter_map(|f| match f {
+                Fact::TestAssertion { test_fn, span, .. } => {
+                    Some((test_fn, post_bytes[span.byte_range].to_vec()))
+                }
+                Fact::FunctionSignature { .. }
+                | Fact::Field { .. }
+                | Fact::PublicSymbol { .. }
+                | Fact::DocClaim { .. } => None,
+            })
+            .collect(),
+    }
+}
+
+fn span_for(fact: &Fact) -> &Span {
+    match fact {
+        Fact::FunctionSignature { span, .. } => span,
+        Fact::Field { span, .. } => span,
+        Fact::PublicSymbol { span, .. } => span,
         Fact::DocClaim { mention_span, .. } => mention_span,
+        Fact::TestAssertion { span, .. } => span,
     }
 }
 
 fn source_path_for(fact: &Fact) -> &Path {
     match fact {
-        Fact::FunctionSignature { source_path, .. }
-        | Fact::Field { source_path, .. }
-        | Fact::PublicSymbol { source_path, .. }
-        | Fact::TestAssertion { source_path, .. } => source_path,
+        Fact::FunctionSignature { source_path, .. } => source_path,
+        Fact::Field { source_path, .. } => source_path,
+        Fact::PublicSymbol { source_path, .. } => source_path,
         Fact::DocClaim { doc_path, .. } => doc_path,
+        Fact::TestAssertion { source_path, .. } => source_path,
     }
 }
 
 fn observed_hash_for(fact: &Fact) -> &str {
     match fact {
-        Fact::FunctionSignature { content_hash, .. }
-        | Fact::Field { content_hash, .. }
-        | Fact::PublicSymbol { content_hash, .. }
-        | Fact::TestAssertion { content_hash, .. } => content_hash,
+        Fact::FunctionSignature { content_hash, .. } => content_hash,
+        Fact::Field { content_hash, .. } => content_hash,
+        Fact::PublicSymbol { content_hash, .. } => content_hash,
         Fact::DocClaim { mention_hash, .. } => mention_hash,
+        Fact::TestAssertion { content_hash, .. } => content_hash,
     }
 }
 
+#[allow(dead_code)]
 fn qualified_name_for(fact: &Fact) -> &str {
     match fact {
-        Fact::FunctionSignature { qualified_name, .. }
-        | Fact::PublicSymbol { qualified_name, .. }
-        | Fact::DocClaim { qualified_name, .. } => qualified_name,
+        Fact::FunctionSignature { qualified_name, .. } => qualified_name,
         Fact::Field { qualified_path, .. } => qualified_path,
+        Fact::PublicSymbol { qualified_name, .. } => qualified_name,
+        Fact::DocClaim { qualified_name, .. } => qualified_name,
         Fact::TestAssertion { test_fn, .. } => test_fn,
     }
 }
@@ -484,7 +672,7 @@ mod tests {
             skip_symbol_resolution: true,
         };
         let rows = Replay::run(&cfg).unwrap();
-        assert_eq!(rows.len(), 15);
+        assert_eq!(rows.len(), 30);
         let reads = crate::repo::read_blob_at_call_count();
         assert!(
             reads <= 3,
