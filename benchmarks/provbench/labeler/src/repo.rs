@@ -6,6 +6,19 @@ use anyhow::{anyhow, Context, Result};
 use gix::ObjectId;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+static READ_BLOB_AT_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_read_blob_at_call_count() {
+    READ_BLOB_AT_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn read_blob_at_call_count() -> usize {
+    READ_BLOB_AT_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Pinned pilot repo per SPEC §13.2.
 pub const RIPGREP_T0_SHA: &str = "af6b6c543b224d348a8876f0c06245d9ea7929c5";
 pub const RIPGREP_URL: &str = "https://github.com/BurntSushi/ripgrep";
@@ -98,6 +111,9 @@ impl Pilot {
     }
 
     pub fn read_blob_at(&self, commit_sha: &str, path: &Path) -> Result<Option<Vec<u8>>> {
+        #[cfg(test)]
+        READ_BLOB_AT_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let id = ObjectId::from_hex(commit_sha.as_bytes())
             .with_context(|| format!("read_blob_at: invalid sha {commit_sha}"))?;
         let commit = self

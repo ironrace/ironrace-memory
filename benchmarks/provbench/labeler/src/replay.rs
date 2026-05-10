@@ -12,6 +12,7 @@ use crate::label::{classify, Label, PostCommitState};
 use crate::repo::{CommitRef, Pilot, PilotRepoSpec};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 // ── Public surface ────────────────────────────────────────────────────────────
@@ -36,6 +37,11 @@ pub struct ReplayConfig {
 
 pub struct Replay;
 
+struct ObservedFact {
+    fact: Fact,
+    t0_span_bytes: Vec<u8>,
+}
+
 impl Replay {
     pub fn run(cfg: &ReplayConfig) -> Result<Vec<FactAtCommit>> {
         let pilot = Pilot::open(&AdHocSpec {
@@ -46,28 +52,61 @@ impl Replay {
 
         // Extract the fact set at T₀ across every .rs file present at T₀.
         // v1: FunctionSignature facts only.
-        let mut facts: Vec<Fact> = Vec::new();
+        let mut facts: Vec<ObservedFact> = Vec::new();
         for path in rust_paths_at(&pilot, &cfg.t0_sha)? {
             if let Some(blob) = pilot.read_blob_at(&cfg.t0_sha, &path)? {
                 let ast = RustAst::parse(&blob)
                     .with_context(|| format!("parse {} @ T0", path.display()))?;
-                facts.extend(function_signature::extract(&ast, &path));
+                facts.extend(
+                    function_signature::extract(&ast, &path).map(|fact| ObservedFact {
+                        t0_span_bytes: observed_span_bytes(&blob, &fact),
+                        fact,
+                    }),
+                );
             }
         }
 
+        #[cfg(test)]
+        crate::repo::reset_read_blob_at_call_count();
+
+        let facts_by_path = group_facts_by_source_path(&facts);
         let mut rows: Vec<FactAtCommit> = Vec::new();
         for commit in &commits {
-            for fact in &facts {
-                let label = classify_against_commit(&pilot, fact, &commit.sha, cfg)?;
-                rows.push(FactAtCommit {
-                    fact_id: fact_id(fact),
-                    commit_sha: commit.sha.clone(),
-                    label,
-                });
+            for (path, facts_at_path) in &facts_by_path {
+                let post_bytes = pilot.read_blob_at(&commit.sha, path)?;
+                let post_ast = post_bytes
+                    .as_ref()
+                    .and_then(|bytes| RustAst::parse(bytes).ok());
+                for observed in facts_at_path {
+                    let label = classify_against_commit(
+                        &observed.fact,
+                        path,
+                        post_bytes.as_deref(),
+                        post_ast.as_ref(),
+                        &observed.t0_span_bytes,
+                        cfg,
+                    )?;
+                    rows.push(FactAtCommit {
+                        fact_id: fact_id(&observed.fact),
+                        commit_sha: commit.sha.clone(),
+                        label,
+                    });
+                }
             }
         }
         Ok(rows)
     }
+}
+
+fn group_facts_by_source_path(facts: &[ObservedFact]) -> BTreeMap<PathBuf, Vec<&ObservedFact>> {
+    let mut grouped: BTreeMap<PathBuf, Vec<&ObservedFact>> = BTreeMap::new();
+    for observed in facts {
+        grouped
+            .entry(source_path_for(&observed.fact).to_path_buf())
+            .or_default()
+            .push(observed);
+    }
+    grouped
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -232,15 +271,14 @@ impl CommitState {
 
 /// Classify `fact` against the post-commit blob at `commit_sha`.
 fn classify_against_commit(
-    pilot: &Pilot,
     fact: &Fact,
-    commit_sha: &str,
+    path: &Path,
+    post_blob: Option<&[u8]>,
+    post_ast: Option<&RustAst>,
+    t0_span_bytes: &[u8],
     cfg: &ReplayConfig,
 ) -> Result<Label> {
-    let path = source_path_for(fact);
-    let blob = pilot.read_blob_at(commit_sha, path)?;
-
-    let state = match blob {
+    let state = match post_blob {
         // File was deleted at this commit.
         None => CommitState::deleted(),
 
@@ -249,8 +287,7 @@ fn classify_against_commit(
             let qualified_name = qualified_name_for(fact);
 
             // Parse the post-commit blob and search for the same symbol.
-            let post_ast = RustAst::parse(&post_bytes).ok();
-            let post_sig = post_ast.as_ref().and_then(|ast| {
+            let post_sig = post_ast.and_then(|ast| {
                 function_signature::extract(ast, path).find_map(|f| match f {
                     Fact::FunctionSignature {
                         qualified_name: q,
@@ -265,9 +302,8 @@ fn classify_against_commit(
             match post_sig {
                 Some((post_span, post_hash)) => {
                     // Symbol found — compute whitespace/structural deltas.
-                    let before_bytes = t0_span_bytes(pilot, &cfg.t0_sha, path, fact)?;
-                    let after_bytes = post_bytes[post_span.byte_range.clone()].to_vec();
-                    let ws_only = is_whitespace_or_comment_only(&before_bytes, &after_bytes);
+                    let after_bytes = &post_bytes[post_span.byte_range.clone()];
+                    let ws_only = is_whitespace_or_comment_only(t0_span_bytes, after_bytes);
                     // Any signature-level hash difference is structurally classifiable.
                     let structural = post_hash != observed_hash;
                     CommitState {
@@ -309,8 +345,7 @@ fn classify_against_commit(
                                 })
                             })
                             .collect();
-                        let before_bytes = t0_span_bytes(pilot, &cfg.t0_sha, path, fact)?;
-                        let rename = rename_candidate(&before_bytes, &candidates, 0.6);
+                        let rename = rename_candidate(t0_span_bytes, &candidates, 0.6);
                         CommitState {
                             file_exists: true,
                             post_span_hash: None,
@@ -328,19 +363,18 @@ fn classify_against_commit(
     Ok(classify(fact, &state))
 }
 
-/// Extract the span bytes from the T₀ blob for `fact`.
-fn t0_span_bytes(pilot: &Pilot, t0: &str, path: &Path, fact: &Fact) -> Result<Vec<u8>> {
-    let blob = pilot
-        .read_blob_at(t0, path)?
-        .with_context(|| format!("T0 blob missing: {}", path.display()))?;
-    let span = match fact {
+fn observed_span_bytes(blob: &[u8], fact: &Fact) -> Vec<u8> {
+    blob[span_for(fact).byte_range.clone()].to_vec()
+}
+
+fn span_for(fact: &Fact) -> &crate::ast::spans::Span {
+    match fact {
         Fact::FunctionSignature { span, .. }
         | Fact::Field { span, .. }
         | Fact::PublicSymbol { span, .. }
         | Fact::TestAssertion { span, .. } => span,
         Fact::DocClaim { mention_span, .. } => mention_span,
-    };
-    Ok(blob[span.byte_range.clone()].to_vec())
+    }
 }
 
 fn source_path_for(fact: &Fact) -> &Path {
@@ -370,5 +404,91 @@ fn qualified_name_for(fact: &Fact) -> &str {
         | Fact::DocClaim { qualified_name, .. } => qualified_name,
         Fact::Field { qualified_path, .. } => qualified_path,
         Fact::TestAssertion { test_fn, .. } => test_fn,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(repo: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn commit_all(repo: &Path, message: &str) {
+        git(repo, &["add", "."]);
+        git(
+            repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                message,
+            ],
+        );
+    }
+
+    #[test]
+    fn replay_reads_each_source_blob_once_per_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        git(repo, &["init", "--initial-branch=main"]);
+        std::fs::create_dir(repo.join("src")).unwrap();
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            b"[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("src/lib.rs"),
+            b"pub fn a() -> i32 { 1 }\npub fn b() -> i32 { 2 }\npub fn c() -> i32 { 3 }\npub fn d() -> i32 { 4 }\npub fn e() -> i32 { 5 }\n",
+        )
+        .unwrap();
+        commit_all(repo, "init");
+        let t0 = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        std::fs::write(
+            repo.join("src/lib.rs"),
+            b"pub fn a() -> i32 { 10 }\npub fn b() -> i32 { 2 }\npub fn c() -> i32 { 3 }\npub fn d() -> i32 { 4 }\npub fn e() -> i32 { 5 }\n",
+        )
+        .unwrap();
+        commit_all(repo, "body tweak one");
+        std::fs::write(
+            repo.join("src/lib.rs"),
+            b"pub fn a() -> i32 { 10 }\npub fn b() -> i32 { 20 }\npub fn c() -> i32 { 3 }\npub fn d() -> i32 { 4 }\npub fn e() -> i32 { 5 }\n",
+        )
+        .unwrap();
+        commit_all(repo, "body tweak two");
+
+        let cfg = ReplayConfig {
+            repo_path: repo.to_path_buf(),
+            t0_sha: t0,
+            skip_symbol_resolution: true,
+        };
+        let rows = Replay::run(&cfg).unwrap();
+        assert_eq!(rows.len(), 15);
+        let reads = crate::repo::read_blob_at_call_count();
+        assert!(
+            reads <= 3,
+            "expected at most one blob read per commit for one source file, got {reads}"
+        );
     }
 }
