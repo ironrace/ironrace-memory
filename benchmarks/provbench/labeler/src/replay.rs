@@ -100,8 +100,10 @@ impl Replay {
             .filter(|p| is_replay_doc_path(p, &rust_dirs))
         {
             if let Some(blob) = pilot.read_blob_at(&cfg.t0_sha, &path)? {
-                let doc_facts: Vec<Fact> =
-                    doc_claim::extract(&blob, &path, &facts_so_far).collect();
+                let doc_facts =
+                    doc_claim::extract(&blob, &path, &facts_so_far).with_context(|| {
+                        format!("parse README at {} @ {}", path.display(), cfg.t0_sha)
+                    })?;
                 push_observed_facts(&mut facts, &mut facts_so_far, &blob, doc_facts);
             }
         }

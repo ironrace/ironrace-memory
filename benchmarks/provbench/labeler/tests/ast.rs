@@ -153,8 +153,7 @@ fn inline_code_mention_resolving_to_known_symbol_emits_doc_claim() {
     let known: Vec<_> =
         provbench_labeler::facts::symbol_existence::extract(&ast, std::path::Path::new("lib.rs"))
             .collect();
-    let claims: Vec<_> =
-        doc_claim::extract(md, std::path::Path::new("README.md"), &known).collect();
+    let claims = doc_claim::extract(md, std::path::Path::new("README.md"), &known).unwrap();
     assert_eq!(claims.len(), 1);
     #[allow(unreachable_patterns)]
     match &claims[0] {
@@ -178,8 +177,7 @@ fn unresolvable_mention_is_not_emitted() {
     let known: Vec<_> =
         provbench_labeler::facts::symbol_existence::extract(&ast, std::path::Path::new("lib.rs"))
             .collect();
-    let claims: Vec<_> =
-        doc_claim::extract(md, std::path::Path::new("README.md"), &known).collect();
+    let claims = doc_claim::extract(md, std::path::Path::new("README.md"), &known).unwrap();
     assert_eq!(claims.len(), 0);
 }
 
