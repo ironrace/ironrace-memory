@@ -72,6 +72,110 @@ fn read_message(reader: &mut impl BufRead) -> Result<Value> {
     serde_json::from_slice(&buf).context("parse LSP JSON body")
 }
 
+// ── Indexing state machine (extracted for unit testing without spawning RA) ──
+
+/// After this many ms without any new LSP message, assume RA is idle.
+const INDEXING_QUIET_MS: u64 = 1_000;
+
+/// Pure(-ish) indexing wait state machine driven by an injectable message
+/// receiver. Mirrors the live `recv_timeout` API so production code can pass
+/// `|d| self.rx.recv_timeout(d)` and tests can pass a synthetic queue.
+///
+/// Behavior:
+/// - Returns `Ok(())` once every observed `$/progress` token has ended.
+/// - Returns `Ok(())` if no messages arrive for `INDEXING_QUIET_MS` AND no
+///   progress token is active (small workspaces that finish indexing
+///   instantly never emit progress).
+/// - Returns `Err(_)` if any progress token is still active when the hard
+///   deadline elapses (fail-closed: replay must not silently proceed with
+///   possibly incomplete symbol data). The error message includes the
+///   workspace root.
+/// - Returns `Err(_)` if the message channel disconnects mid-wait.
+fn run_indexing_state_machine<F>(
+    workspace_root: &Path,
+    hard_deadline: Instant,
+    mut recv_timeout: F,
+) -> Result<()>
+where
+    F: FnMut(Duration) -> std::result::Result<Value, mpsc::RecvTimeoutError>,
+{
+    let mut active_progress = std::collections::BTreeSet::<String>::new();
+
+    loop {
+        let now = Instant::now();
+        if now >= hard_deadline {
+            if !active_progress.is_empty() {
+                anyhow::bail!(
+                    "rust-analyzer indexing timed out at {}",
+                    workspace_root.display()
+                );
+            }
+            // No begin observed and deadline elapsed — treat as quiet success
+            // (extremely small workspace where RA never spoke at all).
+            tracing::debug!(
+                "rust-analyzer indexing deadline reached with no $/progress; assuming complete"
+            );
+            return Ok(());
+        }
+
+        // Wait at most INDEXING_QUIET_MS or the remaining hard deadline,
+        // whichever is shorter.
+        let hard_remaining = hard_deadline.saturating_duration_since(now);
+        let wait = hard_remaining.min(Duration::from_millis(INDEXING_QUIET_MS));
+
+        let msg = match recv_timeout(wait) {
+            Ok(m) => m,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !active_progress.is_empty() {
+                    // We started getting progress but it stopped — keep waiting
+                    // for an explicit end up to the hard deadline.
+                    continue;
+                }
+                // No messages at all for INDEXING_QUIET_MS — RA finished with
+                // no progress notifications.
+                tracing::debug!("rust-analyzer sent no $/progress; assuming indexing complete");
+                return Ok(());
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("rust-analyzer stdout closed during indexing wait");
+            }
+        };
+
+        if msg.get("method").and_then(Value::as_str) == Some("$/progress") {
+            if let Some(kind) = msg
+                .get("params")
+                .and_then(|p| p.get("value"))
+                .and_then(|v| v.get("kind"))
+                .and_then(Value::as_str)
+            {
+                let token = progress_token_key(&msg);
+                match kind {
+                    "begin" | "report" => {
+                        active_progress.insert(token);
+                    }
+                    "end" => {
+                        active_progress.remove(&token);
+                        if active_progress.is_empty() {
+                            return Ok(());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn progress_token_key(msg: &Value) -> String {
+    msg.get("params")
+        .and_then(|p| p.get("token"))
+        .map(|token| match token.as_str() {
+            Some(s) => s.to_string(),
+            None => token.to_string(),
+        })
+        .unwrap_or_else(|| "<missing-token>".to_string())
+}
+
 // ── Implementation ────────────────────────────────────────────────────────────
 
 impl RustAnalyzer {
@@ -143,77 +247,32 @@ impl RustAnalyzer {
         });
         write_message(&mut self.stdin, &notif).context("send initialized notification")?;
 
-        // Wait for indexing to complete (or give up after 30 s and try anyway).
-        self.wait_for_indexing()
+        // Wait for indexing to complete; fail closed if begin observed but
+        // never ended before the 30 s hard deadline.
+        self.wait_for_indexing(workspace_root)
             .context("wait for rust-analyzer indexing")?;
 
         Ok(())
     }
 
-    /// Drain incoming messages until we see `$/progress` `kind: "end"` after a
-    /// prior `begin`/`report`, OR until the message stream goes quiet for
+    /// Drain incoming messages until every observed `$/progress` token has
+    /// reached `kind: "end"`, OR until the message stream goes quiet for
     /// `QUIET_MS` milliseconds (indicating RA finished indexing without sending
     /// progress), OR until the hard 30 s wall-clock deadline elapses.
     ///
     /// For very small workspaces rust-analyzer may never send any `$/progress`
     /// (it finishes before the client even asks); in that case we fall through
     /// after the quiet period and proceed directly to `workspace/symbol`.
-    fn wait_for_indexing(&mut self) -> Result<()> {
-        // After this many ms without any new message, assume RA is idle.
-        const QUIET_MS: u64 = 1_000;
+    ///
+    /// **Fail-closed semantics:** if RA emitted at least one `$/progress`
+    /// `begin`/`report` token but that token never reached `end` before the
+    /// hard 30 s deadline, return an error rather than silently proceeding
+    /// with possibly incomplete symbol resolution.
+    fn wait_for_indexing(&mut self, workspace_root: &Path) -> Result<()> {
         let hard_deadline = Instant::now() + Duration::from_secs(30);
-        let mut seen_begin = false;
-
-        loop {
-            let now = Instant::now();
-            if now >= hard_deadline {
-                tracing::warn!(
-                    "rust-analyzer indexing did not signal $/progress end within 30 s; proceeding"
-                );
-                return Ok(());
-            }
-
-            // Wait at most QUIET_MS or the remaining hard deadline, whichever is shorter.
-            let hard_remaining = hard_deadline.saturating_duration_since(now);
-            let wait = hard_remaining.min(Duration::from_millis(QUIET_MS));
-
-            let msg = match self.rx.recv_timeout(wait) {
-                Ok(m) => m,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if seen_begin {
-                        // We started getting progress but it stopped — still wait.
-                        continue;
-                    }
-                    // No messages at all for QUIET_MS — RA finished with no progress.
-                    tracing::debug!("rust-analyzer sent no $/progress; assuming indexing complete");
-                    return Ok(());
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    anyhow::bail!("rust-analyzer stdout closed during indexing wait");
-                }
-            };
-
-            if let Some(method) = msg.get("method").and_then(Value::as_str) {
-                if method == "$/progress" {
-                    if let Some(kind) = msg
-                        .get("params")
-                        .and_then(|p| p.get("value"))
-                        .and_then(|v| v.get("kind"))
-                        .and_then(Value::as_str)
-                    {
-                        match kind {
-                            "begin" | "report" => {
-                                seen_begin = true;
-                            }
-                            "end" if seen_begin => {
-                                return Ok(());
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
+        run_indexing_state_machine(workspace_root, hard_deadline, |timeout| {
+            self.rx.recv_timeout(timeout)
+        })
     }
 
     /// Send a request and return the `result` field of the matching response,
@@ -411,37 +470,57 @@ impl SymbolResolver for RustAnalyzer {
 
 // ── URI helpers ───────────────────────────────────────────────────────────────
 
-fn path_to_uri(path: &Path) -> String {
+pub(crate) fn path_to_uri(path: &Path) -> String {
     let s = path.to_string_lossy();
     format!("file://{s}")
 }
 
-fn uri_to_path(uri: &str) -> Result<std::path::PathBuf> {
-    let path_str = uri
-        .strip_prefix("file://")
-        .with_context(|| format!("URI does not start with file://: {uri}"))?;
-    Ok(std::path::PathBuf::from(percent_decode(path_str)))
+pub(crate) fn uri_to_path(uri: &str) -> Result<std::path::PathBuf> {
+    let path_str = uri.strip_prefix("file://").with_context(|| {
+        let preview: String = uri.chars().take(120).collect();
+        let truncated = if uri.chars().count() > 120 {
+            " (truncated)"
+        } else {
+            ""
+        };
+        format!("URI does not start with file://{truncated}: {preview}")
+    })?;
+    Ok(std::path::PathBuf::from(percent_decode(path_str)?))
 }
 
-/// Minimal percent-decoding for file URIs (handles `%20`, `%3A`, etc.).
-fn percent_decode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+/// Minimal percent-decoding for file URIs (handles `%20`, `%3A`, multi-byte
+/// UTF-8 sequences like `%E2%94%80`, etc.).
+///
+/// Decoded bytes are accumulated into a `Vec<u8>` and validated as UTF-8 at
+/// the end so that multi-byte sequences (e.g. `─` = `E2 94 80`) round-trip
+/// correctly. Per-byte `as char` conversion would corrupt these by emitting
+/// one `char` per raw byte (each in U+0080..=U+00FF) instead of decoding the
+/// full code point.
+pub(crate) fn percent_decode(s: &str) -> Result<String> {
     let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
             if let Ok(byte) =
                 u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
             {
-                out.push(byte as char);
+                out.push(byte);
                 i += 3;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
+        out.push(bytes[i]);
         i += 1;
     }
-    out
+    let preview: String = s.chars().take(120).collect();
+    let truncated = if s.chars().count() > 120 {
+        " (truncated)"
+    } else {
+        ""
+    };
+    String::from_utf8(out)
+        .with_context(|| format!("invalid UTF-8 in percent-decoded URI{truncated}: {preview:?}"))
 }
 
 #[cfg(test)]
@@ -457,5 +536,187 @@ mod tests {
             err.to_string().contains("exceeds cap"),
             "unexpected error: {err}"
         );
+    }
+
+    // ── percent-decoding (UTF-8 safety) ──────────────────────────────────────
+
+    #[test]
+    fn percent_decode_handles_multibyte_utf8_box_drawing() {
+        // `─` (U+2500) is `E2 94 80` in UTF-8; two of them in a directory name.
+        let decoded = percent_decode("/tmp/%E2%94%80%E2%94%80/foo.rs").unwrap();
+        assert_eq!(decoded, "/tmp/──/foo.rs");
+    }
+
+    #[test]
+    fn percent_decode_handles_multibyte_utf8_latin1_e_acute() {
+        // `é` (U+00E9) is `C3 A9` in UTF-8 (2 bytes).
+        let decoded = percent_decode("/tmp/caf%C3%A9/menu.rs").unwrap();
+        assert_eq!(decoded, "/tmp/café/menu.rs");
+    }
+
+    #[test]
+    fn percent_decode_preserves_space_encoding() {
+        let decoded = percent_decode("/tmp/foo%20bar.rs").unwrap();
+        assert_eq!(decoded, "/tmp/foo bar.rs");
+    }
+
+    #[test]
+    fn percent_decode_preserves_unencoded_bytes() {
+        let decoded = percent_decode("/plain/path/no_escapes.rs").unwrap();
+        assert_eq!(decoded, "/plain/path/no_escapes.rs");
+    }
+
+    #[test]
+    fn percent_decode_rejects_invalid_utf8_sequence() {
+        // `%C3` alone (without a continuation byte) is an invalid UTF-8 prefix.
+        let err = percent_decode("/tmp/bad%C3.rs").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid UTF-8 in percent-decoded URI"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    // ── uri_to_path ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn uri_to_path_decodes_multibyte_utf8() {
+        let path = uri_to_path("file:///tmp/%E2%94%80%E2%94%80/foo.rs").unwrap();
+        assert_eq!(path, std::path::PathBuf::from("/tmp/──/foo.rs"));
+    }
+
+    #[test]
+    fn uri_to_path_decodes_space() {
+        let path = uri_to_path("file:///tmp/foo%20bar.rs").unwrap();
+        assert_eq!(path, std::path::PathBuf::from("/tmp/foo bar.rs"));
+    }
+
+    #[test]
+    fn uri_to_path_rejects_non_file_scheme() {
+        let err = uri_to_path("https://example.com/foo.rs").unwrap_err();
+        assert!(format!("{err:#}").contains("URI does not start with file://"));
+    }
+
+    // ── wait_for_indexing state machine ──────────────────────────────────────
+
+    /// Build a queue-backed `recv_timeout` shim. Each call pops the next
+    /// `Result` from the front of the queue. When the queue is empty we
+    /// simulate `Timeout` so the quiet-period branch can trigger.
+    fn queue_recv(
+        queue: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Value>>>,
+    ) -> impl FnMut(Duration) -> std::result::Result<Value, mpsc::RecvTimeoutError> {
+        move |_d: Duration| match queue.borrow_mut().pop_front() {
+            Some(v) => Ok(v),
+            None => Err(mpsc::RecvTimeoutError::Timeout),
+        }
+    }
+
+    fn progress(kind: &str) -> Value {
+        progress_with_token("ra/indexing", kind)
+    }
+
+    fn progress_with_token(token: &str, kind: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "$/progress",
+            "params": { "token": token, "value": { "kind": kind } }
+        })
+    }
+
+    #[test]
+    fn wait_for_indexing_fails_closed_when_begin_without_end_before_deadline() {
+        // Begin observed, but no end. The loop must process `begin` (recording
+        // an active token) BEFORE the deadline check fires, otherwise
+        // we'd take the quiet-period branch. We achieve that by:
+        //   1. Letting `recv_timeout` return `begin` on the first call.
+        //   2. Returning `Timeout` thereafter, which falls into the
+        //      `active_progress ? continue : Ok(())` branch.
+        //   3. Setting a near-future deadline (500 ms) so the next loop turn
+        //      trips the `now >= hard_deadline` check with an active token.
+        //
+        // We use 500 ms deadline + 800 ms sleep (300 ms slack) to absorb CI
+        // scheduler jitter on shared GitHub Actions runners (15-50 ms typical,
+        // occasionally higher) without introducing flakes.
+        let workspace_root = std::path::PathBuf::from("/tmp/fake-ws-root-deadline");
+        let hard_deadline = Instant::now() + Duration::from_millis(500);
+
+        let mut delivered_begin = false;
+        let recv = move |_d: Duration| -> std::result::Result<Value, mpsc::RecvTimeoutError> {
+            if !delivered_begin {
+                delivered_begin = true;
+                return Ok(progress("begin"));
+            }
+            // Sleep well past the deadline so the next loop turn observes
+            // `now >= hard_deadline` while the token is active.
+            std::thread::sleep(Duration::from_millis(800));
+            Err(mpsc::RecvTimeoutError::Timeout)
+        };
+
+        let err = run_indexing_state_machine(&workspace_root, hard_deadline, recv).unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("rust-analyzer indexing timed out"),
+            "expected timeout error, got: {msg}"
+        );
+        assert!(
+            msg.contains("/tmp/fake-ws-root-deadline"),
+            "expected workspace root in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wait_for_indexing_does_not_accept_end_for_different_token() {
+        let workspace_root = std::path::PathBuf::from("/tmp/fake-ws-root-token");
+        let hard_deadline = Instant::now() + Duration::from_millis(500);
+
+        let mut step = 0;
+        let recv = move |_d: Duration| -> std::result::Result<Value, mpsc::RecvTimeoutError> {
+            step += 1;
+            match step {
+                1 => Ok(progress_with_token("ra/indexing", "begin")),
+                2 => Ok(progress_with_token("ra/unrelated", "end")),
+                _ => {
+                    std::thread::sleep(Duration::from_millis(800));
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                }
+            }
+        };
+
+        let err = run_indexing_state_machine(&workspace_root, hard_deadline, recv).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("rust-analyzer indexing timed out"),
+            "expected timeout error for unmatched progress token, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wait_for_indexing_returns_ok_when_no_progress_messages_within_quiet_period() {
+        // Empty queue → recv_timeout always returns Timeout → no active token
+        // is recorded → quiet-period success path returns Ok(()).
+        let queue: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Value>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(std::collections::VecDeque::new()));
+
+        let workspace_root = std::path::PathBuf::from("/tmp/fake-ws-root-quiet");
+        let hard_deadline = Instant::now() + Duration::from_secs(30);
+
+        run_indexing_state_machine(&workspace_root, hard_deadline, queue_recv(queue))
+            .expect("zero-progress workspace must succeed via quiet-period path");
+    }
+
+    #[test]
+    fn wait_for_indexing_returns_ok_when_begin_followed_by_end() {
+        // Sanity: the happy path (begin → end) still completes successfully.
+        let queue: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Value>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(std::collections::VecDeque::from(
+                vec![progress("begin"), progress("report"), progress("end")],
+            )));
+
+        let workspace_root = std::path::PathBuf::from("/tmp/fake-ws-root-happy");
+        let hard_deadline = Instant::now() + Duration::from_secs(30);
+
+        run_indexing_state_machine(&workspace_root, hard_deadline, queue_recv(queue))
+            .expect("begin→end sequence must succeed");
     }
 }

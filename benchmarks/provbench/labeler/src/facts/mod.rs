@@ -1,5 +1,12 @@
 //! Closed enum of fact kinds (SPEC §3.1). Adding a kind is a §11 spec
 //! change — do not extend silently.
+//!
+//! The five fact kinds — function signatures, struct/enum fields, public
+//! symbols, doc claims, and test assertions — are extracted at T₀ across
+//! the pilot tree by per-kind submodules. Each submodule exposes an
+//! `extract` entry point that takes a parsed [`crate::ast::RustAst`] (or
+//! markdown bytes for [`doc_claim`]) and yields the corresponding
+//! [`Fact`] variant.
 
 pub mod doc_claim;
 pub mod field;

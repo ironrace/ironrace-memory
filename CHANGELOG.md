@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **ProvBench labeler — Phase 0b hardening pass 2 (2026-05-09).**
+  Deterministic `fact_id`s via pure-string path normalization (no
+  `pwd`-sensitive canonicalization), fail-closed behavior on
+  rust-analyzer indexing timeout, explicit invalid-UTF-8 error in the
+  doc-claim extractor (no more silent zero-fact corpus on a corrupted
+  README), structured CSV via the `csv` crate for the spot-check sample,
+  and pinned `linux-x86_64` tooling hashes for the `ubuntu-latest` GitHub
+  runner so CI matches the canonical `aarch64-darwin` freeze
+  environment.
 - **Breaking (wire):** MCP tool ids dropped the `ironmem_` prefix now that the server id itself is `ironmem`. For example, `ironmem_search` → `search`, `ironmem_collab_start` → `collab_start`. Clients invoking tools as `mcp__ironmem__ironmem_*` must update to `mcp__ironmem__*`.
 - Renamed workspace crate `ironrace-memory` → `ironmem` and MCP server id → `ironmem`. The on-disk data directory `~/.ironrace-memory/` is preserved for user-data backcompat.
 

@@ -153,8 +153,7 @@ fn inline_code_mention_resolving_to_known_symbol_emits_doc_claim() {
     let known: Vec<_> =
         provbench_labeler::facts::symbol_existence::extract(&ast, std::path::Path::new("lib.rs"))
             .collect();
-    let claims: Vec<_> =
-        doc_claim::extract(md, std::path::Path::new("README.md"), &known).collect();
+    let claims = doc_claim::extract(md, std::path::Path::new("README.md"), &known).unwrap();
     assert_eq!(claims.len(), 1);
     #[allow(unreachable_patterns)]
     match &claims[0] {
@@ -178,8 +177,7 @@ fn unresolvable_mention_is_not_emitted() {
     let known: Vec<_> =
         provbench_labeler::facts::symbol_existence::extract(&ast, std::path::Path::new("lib.rs"))
             .collect();
-    let claims: Vec<_> =
-        doc_claim::extract(md, std::path::Path::new("README.md"), &known).collect();
+    let claims = doc_claim::extract(md, std::path::Path::new("README.md"), &known).unwrap();
     assert_eq!(claims.len(), 0);
 }
 
@@ -206,6 +204,74 @@ fn test_assertion_referencing_known_fn_emits_fact() {
         } => {
             assert_eq!(test_fn, "t");
             assert_eq!(asserted_symbol.as_deref(), Some("add"));
+        }
+        _ => panic!(),
+    }
+}
+
+// Regression test for Task 6 (issue #10): consistent test-assertion
+// macro/symbol traversal. The asserted-symbol pass must use the same
+// direct-children iteration pattern as macro-name discovery so that the
+// FIRST asserted symbol is recovered for shapes like
+// `assert_eq!(some_func(x), expected)`. This test exercises the canonical
+// shape Codex flagged in review of the original PR: when both the LHS
+// callee (`some_func`) and the RHS callee (`expected`) are known facts,
+// the LHS must win. A traversal that scans token_tree children in the
+// wrong order (or that recurses into nested token_trees) can shadow the
+// LHS and incorrectly return the RHS — that is the regression this test
+// guards against.
+#[test]
+fn test_assertion_first_asserted_symbol_is_lhs_callee() {
+    let src = b"pub fn some_func(x: i32) -> i32 { x }\npub fn expected() -> i32 { 0 }\n\
+                #[test]\nfn t() { assert_eq!(some_func(1), expected()); }\n";
+    let ast = RustAst::parse(src).unwrap();
+    let known: Vec<_> =
+        provbench_labeler::facts::function_signature::extract(&ast, std::path::Path::new("a.rs"))
+            .collect();
+    let facts: Vec<_> =
+        test_assertion::extract(&ast, std::path::Path::new("a.rs"), &known).collect();
+    assert_eq!(facts.len(), 1);
+    #[allow(unreachable_patterns)]
+    match &facts[0] {
+        Fact::TestAssertion {
+            test_fn,
+            asserted_symbol,
+            ..
+        } => {
+            assert_eq!(test_fn, "t");
+            assert_eq!(
+                asserted_symbol.as_deref(),
+                Some("some_func"),
+                "expected first asserted symbol to be `some_func` (LHS callee), \
+                 got {asserted_symbol:?} — token_tree traversal may have skipped \
+                 the first identifier child"
+            );
+        }
+        _ => panic!(),
+    }
+}
+
+// The macro-name pass and the asserted-symbol pass must agree on what
+// "direct child" means: both walk `node.children(&mut cursor)` and take
+// the first matching `identifier`. This test reproduces the relationship
+// for `assert_ne!` and verifies the same selection logic works there too.
+#[test]
+fn test_assertion_macro_and_symbol_traversal_agree_on_assert_ne() {
+    let src = b"pub fn lhs() -> i32 { 1 }\npub fn rhs() -> i32 { 2 }\n\
+                #[test]\nfn t() { assert_ne!(lhs(), rhs()); }\n";
+    let ast = RustAst::parse(src).unwrap();
+    let known: Vec<_> =
+        provbench_labeler::facts::function_signature::extract(&ast, std::path::Path::new("a.rs"))
+            .collect();
+    let facts: Vec<_> =
+        test_assertion::extract(&ast, std::path::Path::new("a.rs"), &known).collect();
+    assert_eq!(facts.len(), 1);
+    #[allow(unreachable_patterns)]
+    match &facts[0] {
+        Fact::TestAssertion {
+            asserted_symbol, ..
+        } => {
+            assert_eq!(asserted_symbol.as_deref(), Some("lhs"));
         }
         _ => panic!(),
     }
