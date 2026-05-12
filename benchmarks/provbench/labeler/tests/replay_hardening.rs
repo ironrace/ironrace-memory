@@ -326,7 +326,6 @@ fn field_type_change_transitions_to_stale_source_changed() {
 /// present.  The correct label is `StaleSourceChanged` (visibility-narrowing
 /// cluster).
 #[test]
-#[ignore = "RED until Task 2 (visibility-narrowing cluster)"]
 fn hp3_1_visibility_narrowing_emits_stale_source_changed() {
     let tmp = tempfile::tempdir().unwrap();
     let p = tmp.path();

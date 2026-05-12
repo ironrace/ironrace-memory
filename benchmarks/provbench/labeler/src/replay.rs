@@ -553,7 +553,8 @@ fn matching_post_fact(
             })
         }),
         Fact::PublicSymbol { qualified_name, .. } => post_ast.and_then(|ast| {
-            symbol_existence::extract(ast, path).find_map(|f| match f {
+            // First: check if the item is still bare-pub (happy path).
+            let still_bare_pub = symbol_existence::extract(ast, path).find_map(|f| match f {
                 Fact::PublicSymbol {
                     qualified_name: q,
                     span,
@@ -565,6 +566,29 @@ fn matching_post_fact(
                 | Fact::PublicSymbol { .. }
                 | Fact::DocClaim { .. }
                 | Fact::TestAssertion { .. } => None,
+            });
+            if still_bare_pub.is_some() {
+                return still_bare_pub;
+            }
+            // Second: item is absent from the bare-pub extract — check whether
+            // it still exists with a narrowed visibility (pub(crate), pub(super),
+            // pub(in …), or private).  The simple name is the last segment of
+            // the qualified_name (e.g. "Config" from "my_mod::Config").
+            let simple_name = qualified_name
+                .rsplit("::")
+                .next()
+                .unwrap_or(qualified_name.as_str());
+            symbol_existence::find_item_by_name(ast, simple_name).and_then(|found| {
+                use symbol_existence::VisibilityKind;
+                match found.visibility {
+                    // Still bare-pub — would have been caught by the extract above.
+                    VisibilityKind::BarePub => None,
+                    // Narrowed to restricted or private: signal a structural
+                    // change so `classify` emits `StaleSourceChanged`.
+                    VisibilityKind::Restricted | VisibilityKind::Private => {
+                        Some((found.span, found.content_hash))
+                    }
+                }
             })
         }),
         Fact::DocClaim { mention_span, .. } => {
