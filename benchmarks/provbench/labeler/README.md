@@ -71,13 +71,35 @@ Phase 0b is accepted iff:
 
 ## Behavior
 
-Replay classification is commit-tree-local: for each commit a
-`CommitSymbolIndex` is built from that commit's blobs before any fact is
-classified; `rust-analyzer` is no longer consulted at replay time.  Live
-RA tooling stays in the crate for `tests/replay_ra.rs` (pinned-binary
-test) and for future cross-crate / macro-expanded work.  The index is
-built from the `.rs` paths known at T₀; files added in later commits are
-not included, which may under-count cross-file symbol moves.
+- **Visibility narrowing classified as source changed.** Public symbols
+  whose visibility is narrowed to `pub(crate)`, `pub(super)`,
+  `pub(in path)`, or private are classified as `StaleSourceChanged` rather
+  than `NeedsRevalidation`. Per SPEC §5 rule ordering, a narrowing
+  represents a semantic change to the public API surface and is therefore
+  treated as a source change, not merely a revalidation trigger.
+
+- **Replay symbol resolution is commit-tree-local.** For each commit a
+  `CommitSymbolIndex` is built from that commit's blobs (via tree-sitter)
+  before any fact is classified; `rust-analyzer` is no longer consulted at
+  replay time. This eliminates the runtime RA dependency for the hot
+  classification path. Live RA tooling and the `RA_BIN` tooling pin remain
+  in the crate for `tests/replay_ra.rs` (pinned-binary test) and for future
+  cross-crate / macro-expanded work. The index is built from the `.rs` paths
+  known at T₀; files added in later commits are not included, which may
+  under-count cross-file symbol moves.
+
+- **Rename detection requires AST context match.** A `RenameCandidate` is a
+  typed struct carrying both `kind` (the symbol kind, e.g. function,
+  struct) and `container` (the enclosing module or impl block). A candidate
+  is only promoted to a rename when the kind and container match the
+  original symbol *and* the candidate was not already present at T₀ — the
+  structural T₀-presence check prevents false positives from pre-existing
+  symbols with the same name.
+
+- **DocClaim matching is relocation-tolerant.** The post-state doc-claim
+  lookup searches by `qualified_name` rather than by byte-offset hash.
+  A claim that moves to a different line or section in a later commit is
+  still matched correctly as long as the qualified name is preserved.
 
 The labeler is **fail-closed** by design. Silently producing labels in any
 of the following situations would corrupt the corpus, so each surfaces as

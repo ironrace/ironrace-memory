@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **ProvBench labeler — Phase 0b hardening pass 3 (2026-05-12).**
+  Four labeling-correctness clusters fixed; SPEC v1 is unchanged:
+  (A) visibility narrowing (`pub(crate)` / `pub(super)` / `pub(in path)` /
+  private) is now classified as `StaleSourceChanged` per SPEC §5 rule
+  ordering rather than `NeedsRevalidation`;
+  (B) replay symbol resolution is commit-tree-local — `CommitSymbolIndex`
+  built via tree-sitter per commit, eliminating the runtime RA dependency
+  (RA tooling pin and `tests/replay_ra.rs` retained for future cross-crate
+  / macro-expanded work);
+  (C) rename detection requires a typed `RenameCandidate` with matching
+  `kind` + `container` and a T₀-presence check to prevent false positives
+  from pre-existing same-named symbols;
+  (D) doc-claim matching is relocation-tolerant — post-state lookup uses
+  `qualified_name` rather than byte-offset hash so claims that move lines
+  are still matched correctly.
 - **ProvBench labeler — Phase 0b hardening pass 2 (2026-05-09).**
   Deterministic `fact_id`s via pure-string path normalization (no
   `pwd`-sensitive canonicalization), fail-closed behavior on
