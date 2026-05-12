@@ -71,6 +71,12 @@ Phase 0b is accepted iff:
 
 ## Behavior
 
+Replay classification is commit-tree-local: for each commit a
+`CommitSymbolIndex` is built from that commit's blobs before any fact is
+classified; `rust-analyzer` is no longer consulted at replay time.  Live
+RA tooling stays in the crate for `tests/replay_ra.rs` (pinned-binary
+test) and for future cross-crate / macro-expanded work.
+
 The labeler is **fail-closed** by design. Silently producing labels in any
 of the following situations would corrupt the corpus, so each surfaces as
 an error and aborts the run:

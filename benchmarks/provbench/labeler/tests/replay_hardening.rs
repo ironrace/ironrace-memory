@@ -499,7 +499,6 @@ fn hp3_2_skip_symbol_resolution_per_commit_preservation() {
 /// **No rust-analyzer required:** the stub resolver is a simple
 /// `HashMap`-backed struct; no RA binary is spawned.
 #[test]
-#[ignore = "RED until Task 3 (cluster B per-commit symbol resolution)"]
 fn hp3_2_per_commit_symbol_resolution_red() {
     // ── Stub resolver that always says "symbol resolves" ──────────────────
     // This simulates the HEAD-keyed bug: every `resolve(name)` call returns
