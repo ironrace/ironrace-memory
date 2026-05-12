@@ -96,6 +96,7 @@ impl Replay {
     /// # Note
     /// This function is intended for testing only.  Production callers should
     /// use [`Self::run`] which spawns the real rust-analyzer resolver.
+    #[doc(hidden)]
     pub fn run_with_resolver(
         cfg: &ReplayConfig,
         resolver: Option<Box<dyn SymbolResolver>>,
@@ -103,7 +104,7 @@ impl Replay {
         // skip_symbol_resolution must be false so classify_against_commit
         // actually calls into the resolver when a symbol is absent from the
         // post-commit AST.
-        debug_assert!(
+        assert!(
             !cfg.skip_symbol_resolution,
             "run_with_resolver: set skip_symbol_resolution=false so the \
              resolver code path is exercised"
@@ -116,9 +117,8 @@ impl Replay {
     /// `skip_symbol_resolution` is `true`.
     fn run_inner(
         cfg: &ReplayConfig,
-        resolver: Option<Box<dyn SymbolResolver>>,
+        mut resolver: Option<Box<dyn SymbolResolver>>,
     ) -> Result<Vec<FactAtCommit>> {
-        let mut resolver = resolver;
         let pilot = Pilot::open(&AdHocSpec {
             path: cfg.repo_path.clone(),
             t0_sha: cfg.t0_sha.clone(),
