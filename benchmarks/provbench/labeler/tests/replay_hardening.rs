@@ -584,6 +584,76 @@ fn hp3_2_per_commit_symbol_resolution_red() {
     );
 }
 
+/// Regression for the commit-index path source itself:
+///   T0  → `relocated_helper` exists in `src/lib.rs`
+///   C1  → `relocated_helper` moves to a newly-added `src/relocated.rs`
+///
+/// A commit-tree-local index must enumerate `.rs` paths from the commit being
+/// classified, not just paths that existed at T0. Otherwise newly-added files
+/// are invisible and this move is misclassified as `StaleSourceDeleted`.
+#[test]
+fn hp3_2b_commit_index_sees_new_rust_files_added_after_t0() {
+    struct NullResolver;
+    impl SymbolResolver for NullResolver {
+        fn resolve(&mut self, _qualified_name: &str) -> anyhow::Result<Option<ResolvedLocation>> {
+            Ok(None)
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path();
+    git(p, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(p.join("src")).unwrap();
+    std::fs::write(
+        p.join("Cargo.toml"),
+        b"[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"pub fn relocated_helper() -> u32 { 7 }\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "init", "2025-01-01T00:00:00Z");
+    let t0 = rev_parse_head(p);
+
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"pub fn unrelated_fn() -> u32 { 1 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        p.join("src/relocated.rs"),
+        b"pub fn relocated_helper() -> u32 { 7 }\n",
+    )
+    .unwrap();
+    commit_all_with_date(
+        p,
+        "move-relocated-helper-to-new-file",
+        "2025-01-02T00:00:00Z",
+    );
+    let c1 = rev_parse_head(p);
+
+    let cfg = ReplayConfig {
+        repo_path: p.to_path_buf(),
+        t0_sha: t0,
+        skip_symbol_resolution: false,
+    };
+    let rows = Replay::run_with_resolver(&cfg, Some(Box::new(NullResolver))).unwrap();
+
+    let moved_row = rows
+        .iter()
+        .find(|r| r.fact_id.contains("relocated_helper") && r.commit_sha == c1)
+        .expect("C1 row for relocated_helper missing");
+
+    assert!(
+        matches!(moved_row.label, Label::NeedsRevalidation),
+        "same-qualified symbol moved to a newly-added file must route to \
+         NeedsRevalidation, got {:?}",
+        moved_row.label
+    );
+}
+
 // ── HP3-5: DocClaim relocation → Valid ──────────────────────────────────────
 
 /// T0: README has `` `column` `` inline-code mention at a specific byte offset.

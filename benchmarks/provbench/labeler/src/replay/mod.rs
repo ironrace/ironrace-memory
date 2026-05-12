@@ -71,22 +71,17 @@ impl Replay {
     /// per (fact, commit) pair.
     ///
     /// Steps:
-    /// 1. Verify pinned tooling pin (when not in `skip_symbol_resolution`
-    ///    mode) via [`crate::tooling::resolve_from_env`].
-    /// 2. Extract the closed enum of facts from every `.rs` file present at
+    /// 1. Extract the closed enum of facts from every `.rs` file present at
     ///    `cfg.t0_sha`, then doc-claim facts from eligible markdown files.
-    /// 3. Walk first-parent descendants of T₀ and classify every fact
+    /// 2. Walk first-parent descendants of T₀ and classify every fact
     ///    against each commit's blobs via the SPEC §5 rule engine.
     ///    Classification is commit-tree-local: a [`CommitSymbolIndex`] is
     ///    built from each commit's blobs before any fact is classified.
     ///    `rust-analyzer` is **not** consulted at replay time.
     ///
-    /// Fail-closed: returns `Err` on tooling-pin mismatch or invalid UTF-8
-    /// in a markdown blob (either silently degrading would corrupt the corpus).
+    /// Fail-closed: returns `Err` on invalid UTF-8 in a markdown blob
+    /// (silently degrading would corrupt the corpus).
     pub fn run(cfg: &ReplayConfig) -> Result<Vec<FactAtCommit>> {
-        if !cfg.skip_symbol_resolution {
-            crate::tooling::resolve_from_env()?;
-        }
         Self::run_inner(cfg, None)
     }
 
@@ -187,16 +182,6 @@ impl Replay {
         // classify time is O(1).
         let t0_names_by_path = build_t0_names_by_path(&facts);
 
-        // Reuse the T₀ rust-paths set computed above for the per-commit
-        // CommitSymbolIndex.  The tree-paths call is against T₀; individual
-        // path existence per-commit is resolved by read_blob_at returning
-        // None.  For commits that add new .rs files not present at T₀, those
-        // paths are missed by this pre-computed list.  That is acceptable
-        // for Phase 0b: the index is conservative (may under-count "symbol
-        // exists elsewhere"), which biases toward StaleSourceDeleted rather
-        // than NeedsRevalidation — a safe false-negative for cross-file moves.
-        let all_rs_paths: &[PathBuf] = &rust_paths;
-
         let mut rows: Vec<FactAtCommit> = Vec::new();
         for commit in &commits {
             // ── Step 1: read post-commit blobs for all fact-source paths ──────
@@ -215,10 +200,11 @@ impl Replay {
             let commit_index: Option<CommitSymbolIndex> = if cfg.skip_symbol_resolution {
                 None
             } else {
+                let commit_rs_paths = rust_paths_at(&pilot, &commit.sha)?;
                 Some(CommitSymbolIndex::build(
                     &pilot,
                     &commit.sha,
-                    all_rs_paths,
+                    &commit_rs_paths,
                     &cached_blobs,
                 )?)
             };

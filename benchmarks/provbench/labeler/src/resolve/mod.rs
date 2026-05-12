@@ -1,6 +1,7 @@
-//! Symbol resolution traits. Phase 0b uses rust-analyzer for Rust;
-//! Python (held-out) will get a tree-sitter + import-graph implementation
-//! later — keep the trait language-agnostic.
+//! Symbol resolution traits. Replay now uses a commit-local tree-sitter index;
+//! the rust-analyzer backend remains for ignored tooling tests and future
+//! semantic-resolution work. Python (held-out) will get a tree-sitter +
+//! import-graph implementation later — keep the trait language-agnostic.
 
 pub mod rust_analyzer;
 

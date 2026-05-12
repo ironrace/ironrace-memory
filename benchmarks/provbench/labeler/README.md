@@ -79,14 +79,15 @@ Phase 0b is accepted iff:
   treated as a source change, not merely a revalidation trigger.
 
 - **Replay symbol resolution is commit-tree-local.** For each commit a
-  `CommitSymbolIndex` is built from that commit's blobs (via tree-sitter)
-  before any fact is classified; `rust-analyzer` is no longer consulted at
-  replay time. This eliminates the runtime RA dependency for the hot
-  classification path. Live RA tooling and the `PINNED_BINARIES` tooling-pin
-  table (in `src/tooling.rs`) remain in the crate for `tests/replay_ra.rs`
-  (pinned-binary test) and for future cross-crate / macro-expanded work.
-  The index is built from the `.rs` paths known at T₀; files added in later
-  commits are not included, which may under-count cross-file symbol moves.
+  `CommitSymbolIndex` is built from that commit's `.rs` tree (via
+  tree-sitter) before any fact is classified; `rust-analyzer` is no longer
+  consulted at replay time. This eliminates the runtime RA dependency for the
+  hot classification path. Live RA tooling and the `PINNED_BINARIES`
+  tooling-pin table (in `src/tooling.rs`) remain in the crate for
+  `tests/replay_ra.rs` (pinned-binary test) and for future cross-crate /
+  macro-expanded work. Files added after T₀ are included in the per-commit
+  index, so same-qualified symbols moved into new files route to
+  `NeedsRevalidation` rather than `StaleSourceDeleted`.
 
 - **Rename detection requires AST context match.** A `RenameCandidate` is a
   typed struct carrying `container` (the enclosing module or impl block)
@@ -107,16 +108,11 @@ The labeler is **fail-closed** by design. Silently producing labels in any
 of the following situations would corrupt the corpus, so each surfaces as
 an error and aborts the run:
 
-- **Tooling-pin mismatch.** `verify-tooling` and `Replay::run` both call
+- **Tooling-pin mismatch.** `verify-tooling` calls
   `tooling::resolve_from_env()`, which hard-fails when a binary on `PATH`
   (or at the documented fallback) does not match the SHA-256 in
   `PINNED_BINARIES` for the current platform. Distros patch — version
-  strings are not enough.
-- **rust-analyzer indexing timeout.** When the LSP client observes a
-  `$/progress` `begin` but the matching `end` does not arrive before the
-  hard wall-clock deadline, replay returns `Err` rather than answering
-  symbol queries against an incomplete index. The error message includes
-  the workspace root.
+  strings are not enough. Replay itself no longer calls rust-analyzer.
 - **Invalid UTF-8 in markdown.** The doc-claim extractor refuses to
   silently produce zero facts on a corrupted README; it returns `Err`
   with the offending file path so reviewers can locate the bad blob.
@@ -141,9 +137,8 @@ round-trips through reader/writer correctly.
 - Per-commit classification uses a tree-sitter-built `CommitSymbolIndex`
   rather than a live `rust-analyzer` query. This loses semantic resolution
   for cross-crate references and macro-expanded symbols. The pinned RA
-  binary is still verified at `Replay::run` startup (via `tooling::resolve_from_env`)
-  and `tests/replay_ra.rs` covers the legacy RA-based path for future
-  work that needs deeper semantic resolution.
+  binary is still covered by `verify-tooling` and `tests/replay_ra.rs` for
+  future work that needs deeper semantic resolution.
 
 ## Reproducibility / supported platforms
 
@@ -175,5 +170,5 @@ requires running `shasum -a 256` against the decompressed upstream
 artifact and committing the result to `PINNED_BINARIES` — never copy a
 hash from a secondary source.
 
-Phase 0b labels remain valid only when produced on a supported
+Phase 0b tooling verification remains valid only on a supported
 platform. `resolve_from_env()` hard-fails on any other host.
