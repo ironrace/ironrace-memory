@@ -220,6 +220,7 @@ pub enum VisibilityKind {
 }
 
 /// Result of a visibility-aware item lookup.
+#[derive(Debug)]
 pub struct FoundItem {
     /// How the item is currently visible.
     pub visibility: VisibilityKind,
@@ -247,8 +248,14 @@ pub fn find_item_by_name(ast: &RustAst, simple_name: &str) -> Option<FoundItem> 
 
 fn find_in_subtree(node: Node<'_>, src: &[u8], target: &str) -> Option<FoundItem> {
     match node.kind() {
+        // Terminal named-item kinds. We early-return None after checking the
+        // item itself because these kinds don't contain sibling named items
+        // accessible by simple name (a `fn` body has locals, not exports).
+        // Only `mod_item` recurses, since modules contain nested items.
+        // If you add a new item kind here that DOES contain reachable named
+        // items (e.g. `impl_item`), remove the early return for that arm.
         "function_item" | "struct_item" | "enum_item" | "mod_item" | "trait_item"
-        | "const_item" | "static_item" | "type_item" => {
+        | "const_item" | "static_item" | "type_item" | "union_item" => {
             if let Some(found) = check_named_item(node, src, target) {
                 return Some(found);
             }
@@ -286,7 +293,8 @@ fn check_named_item(node: Node<'_>, src: &[u8], target: &str) -> Option<FoundIte
         return None;
     }
 
-    let vis_kind = match visibility_child(node) {
+    let vis_node = visibility_child(node);
+    let vis_kind = match vis_node {
         Some(v) if is_bare_pub(v, src) => VisibilityKind::BarePub,
         Some(_) => VisibilityKind::Restricted,
         None => VisibilityKind::Private,
@@ -295,7 +303,7 @@ fn check_named_item(node: Node<'_>, src: &[u8], target: &str) -> Option<FoundIte
     // Build span from the first token of the item through the name's end byte.
     // Use `line_span_from_node` on the full item node so we capture everything
     // the way `extract_named_item` does for bare-pub items.
-    let start_node = visibility_child(node).unwrap_or(name_node);
+    let start_node = vis_node.unwrap_or(name_node);
     let span = crate::ast::line_span_through(src, start_node, name_node.end_byte());
     let hash = crate::ast::spans::content_hash(&src[span.byte_range.clone()]);
 

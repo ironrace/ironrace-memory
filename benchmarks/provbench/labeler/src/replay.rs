@@ -574,10 +574,11 @@ fn matching_post_fact(
             // it still exists with a narrowed visibility (pub(crate), pub(super),
             // pub(in …), or private).  The simple name is the last segment of
             // the qualified_name (e.g. "Config" from "my_mod::Config").
+            // `rsplit` always yields at least one element, so `.next()` is `Some`.
             let simple_name = qualified_name
                 .rsplit("::")
                 .next()
-                .unwrap_or(qualified_name.as_str());
+                .expect("rsplit always yields at least one element");
             symbol_existence::find_item_by_name(ast, simple_name).and_then(|found| {
                 use symbol_existence::VisibilityKind;
                 match found.visibility {
