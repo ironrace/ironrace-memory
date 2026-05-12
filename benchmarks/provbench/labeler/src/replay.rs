@@ -72,16 +72,53 @@ impl Replay {
     /// indexing timeout, or invalid UTF-8 in a markdown blob (any of these
     /// silently degrading would corrupt the corpus).
     pub fn run(cfg: &ReplayConfig) -> Result<Vec<FactAtCommit>> {
-        let mut resolver: Option<RustAnalyzer> = if cfg.skip_symbol_resolution {
+        let resolver: Option<Box<dyn SymbolResolver>> = if cfg.skip_symbol_resolution {
             None
         } else {
             crate::tooling::resolve_from_env()?;
             // TODO(phase-0b-pilot): replay production labeling against a
             // per-commit worktree before each rust-analyzer query so the LSP
             // view matches the commit being classified.
-            Some(RustAnalyzer::spawn(&cfg.repo_path)?)
+            Some(Box::new(RustAnalyzer::spawn(&cfg.repo_path)?))
         };
+        Self::run_inner(cfg, resolver)
+    }
 
+    /// Test-only entry point that bypasses the rust-analyzer spawn and accepts
+    /// a caller-supplied `SymbolResolver` stub.  Used by Cluster B regression
+    /// tests that need to exercise the symbol-resolution code path without
+    /// requiring a live `rust-analyzer` binary.
+    ///
+    /// `resolver` is passed through to every `classify_against_commit` call
+    /// exactly as the production path does, so the stub can mirror the
+    /// HEAD-keyed bug (always resolving a symbol regardless of which commit
+    /// is being classified) and expose the failure mode.
+    /// # Note
+    /// This function is intended for testing only.  Production callers should
+    /// use [`Self::run`] which spawns the real rust-analyzer resolver.
+    pub fn run_with_resolver(
+        cfg: &ReplayConfig,
+        resolver: Option<Box<dyn SymbolResolver>>,
+    ) -> Result<Vec<FactAtCommit>> {
+        // skip_symbol_resolution must be false so classify_against_commit
+        // actually calls into the resolver when a symbol is absent from the
+        // post-commit AST.
+        debug_assert!(
+            !cfg.skip_symbol_resolution,
+            "run_with_resolver: set skip_symbol_resolution=false so the \
+             resolver code path is exercised"
+        );
+        Self::run_inner(cfg, resolver)
+    }
+
+    /// Shared implementation used by both [`Self::run`] and
+    /// [`Self::run_with_resolver`].  `resolver` is `None` when
+    /// `skip_symbol_resolution` is `true`.
+    fn run_inner(
+        cfg: &ReplayConfig,
+        resolver: Option<Box<dyn SymbolResolver>>,
+    ) -> Result<Vec<FactAtCommit>> {
+        let mut resolver = resolver;
         let pilot = Pilot::open(&AdHocSpec {
             path: cfg.repo_path.clone(),
             t0_sha: cfg.t0_sha.clone(),
@@ -148,9 +185,10 @@ impl Replay {
                     .as_ref()
                     .and_then(|bytes| RustAst::parse(bytes).ok());
                 for observed in facts_at_path {
-                    let resolver_ref = resolver
-                        .as_mut()
-                        .map(|resolver| resolver as &mut dyn SymbolResolver);
+                    let resolver_ref: Option<&mut dyn SymbolResolver> = match resolver.as_mut() {
+                        Some(r) => Some(r.as_mut()),
+                        None => None,
+                    };
                     let label = classify_against_commit(
                         &observed.fact,
                         path,

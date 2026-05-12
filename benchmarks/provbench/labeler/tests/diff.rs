@@ -48,14 +48,16 @@ fn no_candidate_above_threshold_returns_none() {
 
 // ── Pass-3 hardening regressions (diff level) ────────────────────────────────
 //
-// HP3-3 is RED against HEAD a6b7e5c and carries
-// `#[ignore = "RED until Task N"]` so that `cargo test` stays green.
+// HP3-3b and HP3-3 are RED against HEAD a6b7e5c (Cluster C rename false
+// positives) and carry `#[ignore = "RED until Task 4 …"]` so that
+// `cargo test` stays green.
 // HP3-4 is GREEN on HEAD (a preservation contract for Task 4).
 //
-// HP3-2's corresponding integration test lives in replay_hardening.rs;
-// the diff-level pin for it is included here as HP3-2b.
+// HP3-2 (Cluster B per-commit symbol resolution) is an integration-level
+// test in replay_hardening.rs.  The diff-level pin for the rename heuristic
+// side of that scenario is here as HP3-3b (Cluster C, Task 4).
 
-// ── HP3-2b: rename candidate triggers for replace_with_captures → replace_with_caps
+// ── HP3-3b: rename candidate triggers for replace_with_captures → replace_with_caps
 
 /// `fn replace_with_captures(s: &str) -> String` vs a post-commit pool that
 /// contains only `fn replace_with_caps(s: &str) -> String`.
@@ -73,8 +75,8 @@ fn no_candidate_above_threshold_returns_none() {
 /// (the function was deleted, not renamed; the new symbol is an independent
 /// addition).
 #[test]
-#[ignore = "RED until Task 3 (rename-false-positive cluster)"]
-fn hp3_2b_replacement_deletion_no_false_rename_candidate() {
+#[ignore = "RED until Task 4 (cluster C rename false positive)"]
+fn hp3_3b_replacement_deletion_no_false_rename_candidate() {
     let before = b"pub fn replace_with_captures(s: &str) -> String { s.to_string() }";
     let after_candidates = vec![(
         "replace_with_caps".to_string(),
@@ -90,7 +92,7 @@ fn hp3_2b_replacement_deletion_no_false_rename_candidate() {
     );
 }
 
-// ── HP3-3: field-drop rename false positive ──────────────────────────────────
+// ── HP3-3 (Cluster C): field-drop rename false positive ──────────────────────
 
 /// T0 field span: `all_verbatim_literal: bool`.
 /// Post-commit candidate pool: `any_literal: bool` (the field was dropped,
@@ -103,7 +105,7 @@ fn hp3_2b_replacement_deletion_no_false_rename_candidate() {
 /// result is `None` — the field was deleted, and `any_literal` is a distinct,
 /// pre-existing field whose qualified name is unrelated.
 #[test]
-#[ignore = "RED until Task 3 (rename-false-positive cluster)"]
+#[ignore = "RED until Task 4 (cluster C rename false positive)"]
 fn hp3_3_field_drop_no_false_rename_candidate() {
     // Field spans as they appear in the AST byte slice used by
     // `rename_candidates_for` (just the field content, no surrounding struct).

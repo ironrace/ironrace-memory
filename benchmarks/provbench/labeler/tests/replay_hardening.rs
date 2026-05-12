@@ -13,6 +13,7 @@ use provbench_labeler::diff::rename_candidate;
 use provbench_labeler::label::Label;
 use provbench_labeler::output::{write_jsonl, OutputRow};
 use provbench_labeler::replay::{FactAtCommit, Replay, ReplayConfig};
+use provbench_labeler::resolve::{ResolvedLocation, SymbolResolver};
 use std::path::Path;
 
 // ── shared synthetic-repo helpers ────────────────────────────────────────────
@@ -295,12 +296,16 @@ fn field_type_change_transitions_to_stale_source_changed() {
 
 // ── Pass-3 hardening regressions ─────────────────────────────────────────────
 //
-// Tests HP3-1, HP3-2, HP3-5 are RED against HEAD a6b7e5c; they carry
-// `#[ignore = "RED until Task N"]` so that `cargo test` stays green.
-// Test HP3-4 is GREEN on HEAD (a preservation contract for Task 4).
+// RED / GREEN status against HEAD a6b7e5c:
+//   HP3-1           RED  (ignore-gated) — Task 2
+//   HP3-2 (renamed) GREEN               — preservation: skip_symbol_resolution mode
+//   HP3-2 (new)     RED  (ignore-gated) — Task 3 cluster B: per-commit symbol resolution
+//   HP3-5           RED  (ignore-gated) — Task 5
+//   HP3-4           GREEN               — rename true-positive preservation
 //
 // Each test is self-contained: synthetic repo, pinned dates, no
-// rust-analyzer, no network, no wall-clock dependency.
+// rust-analyzer (HP3-2-new uses a stub resolver), no network, no
+// wall-clock dependency.
 //
 // Anti-tuning note: these fixtures are NOT derived from the 200-row
 // diagnostic sample used in the §9.1 gate run.
@@ -373,7 +378,7 @@ fn hp3_1_visibility_narrowing_emits_stale_source_changed() {
     );
 }
 
-// ── HP3-2: per-commit deletion under HEAD-similar siblings ───────────────────
+// ── HP3-2 (preservation): skip_symbol_resolution mode is unaffected by Task 3 ─
 
 /// Three-commit history:
 ///   T0  → `fn replace_with_captures(s: &str) -> String { … }`
@@ -382,16 +387,18 @@ fn hp3_1_visibility_narrowing_emits_stale_source_changed() {
 ///
 /// In unit-test mode (`skip_symbol_resolution = true`) rename detection is
 /// disabled, so both C1 and C2 currently emit `StaleSourceDeleted` — correct.
-/// This integration test is GREEN on HEAD a6b7e5c and serves as a preservation
-/// contract: per-commit blob isolation must remain correct even when a
-/// similarly-named symbol appears at a later commit.
+/// This test is GREEN on HEAD a6b7e5c and serves as a preservation contract:
+/// per-commit blob isolation must remain correct even when a similarly-named
+/// symbol appears at a later commit, and the `skip_symbol_resolution=true`
+/// code path must remain unaffected by Task 3's per-commit-tree fix.
 ///
-/// The companion RED test is in `diff.rs` as
-/// `hp3_2b_replacement_deletion_no_false_rename_candidate`, which pins the
-/// diff-level contract that the `similar` heuristic must NOT produce a
-/// rename candidate between `replace_with_captures` and `replace_with_caps`.
+/// See `hp3_2_per_commit_symbol_resolution_red` for the companion RED test
+/// that exercises the symbol-resolution code path via a stub resolver.
+/// See `diff.rs` as `hp3_3b_replacement_deletion_no_false_rename_candidate`
+/// for the diff-level contract that the `similar` heuristic must NOT produce
+/// a rename candidate between `replace_with_captures` and `replace_with_caps`.
 #[test]
-fn hp3_2_per_commit_deletion_under_similar_head_sibling() {
+fn hp3_2_skip_symbol_resolution_per_commit_preservation() {
     let tmp = tempfile::tempdir().unwrap();
     let p = tmp.path();
     git(p, &["init", "--initial-branch=main"]);
@@ -462,6 +469,120 @@ fn hp3_2_per_commit_deletion_under_similar_head_sibling() {
          rename heuristic must NOT trigger when the original was deleted and a \
          differently-named symbol was added later",
         c2_row.label
+    );
+}
+
+// ── HP3-2 (RED): per-commit symbol resolution must use commit-tree, not HEAD ─
+
+/// Three-commit history that exposes the HEAD-keyed resolver bug (Cluster B):
+///   T0  → `fn obscure_helper() -> u32 { 0 }`
+///   C1  → `fn obscure_helper` deleted; only `unrelated_fn()` remains
+///   C2  → NEW `fn obscure_helper() -> u32 { 42 }` added (different body)
+///
+/// **Failure mode captured (HEAD a6b7e5c):**
+/// At C1, `matching_post_fact` finds no `obscure_helper` in the C1 AST →
+/// falls into the `None` branch → calls `resolver.resolve("obscure_helper")`.
+/// The current code queries the working-tree (HEAD = C2) resolver, which
+/// finds the NEW `fn obscure_helper` at C2 → returns `Some(location)` →
+/// `symbol_resolves = true`, `post_span_hash = None` → `classify` returns
+/// `NeedsRevalidation`.  The correct label at C1 is `StaleSourceDeleted`
+/// (the symbol was deleted at that commit; the HEAD re-addition is irrelevant
+/// to the per-commit verdict).
+///
+/// **Why `#[ignore]`:** Task 3's fix will route per-commit resolution through
+/// the commit-tree blob index rather than the HEAD-keyed RA instance.  The
+/// stub resolver here mirrors the bug: it always reports `obscure_helper`
+/// resolves (simulating a HEAD-keyed query that finds C2's copy).  After Task
+/// 3, `Replay::run_with_resolver` will no longer use the stub for per-commit
+/// classification — it will build a local blob index from each commit's tree —
+/// so the stub returning `Some` will not affect the C1 verdict.
+///
+/// **No rust-analyzer required:** the stub resolver is a simple
+/// `HashMap`-backed struct; no RA binary is spawned.
+#[test]
+#[ignore = "RED until Task 3 (cluster B per-commit symbol resolution)"]
+fn hp3_2_per_commit_symbol_resolution_red() {
+    // ── Stub resolver that always says "symbol resolves" ──────────────────
+    // This simulates the HEAD-keyed bug: every `resolve(name)` call returns
+    // `Some(location)` regardless of which commit is being classified.
+    struct AlwaysResolvesStub;
+    impl SymbolResolver for AlwaysResolvesStub {
+        fn resolve(&mut self, _qualified_name: &str) -> anyhow::Result<Option<ResolvedLocation>> {
+            Ok(Some(ResolvedLocation {
+                file: std::path::PathBuf::from("src/lib.rs"),
+                line: 1,
+            }))
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path();
+    git(p, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(p.join("src")).unwrap();
+    std::fs::write(
+        p.join("Cargo.toml"),
+        b"[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    // T0: obscure_helper exists.
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"pub fn obscure_helper() -> u32 { 0 }\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "init", "2025-01-01T00:00:00Z");
+    let t0 = rev_parse_head(p);
+
+    // C1: delete obscure_helper; only unrelated_fn remains.
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"pub fn unrelated_fn() -> u32 { 1 }\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "delete-obscure-helper", "2025-01-02T00:00:00Z");
+    let c1 = rev_parse_head(p);
+
+    // C2: add a NEW fn obscure_helper with a different body.  A HEAD-keyed
+    // resolver will see this and report "symbol resolves" for any commit,
+    // including C1 where it was actually absent.
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"pub fn unrelated_fn() -> u32 { 1 }\n\
+          pub fn obscure_helper() -> u32 { 42 }\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "re-add-obscure-helper", "2025-01-03T00:00:00Z");
+
+    // Run with the stub resolver.  `skip_symbol_resolution` must be false so
+    // that `classify_against_commit` actually consults the resolver when
+    // `matching_post_fact` returns None at C1.
+    let cfg = ReplayConfig {
+        repo_path: p.to_path_buf(),
+        t0_sha: t0.clone(),
+        skip_symbol_resolution: false,
+    };
+    let rows = Replay::run_with_resolver(&cfg, Some(Box::new(AlwaysResolvesStub))).unwrap();
+
+    let fn_rows: Vec<_> = rows
+        .iter()
+        .filter(|r| r.fact_id.contains("obscure_helper"))
+        .collect();
+
+    let c1_row = fn_rows
+        .iter()
+        .find(|r| r.commit_sha == c1)
+        .expect("C1 row for obscure_helper missing");
+
+    // The stub always says "symbol resolves", so the current HEAD-keyed code
+    // returns NeedsRevalidation at C1 instead of StaleSourceDeleted.
+    // Task 3's fix must ignore the stub (or bypass it) and use per-commit
+    // blob presence, correctly returning StaleSourceDeleted.
+    assert!(
+        matches!(c1_row.label, Label::StaleSourceDeleted),
+        "C1 (obscure_helper deleted) must be StaleSourceDeleted even when the \
+         HEAD-keyed stub reports the symbol resolves; got {:?} — Task 3 must \
+         use per-commit-tree resolution, not the working-tree resolver",
+        c1_row.label
     );
 }
 
