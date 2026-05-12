@@ -82,19 +82,21 @@ Phase 0b is accepted iff:
   `CommitSymbolIndex` is built from that commit's blobs (via tree-sitter)
   before any fact is classified; `rust-analyzer` is no longer consulted at
   replay time. This eliminates the runtime RA dependency for the hot
-  classification path. Live RA tooling and the `RA_BIN` tooling pin remain
-  in the crate for `tests/replay_ra.rs` (pinned-binary test) and for future
-  cross-crate / macro-expanded work. The index is built from the `.rs` paths
-  known at T₀; files added in later commits are not included, which may
-  under-count cross-file symbol moves.
+  classification path. Live RA tooling and the `PINNED_BINARIES` tooling-pin
+  table (in `src/tooling.rs`) remain in the crate for `tests/replay_ra.rs`
+  (pinned-binary test) and for future cross-crate / macro-expanded work.
+  The index is built from the `.rs` paths known at T₀; files added in later
+  commits are not included, which may under-count cross-file symbol moves.
 
 - **Rename detection requires AST context match.** A `RenameCandidate` is a
-  typed struct carrying both `kind` (the symbol kind, e.g. function,
-  struct) and `container` (the enclosing module or impl block). A candidate
-  is only promoted to a rename when the kind and container match the
-  original symbol *and* the candidate was not already present at T₀ — the
-  structural T₀-presence check prevents false positives from pre-existing
-  symbols with the same name.
+  typed struct carrying `container` (the enclosing module or impl block)
+  along with `qualified_name`, `leaf_name`, and `span`. Same-kind filtering
+  is enforced upstream by `rename_candidates_for_typed`, which only collects
+  candidates from the original fact's kind. A candidate is only promoted to
+  a rename when the container matches the original symbol *and* the
+  candidate was not already present at T₀ — the structural T₀-presence
+  check prevents false positives from pre-existing symbols with the same
+  name.
 
 - **DocClaim matching is relocation-tolerant.** The post-state doc-claim
   lookup searches by `qualified_name` rather than by byte-offset hash.
@@ -136,9 +138,12 @@ round-trips through reader/writer correctly.
 - v1 supports Rust only. The held-out Python repo (`flask`) is **not**
   exercised by this labeler. A `tree-sitter`-based Python path is
   future work and **not** required for Phase 0b acceptance.
-- `rust-analyzer` is invoked over LSP stdio per commit. Wall-clock cost
-  scales with commit count; the pilot run on ripgrep at T₀ → T₀+~600
-  commits is expected to take 30–90 minutes on an M-series Mac.
+- Per-commit classification uses a tree-sitter-built `CommitSymbolIndex`
+  rather than a live `rust-analyzer` query. This loses semantic resolution
+  for cross-crate references and macro-expanded symbols. The pinned RA
+  binary is still verified at `Replay::run` startup (via `tooling::resolve_from_env`)
+  and `tests/replay_ra.rs` covers the legacy RA-based path for future
+  work that needs deeper semantic resolution.
 
 ## Reproducibility / supported platforms
 

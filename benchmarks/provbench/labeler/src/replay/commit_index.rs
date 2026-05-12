@@ -100,13 +100,21 @@ impl CommitSymbolIndex {
         })
     }
 
-    /// Returns `true` if a same-kind, same-qualified-name symbol for `fact`
-    /// exists anywhere in this commit's tree (including at the fact's
+    /// Returns `true` if a same-kind, same-qualified Rust symbol exists
+    /// anywhere in this commit's `.rs` tree (including at the fact's
     /// original source path).
     ///
-    /// `DocClaim` always returns `false` — doc claims are byte-range–anchored
-    /// and are not indexed here.
-    pub fn symbol_exists_for_fact(&self, fact: &Fact) -> bool {
+    /// The index is path-agnostic — it tracks only qualified names, not
+    /// which file each name comes from.  To answer "does the symbol exist
+    /// _elsewhere_ in the tree" (i.e., excluding the original path), the
+    /// caller must first verify the symbol is absent from its original path
+    /// via `matching_post_fact`.  This method should only be invoked after
+    /// that check returns `None`; the caller's control flow provides the
+    /// "elsewhere" guarantee that this path-agnostic index cannot.
+    ///
+    /// `DocClaim` always returns `false` — doc claims are byte-range–
+    /// anchored and are not indexed here.
+    pub fn symbol_exists_in_tree(&self, fact: &Fact) -> bool {
         match fact {
             Fact::FunctionSignature { qualified_name, .. } => {
                 self.function_names.contains(qualified_name.as_str())
@@ -120,18 +128,5 @@ impl CommitSymbolIndex {
             Fact::TestAssertion { test_fn, .. } => self.test_names.contains(test_fn.as_str()),
             Fact::DocClaim { .. } => false,
         }
-    }
-
-    /// Returns `true` if a same-kind, same-qualified Rust symbol exists
-    /// anywhere in the commit's `.rs` tree.
-    ///
-    /// The index is path-agnostic (it tracks only qualified names, not which
-    /// file each name comes from), so this method simply checks whether the
-    /// symbol is present anywhere in the commit tree.  The "elsewhere"
-    /// guarantee — that the symbol is absent from its original source path —
-    /// comes entirely from the caller's control flow: this method should only
-    /// be invoked after `matching_post_fact` has already returned `None`.
-    pub fn symbol_exists_in_tree(&self, fact: &Fact) -> bool {
-        self.symbol_exists_for_fact(fact)
     }
 }

@@ -100,8 +100,10 @@ impl Replay {
         _resolver: Option<Box<dyn SymbolResolver>>,
     ) -> Result<Vec<FactAtCommit>> {
         // skip_symbol_resolution must be false so the CommitSymbolIndex is
-        // built and per-commit tree resolution is exercised.
-        assert!(
+        // built and per-commit tree resolution is exercised.  Returns Err
+        // rather than panicking — this is a `pub` entry point even with
+        // `#[doc(hidden)]`.
+        anyhow::ensure!(
             !cfg.skip_symbol_resolution,
             "run_with_resolver: set skip_symbol_resolution=false so the \
              per-commit tree resolution path is exercised"
@@ -185,17 +187,15 @@ impl Replay {
         // classify time is O(1).
         let t0_names_by_path = build_t0_names_by_path(&facts);
 
-        // Enumerate all .rs paths in the repo (used to build the per-commit
-        // CommitSymbolIndex when skip_symbol_resolution is false).  We compute
-        // this once — the tree-paths call is against T₀, but the set of .rs
-        // files is representative for coverage purposes; individual path
-        // existence per-commit is resolved by read_blob_at returning None.
-        // For commits that add new .rs files not present at T₀, those paths
-        // would be missed by this pre-computed list.  That is acceptable for
-        // Phase 0b: the index is conservative (may under-count "symbol exists
-        // elsewhere"), which biases toward StaleSourceDeleted rather than
-        // NeedsRevalidation — a safe false-negative for cross-file moves.
-        let all_rs_paths: Vec<PathBuf> = rust_paths_at(&pilot, &cfg.t0_sha)?;
+        // Reuse the T₀ rust-paths set computed above for the per-commit
+        // CommitSymbolIndex.  The tree-paths call is against T₀; individual
+        // path existence per-commit is resolved by read_blob_at returning
+        // None.  For commits that add new .rs files not present at T₀, those
+        // paths are missed by this pre-computed list.  That is acceptable
+        // for Phase 0b: the index is conservative (may under-count "symbol
+        // exists elsewhere"), which biases toward StaleSourceDeleted rather
+        // than NeedsRevalidation — a safe false-negative for cross-file moves.
+        let all_rs_paths: &[PathBuf] = &rust_paths;
 
         let mut rows: Vec<FactAtCommit> = Vec::new();
         for commit in &commits {
@@ -218,7 +218,7 @@ impl Replay {
                 Some(CommitSymbolIndex::build(
                     &pilot,
                     &commit.sha,
-                    &all_rs_paths,
+                    all_rs_paths,
                     &cached_blobs,
                 )?)
             };
