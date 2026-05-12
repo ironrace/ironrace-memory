@@ -75,7 +75,6 @@ fn no_candidate_above_threshold_returns_none() {
 /// (the function was deleted, not renamed; the new symbol is an independent
 /// addition).
 #[test]
-#[ignore = "RED until Task 4 (cluster C rename false positive)"]
 fn hp3_3b_replacement_deletion_no_false_rename_candidate() {
     let before = b"pub fn replace_with_captures(s: &str) -> String { s.to_string() }";
     let after_candidates = vec![(
@@ -105,7 +104,6 @@ fn hp3_3b_replacement_deletion_no_false_rename_candidate() {
 /// result is `None` — the field was deleted, and `any_literal` is a distinct,
 /// pre-existing field whose qualified name is unrelated.
 #[test]
-#[ignore = "RED until Task 4 (cluster C rename false positive)"]
 fn hp3_3_field_drop_no_false_rename_candidate() {
     // Field spans as they appear in the AST byte slice used by
     // `rename_candidates_for` (just the field content, no surrounding struct).
@@ -150,6 +148,90 @@ fn hp3_4_rename_true_positive_same_impl_is_detected() {
         "locations_mut → captures_mut in the same impl block must be detected \
          as a rename (same-container, near-identical span), but rename_candidate \
          returned {:?}",
+        result
+    );
+}
+
+// ── Additional leaf-name gate unit cases ─────────────────────────────────────
+//
+// These tests independently verify the two-part gate logic added in Task 4:
+// (1) sibling-overlap FPs return None even when span ratio is above min_ratio;
+// (2) same-context true-positive renames return Some.
+
+/// When a function with a near-identical name exists in the post-commit pool
+/// (one name is a pluralised/suffixed form of the other), it must NOT be
+/// treated as a rename even though the span ratio is very high.
+///
+/// This is an independent unit case for the leaf-name upper-bound gate
+/// (`MAX_NAME_SIMILARITY = 0.85`).  Companion to
+/// `hp3_3b_replacement_deletion_no_false_rename_candidate`.
+///
+/// `fetch_datum` vs `fetch_data`: leaf-name similarity ≈ 0.857, span ratio
+/// ≈ 0.976. The leaf-name similarity meets or exceeds the 0.85 upper bound
+/// → the candidate must be rejected.
+#[test]
+fn near_identical_leaf_name_is_not_a_rename() {
+    let before = b"fn fetch_data(client: &Client) -> Vec<Row> { client.query() }";
+    let after_candidates = vec![(
+        "fetch_datum".to_string(),
+        b"fn fetch_datum(client: &Client) -> Vec<Row> { client.query() }".to_vec(),
+    )];
+    let result = rename_candidate(before, &after_candidates, 0.6);
+    assert_eq!(
+        result, None,
+        "fetch_data → fetch_datum must NOT be treated as a rename \
+         (near-identical name, leaf-name similarity ≥ 0.85), \
+         but rename_candidate returned {:?}",
+        result
+    );
+}
+
+/// When a field with a loosely related name but same type exists as the only
+/// post-commit candidate, it must NOT be treated as a rename.
+///
+/// `query_result_count` vs `total_count`: leaf-name similarity ≈ 0.483,
+/// which falls below the lower bound (`min_ratio = 0.6`), so the candidate
+/// is rejected.
+#[test]
+fn loosely_related_field_name_is_not_a_rename() {
+    let before = b"query_result_count: u32";
+    let after_candidates = vec![(
+        "MyStruct::total_count".to_string(),
+        b"total_count: u32".to_vec(),
+    )];
+    let result = rename_candidate(before, &after_candidates, 0.6);
+    assert_eq!(
+        result, None,
+        "query_result_count → total_count must NOT be treated as a rename \
+         (leaf-name similarity below min_ratio), but rename_candidate \
+         returned {:?}",
+        result
+    );
+}
+
+/// A genuine same-context rename with clearly different but structurally
+/// related names returns Some.
+///
+/// `fn build_query(…)` renamed to `fn build_filter(…)` — both share the
+/// `build_` prefix.  Leaf-name similarity ≈ 0.696 ∈ [0.6, 0.85); span
+/// ratio is high.  The two-part gate must pass and return `Some("build_filter")`.
+#[test]
+fn genuine_rename_shared_prefix_is_detected() {
+    let before = b"fn build_query(params: &Params) -> String { format!(\"{:?}\", params) }";
+    let after_candidates = vec![
+        (
+            "build_filter".to_string(),
+            b"fn build_filter(params: &Params) -> String { format!(\"{:?}\", params) }".to_vec(),
+        ),
+        ("unrelated_fn".to_string(), b"fn unrelated_fn() {}".to_vec()),
+    ];
+    let result = rename_candidate(before, &after_candidates, 0.6);
+    assert_eq!(
+        result.as_deref(),
+        Some("build_filter"),
+        "build_query → build_filter must be detected as a rename \
+         (same body, shared prefix, leaf-name similarity in valid range), \
+         but rename_candidate returned {:?}",
         result
     );
 }
