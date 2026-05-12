@@ -709,3 +709,98 @@ fn hp3_4_rename_true_positive_preservation_recorded_at_diff_level() {
         "preservation: locations_mut → captures_mut must remain a detected rename"
     );
 }
+
+// ── HP3-4b: rename true positive through the PRODUCTION classify path ────────
+
+/// Exercises the full production pipeline for a within-file function rename:
+///   T₀  → `pub fn find_entry(key: &str) -> Option<u32> { None }`
+///   C1  → `pub fn find_result(key: &str) -> Option<u32> { None }`
+///           (old name deleted, new name added — same body, same module context)
+///
+/// This test uses `Replay::run_with_resolver` with `skip_symbol_resolution=false`
+/// so the full path is exercised:
+///   1. `CommitSymbolIndex` is built from C1's blob tree.
+///   2. `matching_post_fact` returns `None` (old name absent in C1).
+///   3. `CommitSymbolIndex::symbol_exists_in_tree` returns `false`
+///      (old name is gone from every path in the tree).
+///   4. The typed rename pipeline (`rename_candidates_for_typed` +
+///      `rename_candidate_typed`) runs and detects `find_result` as the
+///      rename target (shared `find_` prefix, high span similarity).
+///   5. `classify` emits `StaleSymbolRenamed { new_name: "find_result" }`.
+///
+/// This is the integration-level gate for the Task 4 wiring: the typed
+/// pipeline was previously only reachable via the dead fallback branch;
+/// after this fix it runs in the live `CommitSymbolIndex` branch.
+#[test]
+fn hp3_4b_rename_through_production_classify_path() {
+    struct NullResolver;
+    impl SymbolResolver for NullResolver {
+        fn resolve(&mut self, _name: &str) -> anyhow::Result<Option<ResolvedLocation>> {
+            Ok(None)
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path();
+    git(p, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(p.join("src")).unwrap();
+    std::fs::write(
+        p.join("Cargo.toml"),
+        b"[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    // T0: only `find_entry` exists.
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"pub fn find_entry(key: &str) -> Option<u32> { None }\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "init", "2025-01-01T00:00:00Z");
+    let t0 = rev_parse_head(p);
+
+    // C1: rename find_entry → find_result (same body, only name changed).
+    // `find_result` is NOT present at T0, so Gate 2 passes.
+    // Leaf-name similarity: "find_entry" vs "find_result"
+    //   TextDiff::from_chars("find_entry", "find_result").ratio()
+    //   Both share "find_" (6 chars), differ in "entry"(5) vs "result"(6).
+    //   LCS ≈ 6 common + chars in "entr"/"resul" partial match → ratio > 0.6.
+    // Span similarity: identical body except the name → ratio > 0.6.
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"pub fn find_result(key: &str) -> Option<u32> { None }\n",
+    )
+    .unwrap();
+    commit_all_with_date(
+        p,
+        "rename-find-entry-to-find-result",
+        "2025-01-02T00:00:00Z",
+    );
+    let c1 = rev_parse_head(p);
+
+    let cfg = ReplayConfig {
+        repo_path: p.to_path_buf(),
+        t0_sha: t0.clone(),
+        skip_symbol_resolution: false,
+    };
+    let rows = Replay::run_with_resolver(&cfg, Some(Box::new(NullResolver))).unwrap();
+
+    let fn_rows: Vec<_> = rows
+        .iter()
+        .filter(|r| r.fact_id.contains("find_entry"))
+        .collect();
+
+    let c1_row = fn_rows
+        .iter()
+        .find(|r| r.commit_sha == c1)
+        .expect("C1 row for find_entry missing");
+
+    assert!(
+        matches!(
+            &c1_row.label,
+            Label::StaleSymbolRenamed { new_name } if new_name == "find_result"
+        ),
+        "production rename path: find_entry → find_result must emit \
+         StaleSymbolRenamed {{ new_name: \"find_result\" }}, got {:?}",
+        c1_row.label
+    );
+}

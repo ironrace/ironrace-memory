@@ -576,18 +576,13 @@ fn classify_against_commit(
                         // match), so we route to NeedsRevalidation without
                         // triggering StaleSymbolRenamed.
                         //
-                        // Case 2 — symbol absent from the commit tree: the fact's
-                        // source was deleted at this commit.  We classify as
-                        // StaleSourceDeleted directly, without running the rename
-                        // heuristic inside the same file.  The rename heuristic
-                        // compares byte-level similarity and can produce false
-                        // positives for structurally similar but semantically
-                        // unrelated functions (e.g. any two `-> u32` stubs);
-                        // the commit-local index provides a more reliable signal.
-                        // "elsewhere" is guaranteed by the surrounding flow:
-                        // we reach this branch only after `matching_post_fact`
-                        // returned `None`, so the symbol is already confirmed
-                        // absent from its original path.
+                        // Case 2 — symbol absent from the commit tree entirely:
+                        // the qualified name is gone from every file.  Run the
+                        // typed rename pipeline against the same-file post-commit
+                        // AST to detect within-file renames (e.g. `old_name` →
+                        // `new_name` in the same module/impl block).  If a
+                        // candidate passes all four gates → StaleSymbolRenamed;
+                        // otherwise → StaleSourceDeleted.
                         if index.symbol_exists_in_tree(fact) {
                             CommitState {
                                 file_exists: true,
@@ -598,33 +593,38 @@ fn classify_against_commit(
                                 rename: None,
                             }
                         } else {
+                            let candidates = match_post::rename_candidates_for_typed(
+                                fact, path, post_bytes, post_ast,
+                            );
+                            let origin = RenameOrigin::new(qualified_key_for(fact), t0_span_bytes);
+                            let rename = rename_candidate_typed(
+                                &origin,
+                                &candidates,
+                                t0_qualified_names,
+                                0.6,
+                            );
                             CommitState {
                                 file_exists: true,
                                 post_span_hash: None,
                                 structurally_classifiable: false,
                                 whitespace_or_comment_only: false,
                                 symbol_resolves: false,
-                                rename: None,
+                                rename,
                             }
                         }
                     } else {
-                        // skip_symbol_resolution=false but no index (should not
-                        // happen in practice — run_inner always builds the index
-                        // when skip_symbol_resolution is false).  Fall back to
-                        // rename detection only using the typed pipeline.
-                        let candidates = match_post::rename_candidates_for_typed(
-                            fact, path, post_bytes, post_ast,
-                        );
-                        let origin = RenameOrigin::new(qualified_key_for(fact), t0_span_bytes);
-                        let rename =
-                            rename_candidate_typed(&origin, &candidates, t0_qualified_names, 0.6);
+                        // `skip_symbol_resolution = false` but `commit_index` is
+                        // `None`.  This cannot happen in practice: `run_inner`
+                        // always builds the index when `skip_symbol_resolution`
+                        // is `false`.  Treat as deleted (no rename detection)
+                        // rather than panicking so behaviour is defined.
                         CommitState {
                             file_exists: true,
                             post_span_hash: None,
                             structurally_classifiable: false,
                             whitespace_or_comment_only: false,
                             symbol_resolves: false,
-                            rename,
+                            rename: None,
                         }
                     }
                 }

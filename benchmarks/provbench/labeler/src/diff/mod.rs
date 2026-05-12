@@ -67,6 +67,15 @@ const MAX_NAME_SIMILARITY: f32 = 0.85;
 ///
 /// Returns the best (highest span-ratio) candidate name above both thresholds,
 /// or `None`.
+///
+/// # Deprecation note
+///
+/// Production code now uses [`rename_candidate_typed`] exclusively (wired into
+/// `classify_against_commit` in `replay/mod.rs`).  This function is retained
+/// as `#[doc(hidden)]` for the existing diff-level unit tests and the HP3-4
+/// integration preservation test in `tests/replay_hardening.rs`.  Migrate those
+/// tests to the typed API in a follow-up commit, then remove this function.
+#[doc(hidden)]
 pub fn rename_candidate(
     before_span: &[u8],
     after_candidates: &[(String, Vec<u8>)],
