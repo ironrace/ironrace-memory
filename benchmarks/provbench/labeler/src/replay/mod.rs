@@ -17,11 +17,9 @@
 //! cross-crate / macro-expanded work.
 
 pub mod commit_index;
+mod match_post;
 
-use crate::ast::{
-    spans::{content_hash, Span},
-    RustAst,
-};
+use crate::ast::{spans::Span, RustAst};
 use crate::diff::{is_whitespace_or_comment_only, rename_candidate};
 use crate::facts::{doc_claim, field, function_signature, symbol_existence, test_assertion, Fact};
 use crate::label::{classify, Label, PostCommitState};
@@ -92,18 +90,10 @@ impl Replay {
         Self::run_inner(cfg, None)
     }
 
-    /// Test-only entry point that accepts a caller-supplied `SymbolResolver`
-    /// stub (preserved as a vestigial test seam after Task 3).
-    ///
-    /// After Task 3 the stub resolver is **not** consulted during per-commit
-    /// classification — the [`CommitSymbolIndex`] built from each commit's
-    /// blobs is authoritative.  The `resolver` parameter is accepted for
-    /// API compatibility with existing tests but its `resolve` method is
-    /// never called from the classification path.
-    ///
-    /// # Note
-    /// This function is intended for testing only.  Production callers should
-    /// use [`Self::run`].
+    /// Test-only entry point preserved for API compatibility after Task 3.
+    /// The `resolver` parameter is accepted but never invoked; per-commit
+    /// classification uses [`CommitSymbolIndex`] exclusively.
+    /// Use [`Self::run`] for production.
     #[doc(hidden)]
     pub fn run_with_resolver(
         cfg: &ReplayConfig,
@@ -498,7 +488,7 @@ fn classify_against_commit(
             let observed_hash = observed_hash_for(fact);
 
             // Search the post-commit file for the same fact kind/key.
-            let post_fact = matching_post_fact(fact, path, post_bytes, post_ast);
+            let post_fact = match_post::matching_post_fact(fact, path, post_bytes, post_ast);
 
             match post_fact {
                 Some((post_span, post_hash)) => {
@@ -546,7 +536,11 @@ fn classify_against_commit(
                         // positives for structurally similar but semantically
                         // unrelated functions (e.g. any two `-> u32` stubs);
                         // the commit-local index provides a more reliable signal.
-                        if index.symbol_exists_elsewhere(fact) {
+                        // "elsewhere" is guaranteed by the surrounding flow:
+                        // we reach this branch only after `matching_post_fact`
+                        // returned `None`, so the symbol is already confirmed
+                        // absent from its original path.
+                        if index.symbol_exists_in_tree(fact) {
                             CommitState {
                                 file_exists: true,
                                 post_span_hash: None,
@@ -570,7 +564,8 @@ fn classify_against_commit(
                         // happen in practice — run_inner always builds the index
                         // when skip_symbol_resolution is false).  Fall back to
                         // rename detection only.
-                        let candidates = rename_candidates_for(fact, path, post_bytes, post_ast);
+                        let candidates =
+                            match_post::rename_candidates_for(fact, path, post_bytes, post_ast);
                         let rename = rename_candidate(t0_span_bytes, &candidates, 0.6);
                         CommitState {
                             file_exists: true,
@@ -591,179 +586,6 @@ fn classify_against_commit(
 
 fn observed_span_bytes(blob: &[u8], fact: &Fact) -> Vec<u8> {
     blob[span_for(fact).byte_range.clone()].to_vec()
-}
-
-fn matching_post_fact(
-    fact: &Fact,
-    path: &Path,
-    post_bytes: &[u8],
-    post_ast: Option<&RustAst>,
-) -> Option<(Span, String)> {
-    match fact {
-        Fact::FunctionSignature { qualified_name, .. } => post_ast.and_then(|ast| {
-            function_signature::extract(ast, path).find_map(|f| match f {
-                Fact::FunctionSignature {
-                    qualified_name: q,
-                    span,
-                    content_hash,
-                    ..
-                } if q == *qualified_name => Some((span, content_hash)),
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
-        }),
-        Fact::Field { qualified_path, .. } => post_ast.and_then(|ast| {
-            field::extract(ast, path).find_map(|f| match f {
-                Fact::Field {
-                    qualified_path: q,
-                    span,
-                    content_hash,
-                    ..
-                } if q == *qualified_path => Some((span, content_hash)),
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
-        }),
-        Fact::PublicSymbol { qualified_name, .. } => post_ast.and_then(|ast| {
-            // First: check if the item is still bare-pub (happy path).
-            let still_bare_pub = symbol_existence::extract(ast, path).find_map(|f| match f {
-                Fact::PublicSymbol {
-                    qualified_name: q,
-                    span,
-                    content_hash,
-                    ..
-                } if q == *qualified_name => Some((span, content_hash)),
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            });
-            if still_bare_pub.is_some() {
-                return still_bare_pub;
-            }
-            // Second: item is absent from the bare-pub extract — check whether
-            // it still exists with a narrowed visibility (pub(crate), pub(super),
-            // pub(in …), or private).  The simple name is the last segment of
-            // the qualified_name (e.g. "Config" from "my_mod::Config").
-            // `rsplit` always yields at least one element, so `.next()` is `Some`.
-            let simple_name = qualified_name
-                .rsplit("::")
-                .next()
-                .expect("rsplit always yields at least one element");
-            symbol_existence::find_item_by_name(ast, simple_name).and_then(|found| {
-                use symbol_existence::VisibilityKind;
-                match found.visibility {
-                    // Still bare-pub — would have been caught by the extract above.
-                    VisibilityKind::BarePub => None,
-                    // Narrowed to restricted or private: signal a structural
-                    // change so `classify` emits `StaleSourceChanged`.
-                    VisibilityKind::Restricted | VisibilityKind::Private => {
-                        Some((found.span, found.content_hash))
-                    }
-                }
-            })
-        }),
-        Fact::DocClaim { mention_span, .. } => {
-            let range = mention_span.byte_range.clone();
-            if range.end > post_bytes.len() {
-                return None;
-            }
-            Some((
-                Span {
-                    byte_range: range.clone(),
-                    line_start: mention_span.line_start,
-                    line_end: mention_span.line_end,
-                },
-                content_hash(&post_bytes[range]),
-            ))
-        }
-        Fact::TestAssertion { test_fn, .. } => post_ast.and_then(|ast| {
-            test_assertion::extract(ast, path, &[]).find_map(|f| match f {
-                Fact::TestAssertion {
-                    test_fn: q,
-                    span,
-                    content_hash,
-                    ..
-                } if q == *test_fn => Some((span, content_hash)),
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
-        }),
-    }
-}
-
-fn rename_candidates_for(
-    fact: &Fact,
-    path: &Path,
-    post_bytes: &[u8],
-    post_ast: Option<&RustAst>,
-) -> Vec<(String, Vec<u8>)> {
-    let Some(ast) = post_ast else {
-        return Vec::new();
-    };
-    match fact {
-        Fact::FunctionSignature { .. } => function_signature::extract(ast, path)
-            .filter_map(|f| match f {
-                Fact::FunctionSignature {
-                    qualified_name,
-                    span,
-                    ..
-                } => Some((qualified_name, post_bytes[span.byte_range].to_vec())),
-                Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
-            .collect(),
-        Fact::Field { .. } => field::extract(ast, path)
-            .filter_map(|f| match f {
-                Fact::Field {
-                    qualified_path,
-                    span,
-                    ..
-                } => Some((qualified_path, post_bytes[span.byte_range].to_vec())),
-                Fact::FunctionSignature { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
-            .collect(),
-        Fact::PublicSymbol { .. } => symbol_existence::extract(ast, path)
-            .filter_map(|f| match f {
-                Fact::PublicSymbol {
-                    qualified_name,
-                    span,
-                    ..
-                } => Some((qualified_name, post_bytes[span.byte_range].to_vec())),
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
-            .collect(),
-        Fact::DocClaim { .. } => Vec::new(),
-        Fact::TestAssertion { .. } => test_assertion::extract(ast, path, &[])
-            .filter_map(|f| match f {
-                Fact::TestAssertion { test_fn, span, .. } => {
-                    Some((test_fn, post_bytes[span.byte_range].to_vec()))
-                }
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. } => None,
-            })
-            .collect(),
-    }
 }
 
 fn span_for(fact: &Fact) -> &Span {

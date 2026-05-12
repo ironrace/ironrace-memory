@@ -75,7 +75,9 @@ Replay classification is commit-tree-local: for each commit a
 `CommitSymbolIndex` is built from that commit's blobs before any fact is
 classified; `rust-analyzer` is no longer consulted at replay time.  Live
 RA tooling stays in the crate for `tests/replay_ra.rs` (pinned-binary
-test) and for future cross-crate / macro-expanded work.
+test) and for future cross-crate / macro-expanded work.  The index is
+built from the `.rs` paths known at T₀; files added in later commits are
+not included, which may under-count cross-file symbol moves.
 
 The labeler is **fail-closed** by design. Silently producing labels in any
 of the following situations would corrupt the corpus, so each surfaces as

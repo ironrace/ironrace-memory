@@ -3,7 +3,7 @@
 //! [`CommitSymbolIndex`] answers "does a fact's qualified symbol exist
 //! anywhere in this commit's tree?" using only blobs from that commit —
 //! never the working tree or HEAD.  It is built once per commit, before
-//! the per-fact classification loop, so each blob is parsed at most once.
+//! the per-fact classification loop, so each blob is **read** at most once.
 //!
 //! # Blob-read budget
 //! `build` accepts a map of already-read blobs (keyed by repo-relative
@@ -52,12 +52,20 @@ impl CommitSymbolIndex {
         for path in rs_paths {
             // Reuse a cached blob if available; only call read_blob_at when
             // the path was not already fetched for this commit.
-            let blob_opt: Option<Vec<u8>> = match cached_blobs.get(path) {
-                Some(cached) => cached.clone(),
-                None => pilot.read_blob_at(commit_sha, path)?,
+            // Borrow cached bytes in-place to avoid cloning when possible.
+            let fetched: Option<Vec<u8>>;
+            let bytes: &[u8] = match cached_blobs.get(path) {
+                Some(Some(cached)) => cached,
+                Some(None) => continue, // path was deleted at this commit
+                None => {
+                    fetched = pilot.read_blob_at(commit_sha, path)?;
+                    match &fetched {
+                        Some(b) => b,
+                        None => continue,
+                    }
+                }
             };
-            let Some(bytes) = blob_opt else { continue };
-            let Ok(ast) = RustAst::parse(&bytes) else {
+            let Ok(ast) = RustAst::parse(bytes) else {
                 continue;
             };
             for fact in function_signature::extract(&ast, path) {
@@ -114,23 +122,16 @@ impl CommitSymbolIndex {
         }
     }
 
-    /// Returns `true` if the same-kind symbol exists at a path OTHER THAN
-    /// `original_path` in this commit's tree.
+    /// Returns `true` if a same-kind, same-qualified Rust symbol exists
+    /// anywhere in the commit's `.rs` tree.
     ///
-    /// This is used to distinguish "symbol deleted" from "symbol moved to a
-    /// different file" — the latter routes to `NeedsRevalidation` (legitimate
-    /// gray area for LLM evaluation) rather than `StaleSourceDeleted`.
-    ///
-    /// Because the index is path-agnostic (it only tracks qualified names),
-    /// this returns `true` when `symbol_exists_for_fact` is `true` AND the
-    /// per-path lookup at `original_path` already returned `None` (i.e.,
-    /// `matching_post_fact` found nothing at the original path).  The caller
-    /// is responsible for only calling this after `matching_post_fact` has
-    /// returned `None`.
-    pub fn symbol_exists_elsewhere(&self, fact: &Fact) -> bool {
-        // If the symbol exists anywhere in the index and matching_post_fact
-        // returned None (the symbol is absent from the original path), then
-        // it must exist at a different path — "moved" rather than "deleted".
+    /// The index is path-agnostic (it tracks only qualified names, not which
+    /// file each name comes from), so this method simply checks whether the
+    /// symbol is present anywhere in the commit tree.  The "elsewhere"
+    /// guarantee — that the symbol is absent from its original source path —
+    /// comes entirely from the caller's control flow: this method should only
+    /// be invoked after `matching_post_fact` has already returned `None`.
+    pub fn symbol_exists_in_tree(&self, fact: &Fact) -> bool {
         self.symbol_exists_for_fact(fact)
     }
 }
