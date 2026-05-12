@@ -20,7 +20,7 @@ pub mod commit_index;
 mod match_post;
 
 use crate::ast::{spans::Span, RustAst};
-use crate::diff::{is_whitespace_or_comment_only, rename_candidate};
+use crate::diff::{is_whitespace_or_comment_only, rename_candidate_typed, RenameOrigin};
 use crate::facts::{doc_claim, field, function_signature, symbol_existence, test_assertion, Fact};
 use crate::label::{classify, Label, PostCommitState};
 use crate::repo::{normalize_path_for_fact_id, CommitRef, Pilot, PilotRepoSpec};
@@ -28,7 +28,7 @@ use crate::resolve::SymbolResolver;
 use anyhow::{Context, Result};
 use commit_index::CommitSymbolIndex;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 // ── Public surface ────────────────────────────────────────────────────────────
@@ -178,6 +178,13 @@ impl Replay {
         crate::repo::reset_read_blob_at_call_count();
 
         let facts_by_path = group_facts_by_source_path(&facts);
+        // Build the T₀ qualified-name index per source path.  Used by the
+        // rename-candidate filter pipeline (Gate 2: "candidate was not a T₀
+        // fact") to reject surviving siblings from consideration as rename
+        // targets.  Keyed the same way as `facts_by_path` so the lookup at
+        // classify time is O(1).
+        let t0_names_by_path = build_t0_names_by_path(&facts);
+
         // Enumerate all .rs paths in the repo (used to build the per-commit
         // CommitSymbolIndex when skip_symbol_resolution is false).  We compute
         // this once — the tree-paths call is against T₀, but the set of .rs
@@ -220,6 +227,8 @@ impl Replay {
             for (path, facts_at_path) in &facts_by_path {
                 let post_bytes = cached_blobs.get(path).and_then(|b| b.as_deref());
                 let post_ast = post_asts.get(path).and_then(|a| a.as_ref());
+                let t0_names: &HashSet<String> =
+                    t0_names_by_path.get(path).unwrap_or(&EMPTY_STRING_SET);
                 for observed in facts_at_path {
                     let label = classify_against_commit(
                         &observed.fact,
@@ -229,6 +238,7 @@ impl Replay {
                         &observed.t0_span_bytes,
                         cfg,
                         commit_index.as_ref(),
+                        t0_names,
                     )?;
                     rows.push(FactAtCommit {
                         fact_id: fact_id(&observed.fact),
@@ -241,6 +251,10 @@ impl Replay {
         Ok(rows)
     }
 }
+
+/// Shared empty set for paths that have no T₀ facts (avoids allocation).
+static EMPTY_STRING_SET: std::sync::LazyLock<HashSet<String>> =
+    std::sync::LazyLock::new(HashSet::new);
 
 fn push_observed_facts(
     facts: &mut Vec<ObservedFact>,
@@ -266,6 +280,38 @@ fn group_facts_by_source_path(facts: &[ObservedFact]) -> BTreeMap<PathBuf, Vec<&
             .push(observed);
     }
     grouped
+}
+
+/// Build a map from source path → set of T₀ qualified names at that path.
+///
+/// Used by the rename-candidate Gate 2 ("candidate was not a T₀ fact"):
+/// before accepting a post-commit symbol as a rename target we verify it
+/// did NOT exist at T₀ as an independent fact in the same file.
+fn build_t0_names_by_path(facts: &[ObservedFact]) -> BTreeMap<PathBuf, HashSet<String>> {
+    let mut by_path: BTreeMap<PathBuf, HashSet<String>> = BTreeMap::new();
+    for observed in facts {
+        let key = qualified_key_for(&observed.fact).to_string();
+        by_path
+            .entry(source_path_for(&observed.fact).to_path_buf())
+            .or_default()
+            .insert(key);
+    }
+    by_path
+}
+
+/// Return the qualified key that uniquely identifies a fact for T₀-presence
+/// checks.  Mirrors the per-kind primary key used by `matching_post_fact`:
+/// - `FunctionSignature` / `PublicSymbol` / `DocClaim` → `qualified_name`
+/// - `Field` → `qualified_path`
+/// - `TestAssertion` → `test_fn`
+fn qualified_key_for(fact: &Fact) -> &str {
+    match fact {
+        Fact::FunctionSignature { qualified_name, .. } => qualified_name,
+        Fact::Field { qualified_path, .. } => qualified_path,
+        Fact::PublicSymbol { qualified_name, .. } => qualified_name,
+        Fact::DocClaim { qualified_name, .. } => qualified_name,
+        Fact::TestAssertion { test_fn, .. } => test_fn,
+    }
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -471,6 +517,7 @@ impl CommitState {
 ///     → `StaleSourceDeleted` or `StaleSymbolRenamed`.
 /// - When `commit_index` is `None` (`skip_symbol_resolution = true`) →
 ///   bypass cross-file lookup (unit-test mode).
+#[allow(clippy::too_many_arguments)]
 fn classify_against_commit(
     fact: &Fact,
     path: &Path,
@@ -479,6 +526,7 @@ fn classify_against_commit(
     t0_span_bytes: &[u8],
     cfg: &ReplayConfig,
     commit_index: Option<&CommitSymbolIndex>,
+    t0_qualified_names: &HashSet<String>,
 ) -> Result<Label> {
     let state = match post_blob {
         // File was deleted at this commit.
@@ -563,10 +611,13 @@ fn classify_against_commit(
                         // skip_symbol_resolution=false but no index (should not
                         // happen in practice — run_inner always builds the index
                         // when skip_symbol_resolution is false).  Fall back to
-                        // rename detection only.
-                        let candidates =
-                            match_post::rename_candidates_for(fact, path, post_bytes, post_ast);
-                        let rename = rename_candidate(t0_span_bytes, &candidates, 0.6);
+                        // rename detection only using the typed pipeline.
+                        let candidates = match_post::rename_candidates_for_typed(
+                            fact, path, post_bytes, post_ast,
+                        );
+                        let origin = RenameOrigin::new(qualified_key_for(fact), t0_span_bytes);
+                        let rename =
+                            rename_candidate_typed(&origin, &candidates, t0_qualified_names, 0.6);
                         CommitState {
                             file_exists: true,
                             post_span_hash: None,

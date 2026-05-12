@@ -10,6 +10,7 @@ use crate::ast::{
     spans::{content_hash, Span},
     RustAst,
 };
+use crate::diff::RenameCandidate;
 use crate::facts::{field, function_signature, symbol_existence, test_assertion, Fact};
 use std::path::Path;
 
@@ -189,4 +190,21 @@ pub(super) fn rename_candidates_for(
             })
             .collect(),
     }
+}
+
+/// Typed variant of [`rename_candidates_for`].
+///
+/// Returns [`RenameCandidate`] values whose `container` and `leaf_name` are
+/// pre-computed from the qualified name, ready for the typed filter pipeline
+/// in [`crate::diff::rename_candidate_typed`].
+pub(super) fn rename_candidates_for_typed(
+    fact: &Fact,
+    path: &Path,
+    post_bytes: &[u8],
+    post_ast: Option<&RustAst>,
+) -> Vec<RenameCandidate> {
+    rename_candidates_for(fact, path, post_bytes, post_ast)
+        .into_iter()
+        .map(|(qname, span)| RenameCandidate::new(qname, span))
+        .collect()
 }

@@ -1,4 +1,8 @@
-use provbench_labeler::diff::{is_whitespace_or_comment_only, rename_candidate};
+use provbench_labeler::diff::{
+    is_whitespace_or_comment_only, rename_candidate, rename_candidate_typed, RenameCandidate,
+    RenameOrigin,
+};
+use std::collections::HashSet;
 
 #[test]
 fn pure_whitespace_diff_is_ignored() {
@@ -232,6 +236,143 @@ fn genuine_rename_shared_prefix_is_detected() {
         "build_query → build_filter must be detected as a rename \
          (same body, shared prefix, leaf-name similarity in valid range), \
          but rename_candidate returned {:?}",
+        result
+    );
+}
+
+// ── Typed pipeline (container threading + T₀-presence check) ─────────────────
+//
+// These tests exercise `rename_candidate_typed` which adds:
+//   Gate 1 — container compatibility check
+//   Gate 2 — T₀-presence exclusion (candidate must not have been a T₀ fact)
+//   Gate 4 — version-suffix bypass for `_v<N>` evolution renames
+
+/// `Struct::field_v1` → `Struct::field_v2`: same container, version suffix
+/// evolution rename.  Leaf-name similarity ≈ 0.857 (above `MAX_NAME_SIMILARITY`
+/// 0.85), but the version-suffix bypass in the typed pipeline waives the upper
+/// bound when both names share the same base with different `_v<N>` suffixes.
+/// Must return `Some("Struct::field_v2")`.
+#[test]
+fn typed_version_suffix_field_evolution_is_detected() {
+    let origin = RenameOrigin::new("Struct::field_v1", b"field_v1: bool");
+    let candidates = vec![RenameCandidate::new(
+        "Struct::field_v2".to_string(),
+        b"field_v2: bool".to_vec(),
+    )];
+    // `field_v2` is new at post-commit (NOT in T₀ names).
+    let t0_names: HashSet<String> = ["Struct::field_v1".to_string()].into();
+    let result = rename_candidate_typed(&origin, &candidates, &t0_names, 0.6);
+    assert_eq!(
+        result.as_deref(),
+        Some("Struct::field_v2"),
+        "field_v1 → field_v2 in same struct must be detected as a version-suffix \
+         evolution rename (upper bound waived), but rename_candidate_typed returned {:?}",
+        result
+    );
+}
+
+/// `fn serialize` → `fn serialize_v2`: function evolution rename.
+/// Top-level function (no container); version suffix `_v2` bypasses upper bound.
+#[test]
+fn typed_version_suffix_function_evolution_is_detected() {
+    let origin = RenameOrigin::new(
+        "serialize",
+        b"pub fn serialize(data: &Data) -> Vec<u8> { data.to_bytes() }",
+    );
+    let candidates = vec![RenameCandidate::new(
+        "serialize_v2".to_string(),
+        b"pub fn serialize_v2(data: &Data) -> Vec<u8> { data.to_bytes() }".to_vec(),
+    )];
+    // `serialize_v2` is new at post-commit.
+    let t0_names: HashSet<String> = ["serialize".to_string()].into();
+    let result = rename_candidate_typed(&origin, &candidates, &t0_names, 0.6);
+    assert_eq!(
+        result.as_deref(),
+        Some("serialize_v2"),
+        "serialize → serialize_v2 must be detected as a version-suffix evolution \
+         rename, but rename_candidate_typed returned {:?}",
+        result
+    );
+}
+
+/// Cross-container false positive: `Foo::name` deleted, `Bar::name` survives.
+///
+/// Both fields have leaf name `name` and identical type/body, which gives very
+/// high span similarity.  Container check (Gate 1) must reject because the
+/// origin's container is `"Foo"` and the candidate's container is `"Bar"`.
+/// Returns `None`.
+#[test]
+fn typed_cross_container_field_is_rejected() {
+    let origin = RenameOrigin::new("Foo::name", b"name: String");
+    let candidates = vec![RenameCandidate::new(
+        "Bar::name".to_string(),
+        b"name: String".to_vec(),
+    )];
+    let t0_names: HashSet<String> = ["Foo::name".to_string()].into();
+    let result = rename_candidate_typed(&origin, &candidates, &t0_names, 0.6);
+    assert_eq!(
+        result, None,
+        "Foo::name → Bar::name must NOT be treated as a rename (different containers), \
+         but rename_candidate_typed returned {:?}",
+        result
+    );
+}
+
+/// Cross-impl false positive for functions: both `impl Foo { fn bar }` and
+/// `impl Quux { fn bar }` appear as bare top-level names `"bar"` (the extractor
+/// does not track `impl` context in the qualified name).  However, the key
+/// insight is that `"bar"` already existed as a T₀ fact — the T₀-presence
+/// check (Gate 2) must reject it.
+///
+/// If the post-commit `"bar"` was NOT a T₀ fact, the two functions would both
+/// appear as top-level (container = `None`) and container threading alone cannot
+/// disambiguate them.  That case is out-of-scope for Phase 0b (the per-commit
+/// index catches cross-file moves, and within-file the T₀-presence check handles
+/// the same-container sibling case).
+#[test]
+fn typed_t0_present_candidate_is_rejected() {
+    // `bar` exists at T₀ as an independent function; it must not be treated
+    // as the rename target of another deleted T₀ function.
+    let origin = RenameOrigin::new("do_work", b"fn do_work(x: u32) -> u32 { x * 2 }");
+    let candidates = vec![RenameCandidate::new(
+        "bar".to_string(),
+        b"fn bar(x: u32) -> u32 { x * 2 }".to_vec(),
+    )];
+    // `bar` was already a T₀ fact.
+    let t0_names: HashSet<String> = ["do_work".to_string(), "bar".to_string()].into();
+    let result = rename_candidate_typed(&origin, &candidates, &t0_names, 0.6);
+    assert_eq!(
+        result, None,
+        "A T₀-present candidate must NOT be treated as a rename target \
+         (it is a surviving sibling, not a renamed version), \
+         but rename_candidate_typed returned {:?}",
+        result
+    );
+}
+
+/// End-to-end typed rename: `Struct::value_count` → `Struct::result_count`.
+/// Same container, candidate NOT in T₀, sufficient similarity.
+#[test]
+fn typed_genuine_same_container_rename_is_detected() {
+    let origin = RenameOrigin::new("Struct::value_count", b"value_count: usize");
+    let candidates = vec![
+        RenameCandidate::new(
+            "Struct::result_count".to_string(),
+            b"result_count: usize".to_vec(),
+        ),
+        RenameCandidate::new(
+            "Other::value_count".to_string(),
+            b"value_count: usize".to_vec(),
+        ),
+    ];
+    let t0_names: HashSet<String> = ["Struct::value_count".to_string()].into();
+    let result = rename_candidate_typed(&origin, &candidates, &t0_names, 0.6);
+    assert_eq!(
+        result.as_deref(),
+        Some("Struct::result_count"),
+        "value_count → result_count in same struct must be detected; \
+         Other::value_count is a T₀ fact and must be excluded by Gate 2, \
+         but rename_candidate_typed returned {:?}",
         result
     );
 }

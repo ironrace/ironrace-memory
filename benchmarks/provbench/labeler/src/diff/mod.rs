@@ -2,6 +2,7 @@
 //! a fact even when content hashes differ. Implementation tokenizes both
 //! sides with tree-sitter, drops trivia, and compares the residual.
 
+use std::collections::HashSet;
 use tree_sitter::{Node, Parser, Tree};
 
 pub fn is_whitespace_or_comment_only(before: &[u8], after: &[u8]) -> bool {
@@ -99,6 +100,210 @@ pub fn rename_candidate(
         }
     }
     best.map(|(n, _)| n)
+}
+
+// ── Typed rename-candidate pipeline ──────────────────────────────────────────
+
+/// A post-commit fact that is a candidate rename target for a deleted T₀ fact.
+///
+/// Carries enough structural context for the filter pipeline to apply
+/// container-threading and T₀-presence checks before falling back to the
+/// similarity gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameCandidate {
+    /// Fully-qualified name as stored by the extractor
+    /// (e.g. `"AstAnalysis::any_literal"`, `"captures_mut"`).
+    pub qualified_name: String,
+    /// Last `::` segment of `qualified_name`.
+    pub leaf_name: String,
+    /// Everything before the last `::` segment, or `None` for top-level symbols
+    /// with no container (bare function names, top-level public symbols).
+    pub container: Option<String>,
+    /// Raw span bytes for similarity comparison.
+    pub span: Vec<u8>,
+}
+
+impl RenameCandidate {
+    /// Build from a qualified name and span bytes.  Container is derived by
+    /// splitting on `::`: `"Struct::field"` → container `"Struct"`;
+    /// `"E::Variant::field"` → container `"E::Variant"`; `"bare"` → `None`.
+    pub fn new(qualified_name: String, span: Vec<u8>) -> Self {
+        let (container, leaf_name) = split_container_leaf(&qualified_name);
+        Self {
+            leaf_name: leaf_name.to_string(),
+            container: container.map(str::to_string),
+            span,
+            qualified_name,
+        }
+    }
+}
+
+/// The T₀ fact that is being matched against rename candidates.
+///
+/// Only the fields needed by the filter pipeline are included.
+pub struct RenameOrigin<'a> {
+    /// Fully-qualified name of the deleted T₀ fact.
+    pub qualified_name: &'a str,
+    /// Last `::` segment of `qualified_name`.
+    pub leaf_name: &'a str,
+    /// Container prefix, or `None` for top-level symbols.
+    pub container: Option<&'a str>,
+    /// Raw span bytes.
+    pub span: &'a [u8],
+}
+
+impl<'a> RenameOrigin<'a> {
+    /// Build from a qualified name and span bytes.
+    pub fn new(qualified_name: &'a str, span: &'a [u8]) -> Self {
+        let (container, leaf_name) = split_container_leaf(qualified_name);
+        Self {
+            leaf_name,
+            container,
+            span,
+            qualified_name,
+        }
+    }
+}
+
+/// Typed rename-candidate filter pipeline.
+///
+/// Filter steps (all must pass):
+/// 1. **Container compatibility**: the candidate's container must match the
+///    origin's container.  Two facts are container-compatible when both have
+///    the same `Some(container)` string, or both are `None` (top-level).
+///    This rejects cross-struct field false positives and cross-impl fn
+///    false positives.
+/// 2. **T₀ presence exclusion**: if the candidate's qualified name already
+///    appears in `t0_qualified_names`, it was present at T₀ as an
+///    independent fact — it cannot be the rename target of another T₀ fact.
+///    This is the definitive fix for the `hp3_3` field-drop case.
+/// 3. **Span similarity** ≥ `min_ratio` — same as the original gate.
+/// 4. **Leaf-name similarity** gate:
+///    - Lower bound: similarity ≥ `min_ratio` (naming evidence required).
+///    - Upper bound: similarity < `MAX_NAME_SIMILARITY` (prevents near-identical
+///      siblings like `replace_with_captures`/`replace_with_caps` from matching).
+///    - **Version-suffix bypass**: if both the origin and candidate leaf names
+///      share the same base name and differ only in a trailing `_v<N>` version
+///      suffix (e.g. `field_v1` → `field_v2`), the upper bound is waived.
+///      Version-suffix evolution renames are legitimate and the T₀-presence
+///      check (Gate 2) already provides the structural guard for same-container
+///      false positives.
+///
+/// Returns the best (highest span-ratio) matching candidate's qualified name,
+/// or `None`.
+pub fn rename_candidate_typed(
+    origin: &RenameOrigin<'_>,
+    candidates: &[RenameCandidate],
+    t0_qualified_names: &HashSet<String>,
+    min_ratio: f32,
+) -> Option<String> {
+    let before = String::from_utf8_lossy(origin.span);
+    let mut best: Option<(String, f32)> = None;
+
+    for candidate in candidates {
+        // Gate 1: container must match.
+        if candidate.container.as_deref() != origin.container {
+            continue;
+        }
+
+        // Gate 2: candidate must not already have been a T₀ fact.
+        // If `any_literal` was present at T₀ it is NOT a rename of
+        // `all_verbatim_literal`; it is a distinct, surviving field.
+        if t0_qualified_names.contains(&candidate.qualified_name) {
+            continue;
+        }
+
+        // Gate 3: span similarity ≥ min_ratio.
+        let after = String::from_utf8_lossy(&candidate.span);
+        let span_ratio = similar::TextDiff::from_chars(before.as_ref(), after.as_ref()).ratio();
+        if span_ratio < min_ratio {
+            continue;
+        }
+
+        // Gate 4: leaf-name similarity gate.
+        // Lower bound: naming evidence must exist.
+        // Upper bound: skip near-identical-name siblings — unless the names
+        //   differ only in a version suffix (`_v1` → `_v2`), in which case
+        //   the upper bound is waived (version-suffix evolution is a valid rename).
+        let name_ratio =
+            similar::TextDiff::from_chars(origin.leaf_name, &candidate.leaf_name).ratio();
+        if name_ratio < min_ratio {
+            continue;
+        }
+        let is_version_suffix_evolution =
+            version_suffix_bases_match(origin.leaf_name, &candidate.leaf_name);
+        if name_ratio >= MAX_NAME_SIMILARITY && !is_version_suffix_evolution {
+            continue;
+        }
+
+        match &best {
+            None => best = Some((candidate.qualified_name.clone(), span_ratio)),
+            Some((_, r)) if span_ratio > *r => {
+                best = Some((candidate.qualified_name.clone(), span_ratio));
+            }
+            _ => {}
+        }
+    }
+    best.map(|(n, _)| n)
+}
+
+/// Return `true` when both names form a version-suffix evolution pair.
+///
+/// Two cases are recognized:
+/// 1. Both names have a `_v<N>` suffix and share the same base:
+///    `"field_v1"` / `"field_v2"` (base = `"field"`, versions differ).
+/// 2. The candidate has a `_v<N>` suffix and the origin is the un-versioned
+///    base: `"serialize"` / `"serialize_v2"` (first versioning of the symbol).
+///    The reverse (`"serialize_v2"` / `"serialize"`) is also accepted.
+///
+/// Examples:
+/// - `"field_v1"`, `"field_v2"` → `true`  (same base, different versions)
+/// - `"serialize"`, `"serialize_v2"` → `true`  (un-versioned → first version)
+/// - `"serialize_v2"`, `"serialize_v3"` → `true`
+/// - `"fetch_data"`, `"fetch_datum"` → `false`  (no version suffix on either)
+/// - `"field_v1"`, `"field_v1"` → `false`  (identity, not rename)
+fn version_suffix_bases_match(a: &str, b: &str) -> bool {
+    fn strip_version_suffix(name: &str) -> Option<(&str, u64)> {
+        // Match trailing `_v<digits>` where `<digits>` is non-empty.
+        let underscore_v = name.rfind("_v")?;
+        let suffix = &name[underscore_v + 2..];
+        if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let version: u64 = suffix.parse().ok()?;
+        Some((&name[..underscore_v], version))
+    }
+    // Both have `_v<N>` suffixes and share the same base with different versions.
+    if let (Some((base_a, ver_a)), Some((base_b, ver_b))) =
+        (strip_version_suffix(a), strip_version_suffix(b))
+    {
+        return base_a == base_b && ver_a != ver_b;
+    }
+    // One has a `_v<N>` suffix; the other is the un-versioned base
+    // (e.g. `"serialize"` → `"serialize_v2"`).
+    if let Some((base_b, _)) = strip_version_suffix(b) {
+        if base_b == a {
+            return true;
+        }
+    }
+    if let Some((base_a, _)) = strip_version_suffix(a) {
+        if base_a == b {
+            return true;
+        }
+    }
+    false
+}
+
+/// Split a qualified name into `(Option<container>, leaf)`.
+///
+/// `"AstAnalysis::any_literal"` → `(Some("AstAnalysis"), "any_literal")`
+/// `"E::Variant::field"` → `(Some("E::Variant"), "field")`
+/// `"captures_mut"` → `(None, "captures_mut")`
+fn split_container_leaf(qualified: &str) -> (Option<&str>, &str) {
+    match qualified.rfind("::") {
+        Some(pos) => (Some(&qualified[..pos]), &qualified[pos + 2..]),
+        None => (None, qualified),
+    }
 }
 
 /// Extract the last `::` segment of a qualified name.
