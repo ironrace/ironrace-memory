@@ -6,25 +6,25 @@
 //! [`super::Replay`], [`super::CommitState`], or `run_inner` — everything
 //! they need comes in through their parameters.
 
-use crate::ast::{
-    spans::{content_hash, Span},
-    RustAst,
-};
+use crate::ast::{spans::Span, RustAst};
 use crate::diff::RenameCandidate;
-use crate::facts::{field, function_signature, symbol_existence, test_assertion, Fact};
+use crate::facts::{doc_claim, field, function_signature, symbol_existence, test_assertion, Fact};
+use anyhow::Result;
 use std::path::Path;
 
 /// Search the post-commit blob/AST for the same fact (by kind + qualified
-/// key).  Returns `(post_span, post_content_hash)` when found, or `None`
-/// when the symbol is absent from this file at the post-commit state.
+/// key).  Returns `Ok(Some((post_span, post_content_hash)))` when found,
+/// `Ok(None)` when the symbol is absent, or `Err` when the post-commit
+/// blob cannot be parsed (e.g. invalid UTF-8 in a markdown file).
 pub(super) fn matching_post_fact(
     fact: &Fact,
     path: &Path,
     post_bytes: &[u8],
     post_ast: Option<&RustAst>,
-) -> Option<(Span, String)> {
+    commit_sha: &str,
+) -> Result<Option<(Span, String)>> {
     match fact {
-        Fact::FunctionSignature { qualified_name, .. } => post_ast.and_then(|ast| {
+        Fact::FunctionSignature { qualified_name, .. } => Ok(post_ast.and_then(|ast| {
             function_signature::extract(ast, path).find_map(|f| match f {
                 Fact::FunctionSignature {
                     qualified_name: q,
@@ -38,8 +38,8 @@ pub(super) fn matching_post_fact(
                 | Fact::DocClaim { .. }
                 | Fact::TestAssertion { .. } => None,
             })
-        }),
-        Fact::Field { qualified_path, .. } => post_ast.and_then(|ast| {
+        })),
+        Fact::Field { qualified_path, .. } => Ok(post_ast.and_then(|ast| {
             field::extract(ast, path).find_map(|f| match f {
                 Fact::Field {
                     qualified_path: q,
@@ -53,8 +53,8 @@ pub(super) fn matching_post_fact(
                 | Fact::DocClaim { .. }
                 | Fact::TestAssertion { .. } => None,
             })
-        }),
-        Fact::PublicSymbol { qualified_name, .. } => post_ast.and_then(|ast| {
+        })),
+        Fact::PublicSymbol { qualified_name, .. } => Ok(post_ast.and_then(|ast| {
             // First: check if the item is still bare-pub (happy path).
             let still_bare_pub = symbol_existence::extract(ast, path).find_map(|f| match f {
                 Fact::PublicSymbol {
@@ -93,22 +93,24 @@ pub(super) fn matching_post_fact(
                     }
                 }
             })
-        }),
-        Fact::DocClaim { mention_span, .. } => {
-            let range = mention_span.byte_range.clone();
-            if range.end > post_bytes.len() {
-                return None;
-            }
-            Some((
-                Span {
-                    byte_range: range.clone(),
-                    line_start: mention_span.line_start,
-                    line_end: mention_span.line_end,
-                },
-                content_hash(&post_bytes[range]),
-            ))
+        })),
+        Fact::DocClaim {
+            qualified_name,
+            mention_span,
+            mention_hash,
+            ..
+        } => {
+            // Do NOT anchor to the original byte offset: content inserted above
+            // the mention shifts its position without changing its text.  Instead,
+            // scan the post-commit markdown for all inline-code mentions whose
+            // text equals `qualified_name`, then pick the best one via the
+            // duplicate-mention tie-breaker.
+            let candidates =
+                doc_claim::find_mentions(post_bytes, path, commit_sha, qualified_name)?;
+            let best = doc_claim::best_mention(&candidates, mention_span, mention_hash);
+            Ok(best.map(|m| (m.span.clone(), m.mention_hash.clone())))
         }
-        Fact::TestAssertion { test_fn, .. } => post_ast.and_then(|ast| {
+        Fact::TestAssertion { test_fn, .. } => Ok(post_ast.and_then(|ast| {
             test_assertion::extract(ast, path, &[]).find_map(|f| match f {
                 Fact::TestAssertion {
                     test_fn: q,
@@ -122,7 +124,7 @@ pub(super) fn matching_post_fact(
                 | Fact::DocClaim { .. }
                 | Fact::TestAssertion { .. } => None,
             })
-        }),
+        })),
     }
 }
 

@@ -599,7 +599,6 @@ fn hp3_2_per_commit_symbol_resolution_red() {
 /// must scan the post-commit markdown for the mention text rather than
 /// anchoring to the original byte offset.
 #[test]
-#[ignore = "RED until Task 5 (doc-claim-relocation cluster)"]
 fn hp3_5_doc_claim_relocation_is_valid() {
     let tmp = tempfile::tempdir().unwrap();
     let p = tmp.path();

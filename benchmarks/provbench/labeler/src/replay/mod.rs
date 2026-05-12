@@ -239,6 +239,7 @@ impl Replay {
                         cfg,
                         commit_index.as_ref(),
                         t0_names,
+                        &commit.sha,
                     )?;
                     rows.push(FactAtCommit {
                         fact_id: fact_id(&observed.fact),
@@ -527,6 +528,7 @@ fn classify_against_commit(
     cfg: &ReplayConfig,
     commit_index: Option<&CommitSymbolIndex>,
     t0_qualified_names: &HashSet<String>,
+    commit_sha: &str,
 ) -> Result<Label> {
     let state = match post_blob {
         // File was deleted at this commit.
@@ -536,7 +538,8 @@ fn classify_against_commit(
             let observed_hash = observed_hash_for(fact);
 
             // Search the post-commit file for the same fact kind/key.
-            let post_fact = match_post::matching_post_fact(fact, path, post_bytes, post_ast);
+            let post_fact =
+                match_post::matching_post_fact(fact, path, post_bytes, post_ast, commit_sha)?;
 
             match post_fact {
                 Some((post_span, post_hash)) => {
