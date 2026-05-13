@@ -30,29 +30,57 @@ use std::path::Path;
 ///   indicates a constructed-without-`push_test_assertion_facts`
 ///   programming error and triggers a panic rather than a silent
 ///   misclassification.
+///
+/// `function_signature_disambiguator` carries the
+/// `(cfg_attribute_set, impl_receiver_type, ordinal)` private replay-
+/// time disambiguator for a `Fact::FunctionSignature`, computed by
+/// `replay::push_function_signature_facts`. It is consumed only by the
+/// `Fact::FunctionSignature` arm to pair T₀ → post when multiple
+/// definitions share the same `qualified_name` (cfg-gated variants or
+/// multi-impl `fn`s). Same fail-loud contract as the TestAssertion
+/// ordinal: a `None` here for a `Fact::FunctionSignature` is a
+/// programming error and panics.
 pub(super) fn matching_post_fact(
     fact: &Fact,
     path: &Path,
     post_bytes: &[u8],
     post_ast: Option<&RustAst>,
     test_assertion_ordinal: Option<usize>,
+    function_signature_disambiguator: Option<&super::FnDisambiguator>,
     commit_sha: &str,
 ) -> Result<Option<(Span, String)>> {
     match fact {
         Fact::FunctionSignature { qualified_name, .. } => Ok(post_ast.and_then(|ast| {
-            function_signature::extract(ast, path).find_map(|f| match f {
-                Fact::FunctionSignature {
-                    qualified_name: q,
-                    span,
-                    content_hash,
-                    ..
-                } if q == *qualified_name => Some((span, content_hash)),
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
+            let t0_disamb = function_signature_disambiguator.expect(
+                "Fact::FunctionSignature must carry an FnDisambiguator; \
+                 see replay::push_function_signature_facts. Routing through \
+                 None would silently misclassify post-commit signatures.",
+            );
+            // Enumerate post-commit observations with matching
+            // qualified_name AND matching disambiguator
+            // (cfg_set, impl_receiver). Use .nth(ordinal) so genuine
+            // duplicates under the same primary key are addressed in
+            // tree-sitter walk order.
+            function_signature::extract_observations(ast, path)
+                .filter(|obs| match &obs.fact {
+                    Fact::FunctionSignature {
+                        qualified_name: q, ..
+                    } => q == qualified_name,
+                    _ => false,
+                })
+                .filter(|obs| {
+                    let post_cfg: std::collections::BTreeSet<String> =
+                        obs.cfg_attribute_set.iter().cloned().collect();
+                    post_cfg == t0_disamb.cfg_set
+                        && obs.impl_receiver_type == t0_disamb.impl_receiver
+                })
+                .nth(t0_disamb.ordinal)
+                .map(|obs| match obs.fact {
+                    Fact::FunctionSignature {
+                        span, content_hash, ..
+                    } => (span, content_hash),
+                    _ => unreachable!("filter above guarantees FunctionSignature"),
+                })
         })),
         Fact::Field { qualified_path, .. } => Ok(post_ast.and_then(|ast| {
             field::extract(ast, path).find_map(|f| match f {

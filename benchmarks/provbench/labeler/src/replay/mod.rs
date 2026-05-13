@@ -72,6 +72,36 @@ struct ObservedFact {
     /// rationale in
     /// `benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md`.
     test_assertion_ordinal: Option<usize>,
+    /// `(cfg_attribute_set, impl_receiver_type, ordinal)` disambiguator
+    /// for `Fact::FunctionSignature`, populated by
+    /// `push_function_signature_facts`. `None` for every other fact
+    /// kind. The cfg set + impl receiver are the primary key when
+    /// pairing T₀ → post in `match_post::matching_post_fact`; the
+    /// ordinal is a tiebreaker for genuine duplicates under the same
+    /// primary key (rare). See SPEC §5 rationale in
+    /// `benchmarks/provbench/spotcheck/2026-05-13-post-pass4-findings.md`.
+    function_signature_disambiguator: Option<FnDisambiguator>,
+}
+
+/// Private replay-time disambiguator for `Fact::FunctionSignature`.
+///
+/// Pairs T₀ → post by `(qualified_name, cfg_set, impl_receiver)` plus
+/// an ordinal tiebreaker. Lives only on `ObservedFact`; does NOT
+/// appear in the serialized `Fact` or `fact_id` and therefore does
+/// not affect the corpus schema.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FnDisambiguator {
+    /// Normalized `#[cfg(...)]` / `#[cfg_attr(...)]` attribute texts,
+    /// sorted + deduped so the set is order-independent.
+    cfg_set: std::collections::BTreeSet<String>,
+    /// Text of the enclosing `impl <T> { … }` receiver type, or
+    /// `None` for module-level functions.
+    impl_receiver: Option<String>,
+    /// Zero-based position among same-`(qualified_name, cfg_set,
+    /// impl_receiver)` siblings at the same source path. Used only
+    /// when two functions at T₀ share the same primary key (genuine
+    /// duplicates — rare).
+    ordinal: usize,
 }
 
 impl Replay {
@@ -147,11 +177,12 @@ impl Replay {
             if let Some(blob) = pilot.read_blob_at(&cfg.t0_sha, path)? {
                 let ast = RustAst::parse(&blob)
                     .with_context(|| format!("parse {} @ T0", path.display()))?;
-                push_observed_facts(
+                push_function_signature_facts(
                     &mut facts,
                     &mut facts_so_far,
                     &blob,
-                    function_signature::extract(&ast, path),
+                    path,
+                    function_signature::extract_observations(&ast, path),
                 );
                 push_observed_facts(
                     &mut facts,
@@ -267,6 +298,7 @@ impl Replay {
                         post_ast,
                         &observed.t0_span_bytes,
                         observed.test_assertion_ordinal,
+                        observed.function_signature_disambiguator.as_ref(),
                         cfg,
                         commit_index.as_ref(),
                         t0_names,
@@ -299,8 +331,65 @@ fn push_observed_facts(
             t0_span_bytes: observed_span_bytes(blob, &fact),
             fact: fact.clone(),
             test_assertion_ordinal: None,
+            function_signature_disambiguator: None,
         });
         facts_so_far.push(fact);
+    }
+}
+
+/// Append `Fact::FunctionSignature` items to `facts`, computing each
+/// fact's `FnDisambiguator` from its `(cfg_attribute_set,
+/// impl_receiver_type)` plus a per-path ordinal tiebreaker for genuine
+/// duplicates.
+///
+/// The disambiguator is carried only on the private [`ObservedFact`];
+/// it does NOT appear in the serialized [`Fact`] or `fact_id` and
+/// therefore does not affect the corpus schema. Counter map is keyed
+/// by `(path, qualified_name, cfg_set, impl_receiver)` so a future
+/// refactor that batches facts across paths cannot silently alias
+/// ordinals.
+fn push_function_signature_facts(
+    facts: &mut Vec<ObservedFact>,
+    facts_so_far: &mut Vec<Fact>,
+    blob: &[u8],
+    path: &Path,
+    observations: impl IntoIterator<
+        Item = crate::facts::function_signature::FunctionSignatureObservation,
+    >,
+) {
+    use std::collections::BTreeSet;
+    let mut counters: HashMap<(PathBuf, String, BTreeSet<String>, Option<String>), usize> =
+        HashMap::new();
+    for obs in observations {
+        let qualified_name = match &obs.fact {
+            Fact::FunctionSignature { qualified_name, .. } => qualified_name.clone(),
+            _ => unreachable!(
+                "function_signature::extract_observations only yields FunctionSignature"
+            ),
+        };
+        let cfg_set: BTreeSet<String> = obs.cfg_attribute_set.iter().cloned().collect();
+        let impl_receiver = obs.impl_receiver_type.clone();
+        let key = (
+            path.to_path_buf(),
+            qualified_name.clone(),
+            cfg_set.clone(),
+            impl_receiver.clone(),
+        );
+        let counter = counters.entry(key).or_insert(0);
+        let ordinal = *counter;
+        *counter += 1;
+        let disamb = FnDisambiguator {
+            cfg_set,
+            impl_receiver,
+            ordinal,
+        };
+        facts.push(ObservedFact {
+            t0_span_bytes: observed_span_bytes(blob, &obs.fact),
+            fact: obs.fact.clone(),
+            test_assertion_ordinal: None,
+            function_signature_disambiguator: Some(disamb),
+        });
+        facts_so_far.push(obs.fact);
     }
 }
 
@@ -340,6 +429,7 @@ fn push_test_assertion_facts(
             t0_span_bytes: observed_span_bytes(blob, &fact),
             fact: fact.clone(),
             test_assertion_ordinal: ordinal,
+            function_signature_disambiguator: None,
         });
         facts_so_far.push(fact);
     }
@@ -599,6 +689,7 @@ fn classify_against_commit(
     post_ast: Option<&RustAst>,
     t0_span_bytes: &[u8],
     test_assertion_ordinal: Option<usize>,
+    function_signature_disambiguator: Option<&FnDisambiguator>,
     cfg: &ReplayConfig,
     commit_index: Option<&CommitSymbolIndex>,
     t0_qualified_names: &HashSet<String>,
@@ -618,6 +709,7 @@ fn classify_against_commit(
                 post_bytes,
                 post_ast,
                 test_assertion_ordinal,
+                function_signature_disambiguator,
                 commit_sha,
             )?;
 

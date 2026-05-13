@@ -1270,7 +1270,10 @@ fn hp5_function_signature_cfg_variant_deletion_routes_needs_revalidation() {
     let t0_load_rows: Vec<&FactAtCommit> = rows
         .iter()
         .filter(|r| r.commit_sha == c1)
-        .filter(|r| r.fact_id.starts_with("FunctionSignature::load::src/lib.rs::"))
+        .filter(|r| {
+            r.fact_id
+                .starts_with("FunctionSignature::load::src/lib.rs::")
+        })
         .collect();
     assert_eq!(
         t0_load_rows.len(),
@@ -1380,7 +1383,10 @@ fn hp5_function_signature_impl_receiver_disambiguates_same_method_name() {
     let c1_rows: Vec<&FactAtCommit> = rows
         .iter()
         .filter(|r| r.commit_sha == c1)
-        .filter(|r| r.fact_id.starts_with("FunctionSignature::shared::src/lib.rs::"))
+        .filter(|r| {
+            r.fact_id
+                .starts_with("FunctionSignature::shared::src/lib.rs::")
+        })
         .collect();
     assert_eq!(
         c1_rows.len(),
@@ -1598,9 +1604,7 @@ fn hp5_field_leaf_moved_to_nested_struct_routes_needs_revalidation() {
 
     let row = rows
         .iter()
-        .find(|r| {
-            r.commit_sha == c1 && r.fact_id.starts_with("Field::Config::dfa_size_limit::")
-        })
+        .find(|r| r.commit_sha == c1 && r.fact_id.starts_with("Field::Config::dfa_size_limit::"))
         .expect("Field::Config::dfa_size_limit T₀ row at C1 missing");
     assert_eq!(
         row.label,
