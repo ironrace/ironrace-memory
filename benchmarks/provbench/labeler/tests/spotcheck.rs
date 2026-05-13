@@ -1,6 +1,8 @@
 use provbench_labeler::label::Label;
 use provbench_labeler::output::OutputRow;
-use provbench_labeler::spotcheck::{read_report_counts, sample, wilson_lower_bound_95, write_csv};
+use provbench_labeler::spotcheck::{
+    read_report_counts, sample, wilson_lower_bound_95, write_csv, DEFAULT_SEED,
+};
 
 #[test]
 fn deterministic_sampler_returns_same_indices_across_runs() {
@@ -15,8 +17,8 @@ fn deterministic_sampler_returns_same_indices_across_runs() {
             },
         })
         .collect();
-    let s1 = sample(&rows, 200);
-    let s2 = sample(&rows, 200);
+    let s1 = sample(&rows, 200, DEFAULT_SEED);
+    let s2 = sample(&rows, 200, DEFAULT_SEED);
     assert_eq!(s1.len(), 200);
     assert_eq!(s1, s2);
 }
@@ -36,7 +38,7 @@ fn rare_classes_meet_min_floor() {
             },
         })
         .collect();
-    let s = sample(&rows, 200);
+    let s = sample(&rows, 200, DEFAULT_SEED);
     let renamed = s
         .iter()
         .filter(|r| matches!(r.row.label, Label::StaleSymbolRenamed { .. }))
@@ -95,7 +97,7 @@ fn write_csv_then_read_report_counts_round_trips_hostile_notes_on_disk() {
             label: Label::StaleSourceChanged,
         },
     ];
-    let samples = sample(&rows, 2);
+    let samples = sample(&rows, 2, DEFAULT_SEED);
     assert_eq!(
         samples.len(),
         2,

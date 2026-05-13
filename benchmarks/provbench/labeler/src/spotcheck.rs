@@ -1,7 +1,8 @@
 //! Stratified deterministic sampler for the spot-check process.
-//! Seed is fixed (`0xC0DEBABE_DEADBEEF`) so re-running produces the same
-//! CSV — important when the human reviewer fills it in over multiple
-//! sessions.
+//! Default seed is fixed (`DEFAULT_SEED`) so re-running produces the
+//! same CSV — important when the human reviewer fills it in over
+//! multiple sessions. A different seed may be supplied (e.g., post-merge
+//! validation against a regenerated corpus) for anti-tuning hygiene.
 
 use crate::output::OutputRow;
 use rand::seq::SliceRandom;
@@ -24,7 +25,11 @@ pub(crate) struct SpotCheckRow {
     pub(crate) disagreement_notes: String,
 }
 
-const SEED: u64 = 0xC0DE_BABE_DEAD_BEEF;
+/// Default RNG seed for stratified sampling. Callers may pass a
+/// different seed to [`sample`] for fresh draws (e.g., post-merge
+/// validation runs) while preserving deterministic replay within a
+/// single review session.
+pub const DEFAULT_SEED: u64 = 0xC0DE_BABE_DEAD_BEEF;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sampled {
@@ -33,23 +38,23 @@ pub struct Sampled {
 }
 
 /// Stratified deterministic sample of `n` rows drawn from `rows`,
-/// bucketed by label.
+/// bucketed by label, seeded by `seed`.
 ///
-/// Sampling is seeded with the fixed `SEED` constant so re-running over
-/// the same input produces the same output — important for human
-/// reviewers who fill in `human_label` over multiple sessions. Each
-/// label class gets at least a small floor (`per_class_floor`); any
-/// remaining budget is filled from a shuffled deficit pool. The
-/// returned vec is sorted by `(fact_id, commit_sha)` for stable
-/// comparison.
-pub fn sample(rows: &[OutputRow], n: usize) -> Vec<Sampled> {
+/// Sampling is seeded so re-running with the same `seed` over the same
+/// input produces the same output — important for human reviewers who
+/// fill in `human_label` over multiple sessions. Callers wanting the
+/// historical default should pass [`DEFAULT_SEED`]. Each label class
+/// gets at least a small floor (`per_class_floor`); any remaining
+/// budget is filled from a shuffled deficit pool. The returned vec is
+/// sorted by `(fact_id, commit_sha)` for stable comparison.
+pub fn sample(rows: &[OutputRow], n: usize, seed: u64) -> Vec<Sampled> {
     use std::collections::BTreeMap;
     let mut buckets: BTreeMap<String, Vec<&OutputRow>> = BTreeMap::new();
     for r in rows {
         buckets.entry(label_bucket(&r.label)).or_default().push(r);
     }
     let total = rows.len();
-    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(SEED);
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
     let mut out = Vec::new();
     let class_count = buckets.len().max(1);
     let per_class_floor = (n / (class_count * 2)).max(10).min(n);
@@ -263,6 +268,44 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].disagreement_notes, "line-one\nline-two");
+    }
+
+    /// `sample` is deterministic in `seed`: identical seed + identical
+    /// input yields identical output; different seed yields a
+    /// different selection (over a corpus with enough excess to make a
+    /// reshuffle observable).
+    #[test]
+    fn sample_is_seed_deterministic_and_seed_sensitive() {
+        use crate::label::Label;
+        let rows: Vec<OutputRow> = (0..500)
+            .map(|i| OutputRow {
+                fact_id: format!("fact-{i:04}"),
+                commit_sha: format!("sha-{:08x}", i * 7),
+                label: if i % 3 == 0 {
+                    Label::Valid
+                } else if i % 3 == 1 {
+                    Label::StaleSourceChanged
+                } else {
+                    Label::NeedsRevalidation
+                },
+            })
+            .collect();
+
+        let a = sample(&rows, 50, DEFAULT_SEED);
+        let b = sample(&rows, 50, DEFAULT_SEED);
+        let c = sample(&rows, 50, DEFAULT_SEED ^ 0xDEAD_BEEF_DEAD_BEEF);
+
+        let ids =
+            |xs: &[Sampled]| -> Vec<String> { xs.iter().map(|s| s.row.fact_id.clone()).collect() };
+
+        assert_eq!(ids(&a), ids(&b), "same seed must reproduce sample");
+        assert_ne!(
+            ids(&a),
+            ids(&c),
+            "different seed must change the sample over a corpus with reshuffle slack"
+        );
+        assert_eq!(a.len(), 50);
+        assert_eq!(c.len(), 50);
     }
 
     /// Empty human_label rows are skipped by the report parser (the

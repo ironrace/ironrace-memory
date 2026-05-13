@@ -40,6 +40,12 @@ enum Cmd {
         out: std::path::PathBuf,
         #[arg(long, default_value_t = 200)]
         n: usize,
+        /// RNG seed for stratified sampling. Omit to use the historical
+        /// default (`DEFAULT_SEED`) so reviewers can resume an
+        /// in-progress CSV. Supply a fresh value for post-merge or
+        /// anti-tuning validation runs.
+        #[arg(long)]
+        seed: Option<u64>,
     },
     /// Read a filled spot-check CSV, compute the agreement rate, print
     /// the Wilson 95% report.
@@ -91,7 +97,12 @@ fn main() -> anyhow::Result<()> {
             println!("wrote {} rows to {}", rows.len(), out.display());
             Ok(())
         }
-        Some(Cmd::Spotcheck { corpus, out, n }) => {
+        Some(Cmd::Spotcheck {
+            corpus,
+            out,
+            n,
+            seed,
+        }) => {
             let content = std::fs::read_to_string(&corpus)?;
             let rows: Vec<provbench_labeler::output::OutputRow> = content
                 .lines()
@@ -101,9 +112,15 @@ fn main() -> anyhow::Result<()> {
                         .map_err(|e| anyhow::anyhow!("failed to parse JSONL line: {e}"))
                 })
                 .collect::<anyhow::Result<_>>()?;
-            let samples = provbench_labeler::spotcheck::sample(&rows, n);
+            let resolved_seed = seed.unwrap_or(provbench_labeler::spotcheck::DEFAULT_SEED);
+            let samples = provbench_labeler::spotcheck::sample(&rows, n, resolved_seed);
             provbench_labeler::spotcheck::write_csv(&out, &samples)?;
-            println!("wrote {} samples to {}", samples.len(), out.display());
+            println!(
+                "wrote {} samples to {} (seed=0x{:016x})",
+                samples.len(),
+                out.display(),
+                resolved_seed
+            );
             Ok(())
         }
         Some(Cmd::Report { csv }) => {
