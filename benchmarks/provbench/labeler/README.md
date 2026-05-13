@@ -52,6 +52,20 @@ standalone reproducible artifact.
      --out benchmarks/provbench/spotcheck/sample-$(git rev-parse --short HEAD).csv
    ```
    The CSV columns are: `fact_id,commit_sha,bucket,predicted_label,human_label,disagreement_notes`.
+   On success the CLI echoes the resolved sampling seed
+   (`wrote 200 samples to … (seed=0x…)`); the same seed value is also
+   persisted in a sibling `<out>.meta.json` so the artifact under
+   `spotcheck/` is self-describing.
+
+   **Seed selection.** Omit `--seed` to use the historical default
+   (`DEFAULT_SEED = 0xC0DEBABEDEADBEEF`) so a reviewer can resume an
+   in-progress CSV deterministically. The SPEC §9.1 acceptance-gate
+   draw **must** use the default seed. Supply `--seed <u64>` only for
+   post-merge / anti-tuning validation runs against a freshly
+   regenerated corpus, and never re-run with a different seed against
+   an already partially-filled CSV — the row order will shift and the
+   `human_label` column will misalign.
+
    Open the CSV and fill the `human_label` column for each of the 200
    rows. Save and run:
    ```
@@ -103,6 +117,16 @@ Phase 0b is accepted iff:
   lookup searches by `qualified_name` rather than by byte-offset hash.
   A claim that moves to a different line or section in a later commit is
   still matched correctly as long as the qualified name is preserved.
+
+- **Spot-check seed is configurable but defaults are deterministic.**
+  The stratified sampler is seeded by `DEFAULT_SEED`
+  (`0xC0DEBABEDEADBEEF`) unless `--seed <u64>` is supplied. Re-running
+  `spotcheck` with the same seed and the same corpus is byte-identical,
+  which is what makes the human-review CSV resumable across sessions.
+  A non-default seed is intended for post-merge / anti-tuning runs only
+  and must NOT be used for the SPEC §9.1 acceptance gate; the resolved
+  seed is echoed to stdout and persisted in `<out>.meta.json` so the
+  on-disk artifact is self-describing.
 
 The labeler is **fail-closed** by design. Silently producing labels in any
 of the following situations would corrupt the corpus, so each surfaces as

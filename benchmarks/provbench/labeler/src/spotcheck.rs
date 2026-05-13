@@ -47,6 +47,18 @@ pub struct Sampled {
 /// gets at least a small floor (`per_class_floor`); any remaining
 /// budget is filled from a shuffled deficit pool. The returned vec is
 /// sorted by `(fact_id, commit_sha)` for stable comparison.
+///
+/// Both randomized steps — the per-bucket shuffle and the deficit-pool
+/// shuffle — draw from the **same** seeded RNG, so a single seed pins
+/// the whole sample. Splitting them would silently break the
+/// determinism contract that callers and the in-tree unit test rely on.
+///
+/// **Footgun:** changing `seed` against an already partially-filled
+/// CSV produces a different row order. The reviewer's `human_label`
+/// column will then misalign with `predicted_label`, silently
+/// corrupting the agreement metric. Only change the seed for a fresh
+/// draw against an empty CSV (e.g., a post-merge anti-tuning run on a
+/// regenerated corpus); never to "re-shuffle" an in-progress review.
 pub fn sample(rows: &[OutputRow], n: usize, seed: u64) -> Vec<Sampled> {
     use std::collections::BTreeMap;
     let mut buckets: BTreeMap<String, Vec<&OutputRow>> = BTreeMap::new();
@@ -114,6 +126,39 @@ fn label_bucket(label: &crate::label::Label) -> String {
 pub fn write_csv(path: &std::path::Path, samples: &[Sampled]) -> anyhow::Result<()> {
     let f = std::fs::File::create(path)?;
     write_csv_to(f, samples)
+}
+
+/// Provenance metadata describing how a spot-check CSV was produced.
+///
+/// Persisted alongside the CSV as `<out>.meta.json` so a maintainer
+/// returning to a filled-in CSV later can verify it was drawn against
+/// the expected corpus + labeler build + seed without inspecting
+/// stdout from the original run. Fields are intentionally minimal —
+/// anything not derivable from these three keys plus the CSV itself
+/// belongs in the CSV or the SPEC, not here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpotCheckMeta {
+    /// Path to the JSONL corpus the sample was drawn from.
+    pub corpus: String,
+    /// RNG seed used by [`sample`] for this draw.
+    pub seed: u64,
+    /// Number of rows requested (the `--n` argument).
+    pub n: usize,
+    /// Labeler git SHA at the time the sample was written
+    /// (`labeler_stamp()` at run time).
+    pub labeler_git_sha: String,
+}
+
+/// Write a JSON sidecar describing the sampling provenance to
+/// `<csv_path>.meta.json`. The sidecar pins the corpus path, the
+/// resolved seed, the requested row count, and the labeler git SHA so
+/// the on-disk CSV is self-describing for post-merge audits.
+pub fn write_meta_sidecar(csv_path: &std::path::Path, meta: &SpotCheckMeta) -> anyhow::Result<()> {
+    let mut sidecar = csv_path.as_os_str().to_owned();
+    sidecar.push(".meta.json");
+    let f = std::fs::File::create(std::path::Path::new(&sidecar))?;
+    serde_json::to_writer_pretty(f, meta)?;
+    Ok(())
 }
 
 /// Write spot-check samples as CSV to any `Write` impl. Used by the CLI
@@ -270,10 +315,49 @@ mod tests {
         assert_eq!(rows[0].disagreement_notes, "line-one\nline-two");
     }
 
+    /// The provenance sidecar round-trips through `serde_json` and lands
+    /// at `<csv_path>.meta.json` on disk, preserving each field byte-
+    /// for-byte.
+    #[test]
+    fn meta_sidecar_round_trips_and_lives_next_to_csv() {
+        let tmp = tempfile::tempdir().unwrap();
+        let csv_path = tmp.path().join("sample-abc.csv");
+        let meta = SpotCheckMeta {
+            corpus: "benchmarks/provbench/corpus/ripgrep-af6b6c54-e96c9fe.jsonl".to_string(),
+            seed: 0xC0DE_BABE_DEAD_BEEF,
+            n: 200,
+            labeler_git_sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+        };
+        write_meta_sidecar(&csv_path, &meta).expect("sidecar write");
+
+        let sidecar_path = tmp.path().join("sample-abc.csv.meta.json");
+        assert!(
+            sidecar_path.exists(),
+            "sidecar must land at <csv>.meta.json: {}",
+            sidecar_path.display()
+        );
+
+        let bytes = std::fs::read(&sidecar_path).unwrap();
+        let parsed: SpotCheckMeta = serde_json::from_slice(&bytes).expect("parse sidecar");
+        assert_eq!(parsed, meta);
+    }
+
     /// `sample` is deterministic in `seed`: identical seed + identical
     /// input yields identical output; different seed yields a
     /// different selection (over a corpus with enough excess to make a
     /// reshuffle observable).
+    ///
+    /// The "different seed" arm uses `DEFAULT_SEED ^ 0xDEAD_BEEF_DEAD_BEEF`
+    /// rather than `DEFAULT_SEED + 1` because ChaCha8's avalanche on a
+    /// minimal-distance seed is empirically less aggressive on a
+    /// 500-row × 5-bucket × 50-draw stratified sample than on a
+    /// uniform single-draw RNG. The chosen XOR constant was confirmed
+    /// by running the test locally on this corpus shape; it is also
+    /// large enough (≥ Hamming distance 32) that even a future ChaCha
+    /// variant with weaker diffusion in the low bits would still
+    /// reshuffle the sample. If a future seed/corpus combination
+    /// regresses this `assert_ne!`, fail-loud is the correct outcome
+    /// — pick a new XOR constant and update this comment.
     #[test]
     fn sample_is_seed_deterministic_and_seed_sensitive() {
         use crate::label::Label;

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **ProvBench labeler — `spotcheck --seed <u64>` (2026-05-12).** The
+  stratified sampler now accepts an optional seed (decimal or `0x`-
+  prefixed hex) so post-merge / anti-tuning validation runs can draw a
+  fresh sample against a regenerated corpus. Omitting `--seed` uses
+  the new `DEFAULT_SEED` public constant
+  (`0xC0DEBABEDEADBEEF`, the historical value), preserving
+  byte-identical replay for resuming an in-progress reviewer CSV. The
+  CLI echoes the resolved seed and writes a `<out>.meta.json` sidecar
+  recording `{corpus, seed, n, labeler_git_sha}` so the on-disk
+  spot-check artifact is self-describing. The SPEC §9.1 acceptance
+  gate must continue to use `DEFAULT_SEED`.
+
 ### Changed
 
 - **ProvBench labeler — Phase 0b hardening pass 3 (2026-05-12).**
