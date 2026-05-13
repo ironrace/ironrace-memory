@@ -12,39 +12,325 @@ use tree_sitter::Node;
 
 /// Extract all `Fact::PublicSymbol` facts from the given AST.
 pub fn extract<'a>(ast: &'a RustAst, source_path: &'a Path) -> impl Iterator<Item = Fact> + 'a {
+    extract_occurrences(ast, source_path).map(|o| o.fact)
+}
+
+/// Private replay-time form tag distinguishing the kind of public-
+/// surface declaration that emitted a `Fact::PublicSymbol`.
+///
+/// Pass-5 Cluster G uses this to recognize `pub use` re-exports
+/// (`BarePubUse`) as "still-public continuity" even when the post
+/// declaration span hashes differently than a T₀ definition span:
+/// the public name `X` is still exported from the crate even though
+/// the underlying form changed from `pub fn X` to `pub use … X`.
+///
+/// `Definition` covers `pub fn`, `pub struct`, `pub enum`, `pub mod`,
+/// `pub trait`, `pub const`, `pub static`, `pub type`.
+/// `BarePubUse` covers `pub use …` (including `pub use … as X`).
+/// Restricted-visibility uses (`pub(crate) use`, `pub(super) use`,
+/// `pub(in …) use`, plain `use`) are NOT emitted by
+/// `extract_use_declaration` (gated by `is_bare_pub`), so they don't
+/// appear as occurrences.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PublicSymbolForm {
+    /// `pub fn X / pub struct X / pub enum X / pub mod X / pub trait X
+    /// / pub const X / pub static X / pub type X`.
+    Definition,
+    /// `pub use path::X;`, `pub use path::{X, …};`, or
+    /// `pub use path::Old as X;`. Glob re-exports
+    /// (`pub use path::*;`) are NOT represented here in pass-5 —
+    /// they remain out of scope and fall through to existing absent-
+    /// symbol logic.
+    BarePubUse {
+        /// The source-side path text up to (but not including) the
+        /// imported leaf. For `pub use a::b::c;` this is `"a::b"`;
+        /// for `pub use a::Old as c;` this is `"a"`. May be empty
+        /// for bare `pub use X;`.
+        source_path: String,
+        /// `Some(original_name)` for `pub use … Original as Alias;`.
+        /// `None` when the re-export keeps the original identifier.
+        alias: Option<String>,
+    },
+}
+
+/// `Fact::PublicSymbol` plus the structural form-tag describing
+/// which extraction branch emitted it.
+#[derive(Debug, Clone)]
+pub(crate) struct PublicSymbolOccurrence {
+    pub fact: Fact,
+    pub form: PublicSymbolForm,
+}
+
+/// Same as [`extract`] but additionally returns each fact's structural
+/// form tag, packaged as a [`PublicSymbolOccurrence`].
+///
+/// Used by the replay matcher to distinguish bare `pub use` re-exports
+/// (which preserve the exported name's public-surface continuity even
+/// when the declaration form changed) from direct `pub <kind>`
+/// definitions. The emitted [`Fact`] values and their order are
+/// identical to what [`extract`] produces, so T₀ extraction is byte-
+/// stable across pass-5.
+pub(crate) fn extract_occurrences<'a>(
+    ast: &'a RustAst,
+    source_path: &'a Path,
+) -> impl Iterator<Item = PublicSymbolOccurrence> + 'a {
     let mut out = Vec::new();
     let src = ast.source();
     let root = ast.root();
-    walk(root, src, source_path, &mut out);
+    walk_with_form(root, src, source_path, &mut out);
     out.into_iter()
 }
 
-fn walk(node: Node<'_>, src: &[u8], source_path: &Path, out: &mut Vec<Fact>) {
+fn walk_with_form(
+    node: Node<'_>,
+    src: &[u8],
+    source_path: &Path,
+    out: &mut Vec<PublicSymbolOccurrence>,
+) {
     match node.kind() {
         "function_item" | "struct_item" | "enum_item" | "mod_item" | "trait_item"
         | "const_item" | "static_item" | "type_item" => {
-            extract_named_item(node, src, source_path, out);
+            extract_named_item_occurrences(node, src, source_path, out);
+            // (`extract_named_item_occurrences` already stamps
+            // `form = Definition` on each pushed occurrence — see its
+            // body. No second pass needed.)
             // Still recurse into mod_item bodies to catch nested pub items.
             if node.kind() == "mod_item" {
                 if let Some(body) = node.child_by_field_name("body") {
                     let mut cursor = body.walk();
                     for child in body.named_children(&mut cursor) {
-                        walk(child, src, source_path, out);
+                        walk_with_form(child, src, source_path, out);
                     }
                 }
             }
             return;
         }
         "use_declaration" => {
-            extract_use_declaration(node, src, source_path, out);
+            extract_use_declaration_occurrences(node, src, source_path, out);
             return;
         }
         _ => {}
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        walk(child, src, source_path, out);
+        walk_with_form(child, src, source_path, out);
     }
+}
+
+fn extract_named_item_occurrences(
+    node: Node<'_>,
+    src: &[u8],
+    source_path: &Path,
+    out: &mut Vec<PublicSymbolOccurrence>,
+) {
+    let mut tmp = Vec::new();
+    extract_named_item(node, src, source_path, &mut tmp);
+    for f in tmp {
+        out.push(PublicSymbolOccurrence {
+            fact: f,
+            form: PublicSymbolForm::Definition,
+        });
+    }
+}
+
+fn extract_use_declaration_occurrences(
+    node: Node<'_>,
+    src: &[u8],
+    source_path: &Path,
+    out: &mut Vec<PublicSymbolOccurrence>,
+) {
+    let vis = match visibility_child(node) {
+        Some(v) => v,
+        None => return,
+    };
+    if !is_bare_pub(vis, src) {
+        return;
+    }
+
+    // Find the argument subtree (everything after the visibility modifier).
+    let mut cursor = node.walk();
+    let arg = node
+        .named_children(&mut cursor)
+        .find(|c| c.kind() != "visibility_modifier");
+    let arg = match arg {
+        Some(a) => a,
+        None => return,
+    };
+
+    let span = line_span_from_node(src, node);
+    let hash = content_hash(&src[span.byte_range.clone()]);
+
+    // Collect (exported_leaf, form_details) for each name introduced.
+    let leaves = collect_use_leaves(arg, src);
+    for leaf in leaves {
+        let form = PublicSymbolForm::BarePubUse {
+            source_path: leaf.source_path,
+            alias: leaf.alias,
+        };
+        let fact = Fact::PublicSymbol {
+            qualified_name: leaf.exported_name,
+            source_path: source_path.to_path_buf(),
+            span: span.clone(),
+            content_hash: hash.clone(),
+        };
+        out.push(PublicSymbolOccurrence { fact, form });
+    }
+}
+
+/// Per-leaf decomposition of a `pub use` argument tree. The
+/// `exported_name` is what appears in the crate's public surface (the
+/// alias when present, else the original leaf identifier).
+#[derive(Debug, Clone)]
+struct UseLeaf {
+    exported_name: String,
+    source_path: String,
+    alias: Option<String>,
+}
+
+/// Walk a `pub use` argument subtree and yield one [`UseLeaf`] per
+/// exported name. Mirrors the recursion shape of [`collect_use_names`]
+/// but threads the path-prefix and alias text alongside the leaf.
+fn collect_use_leaves(node: Node<'_>, src: &[u8]) -> Vec<UseLeaf> {
+    let mut out = Vec::new();
+    collect_use_leaves_inner(node, src, "", &mut out);
+    out
+}
+
+fn collect_use_leaves_inner(node: Node<'_>, src: &[u8], prefix: &str, out: &mut Vec<UseLeaf>) {
+    match node.kind() {
+        "identifier" => {
+            if let Ok(name) = node.utf8_text(src) {
+                out.push(UseLeaf {
+                    exported_name: name.to_string(),
+                    source_path: prefix.to_string(),
+                    alias: None,
+                });
+            }
+        }
+        "scoped_identifier" => {
+            // Last identifier child = exported leaf.
+            let mut cursor = node.walk();
+            let idents: Vec<Node<'_>> = node
+                .named_children(&mut cursor)
+                .filter(|c| c.kind() == "identifier")
+                .collect();
+            if let Some(last) = idents.last() {
+                if let Ok(name) = last.utf8_text(src) {
+                    let path_parts: Vec<String> = idents[..idents.len().saturating_sub(1)]
+                        .iter()
+                        .filter_map(|n| n.utf8_text(src).ok().map(|s| s.to_string()))
+                        .collect();
+                    let mut source_path = prefix.to_string();
+                    if !source_path.is_empty() && !path_parts.is_empty() {
+                        source_path.push_str("::");
+                    }
+                    source_path.push_str(&path_parts.join("::"));
+                    out.push(UseLeaf {
+                        exported_name: name.to_string(),
+                        source_path,
+                        alias: None,
+                    });
+                }
+            }
+        }
+        "use_as_clause" => {
+            // The alias identifier is the LAST child; the original
+            // path may be the first scoped_identifier / identifier.
+            let mut cursor = node.walk();
+            let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
+            // Find the alias (rightmost identifier).
+            let alias_node = children
+                .iter()
+                .rev()
+                .find(|c| c.kind() == "identifier")
+                .copied();
+            // Find the path (leftmost identifier or scoped_identifier).
+            let path_node = children
+                .iter()
+                .find(|c| matches!(c.kind(), "identifier" | "scoped_identifier"))
+                .copied();
+            if let (Some(alias_n), Some(path_n)) = (alias_node, path_node) {
+                if let Ok(alias) = alias_n.utf8_text(src) {
+                    // Derive the original-name + path from the path node.
+                    let (original_name, source_path) = decompose_use_path(path_n, src, prefix);
+                    if let Some(original_name) = original_name {
+                        out.push(UseLeaf {
+                            exported_name: alias.to_string(),
+                            source_path,
+                            alias: Some(original_name),
+                        });
+                    }
+                }
+            }
+        }
+        "scoped_use_list" => {
+            // path::{list}. Build a new prefix from the path part,
+            // then recurse into the use_list.
+            let mut cursor = node.walk();
+            let mut new_prefix = prefix.to_string();
+            for child in node.named_children(&mut cursor) {
+                match child.kind() {
+                    "scoped_identifier" | "identifier" => {
+                        if let Ok(text) = child.utf8_text(src) {
+                            if !new_prefix.is_empty() {
+                                new_prefix.push_str("::");
+                            }
+                            new_prefix.push_str(text);
+                        }
+                    }
+                    "use_list" => {
+                        collect_use_leaves_inner(child, src, &new_prefix, out);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        "use_list" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                collect_use_leaves_inner(child, src, prefix, out);
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                collect_use_leaves_inner(child, src, prefix, out);
+            }
+        }
+    }
+}
+
+/// Decompose the path-node of a `use_as_clause` into `(original_leaf,
+/// source_path)`. The leaf is the last identifier; the path is the
+/// prefix joined with the rest of the scoped identifier.
+fn decompose_use_path(path_node: Node<'_>, src: &[u8], prefix: &str) -> (Option<String>, String) {
+    if path_node.kind() == "identifier" {
+        return (
+            path_node.utf8_text(src).ok().map(|s| s.to_string()),
+            prefix.to_string(),
+        );
+    }
+    if path_node.kind() == "scoped_identifier" {
+        let mut cursor = path_node.walk();
+        let idents: Vec<Node<'_>> = path_node
+            .named_children(&mut cursor)
+            .filter(|c| c.kind() == "identifier")
+            .collect();
+        if let Some(last) = idents.last() {
+            let name = last.utf8_text(src).ok().map(|s| s.to_string());
+            let path_parts: Vec<String> = idents[..idents.len().saturating_sub(1)]
+                .iter()
+                .filter_map(|n| n.utf8_text(src).ok().map(|s| s.to_string()))
+                .collect();
+            let mut source_path = prefix.to_string();
+            if !source_path.is_empty() && !path_parts.is_empty() {
+                source_path.push_str("::");
+            }
+            source_path.push_str(&path_parts.join("::"));
+            return (name, source_path);
+        }
+    }
+    (None, prefix.to_string())
 }
 
 /// Return `true` if `node` is a `visibility_modifier` whose text is exactly
@@ -102,48 +388,6 @@ fn extract_named_item(node: Node<'_>, src: &[u8], source_path: &Path, out: &mut 
         span,
         content_hash: hash,
     });
-}
-
-/// Extract `Fact::PublicSymbol` facts from a `use_declaration` node.
-///
-/// Grammar shapes observed (tree-sitter-rust 0.24):
-/// - `pub use a::b;`         → use_declaration > scoped_identifier (last ident = "b")
-/// - `pub use a::{x, y};`    → use_declaration > scoped_use_list > use_list > identifiers
-/// - `pub use a::b as c;`    → use_declaration > use_as_clause > identifier (last = "c")
-/// - `pub use a;`            → use_declaration > identifier (bare name)
-fn extract_use_declaration(node: Node<'_>, src: &[u8], source_path: &Path, out: &mut Vec<Fact>) {
-    let vis = match visibility_child(node) {
-        Some(v) => v,
-        None => return,
-    };
-    if !is_bare_pub(vis, src) {
-        return;
-    }
-
-    // The argument subtree is everything after the visibility modifier.
-    // Find it by walking named children and skipping the visibility_modifier.
-    let mut cursor = node.walk();
-    let arg = node
-        .named_children(&mut cursor)
-        .find(|c| c.kind() != "visibility_modifier");
-    let arg = match arg {
-        Some(a) => a,
-        None => return,
-    };
-
-    // Collect names from the use argument tree.
-    let names = collect_use_names(arg, src);
-    for name in names {
-        // Span: full use_declaration (visibility through semicolon).
-        let span = line_span_from_node(src, node);
-        let hash = content_hash(&src[span.byte_range.clone()]);
-        out.push(Fact::PublicSymbol {
-            qualified_name: name,
-            source_path: source_path.to_path_buf(),
-            span: span.clone(),
-            content_hash: hash,
-        });
-    }
 }
 
 /// Recursively collect the exported names from a use-path subtree.

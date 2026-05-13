@@ -19,6 +19,39 @@ pub fn extract<'a>(ast: &'a RustAst, source_path: &'a Path) -> impl Iterator<Ite
     out.into_iter()
 }
 
+/// `true` when the post-commit `ast` emits at least one `Fact::Field`
+/// whose leaf (last `::`-segment of `qualified_path`) matches the T₀
+/// fact's leaf but whose full `qualified_path` differs.
+///
+/// Used by `replay::classify_against_commit` as the pass-5 Cluster F
+/// file-local routing signal: when a T₀ field's exact qualified path
+/// no longer resolves in the post AST but the same leaf name appears
+/// in another struct or enum variant in the same file, classify
+/// `NeedsRevalidation` (gray area for LLM follow-up). Cross-file
+/// field-leaf tracking is intentionally out of scope; this helper
+/// only consults the per-file post AST.
+pub(crate) fn same_file_leaf_elsewhere(
+    ast: &RustAst,
+    path: &Path,
+    t0_qualified_path: &str,
+) -> bool {
+    let t0_leaf = match t0_qualified_path.rsplit("::").next() {
+        Some(s) if !s.is_empty() => s,
+        _ => return false,
+    };
+    extract(ast, path).any(|f| match f {
+        Fact::Field { qualified_path, .. } => {
+            qualified_path != t0_qualified_path
+                && qualified_path
+                    .rsplit("::")
+                    .next()
+                    .map(|leaf| leaf == t0_leaf)
+                    .unwrap_or(false)
+        }
+        _ => false,
+    })
+}
+
 fn walk(node: Node<'_>, src: &[u8], source_path: &Path, out: &mut Vec<Fact>) {
     match node.kind() {
         "struct_item" => {

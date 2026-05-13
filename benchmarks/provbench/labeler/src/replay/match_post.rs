@@ -30,29 +30,63 @@ use std::path::Path;
 ///   indicates a constructed-without-`push_test_assertion_facts`
 ///   programming error and triggers a panic rather than a silent
 ///   misclassification.
+///
+/// `function_signature_disambiguator` carries the
+/// `(cfg_attribute_set, impl_receiver_type, ordinal)` private replay-
+/// time disambiguator for a `Fact::FunctionSignature`, computed by
+/// `replay::push_function_signature_facts`. It is consumed only by the
+/// `Fact::FunctionSignature` arm to pair T₀ → post when multiple
+/// definitions share the same `qualified_name` (cfg-gated variants or
+/// multi-impl `fn`s). Same fail-loud contract as the TestAssertion
+/// ordinal: a `None` here for a `Fact::FunctionSignature` is a
+/// programming error and panics.
+///
+/// **For every fact kind other than `Fact::FunctionSignature`,
+/// callers must pass `None`** — those arms do not read the
+/// disambiguator. Same applies to `test_assertion_ordinal` for every
+/// kind other than `Fact::TestAssertion`. The two parameters are
+/// per-kind contract pieces, not generic context.
 pub(super) fn matching_post_fact(
     fact: &Fact,
     path: &Path,
     post_bytes: &[u8],
     post_ast: Option<&RustAst>,
     test_assertion_ordinal: Option<usize>,
+    function_signature_disambiguator: Option<&super::FnDisambiguator>,
     commit_sha: &str,
 ) -> Result<Option<(Span, String)>> {
     match fact {
         Fact::FunctionSignature { qualified_name, .. } => Ok(post_ast.and_then(|ast| {
-            function_signature::extract(ast, path).find_map(|f| match f {
-                Fact::FunctionSignature {
-                    qualified_name: q,
-                    span,
-                    content_hash,
-                    ..
-                } if q == *qualified_name => Some((span, content_hash)),
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
+            let t0_disamb = function_signature_disambiguator.expect(
+                "Fact::FunctionSignature must carry an FnDisambiguator; \
+                 see replay::push_function_signature_facts. Routing through \
+                 None would silently misclassify post-commit signatures.",
+            );
+            // Enumerate post-commit observations with matching
+            // qualified_name AND matching disambiguator
+            // (cfg_set, impl_receiver). Use .nth(ordinal) so genuine
+            // duplicates under the same primary key are addressed in
+            // tree-sitter walk order.
+            function_signature::extract_observations(ast, path)
+                .filter(|obs| match &obs.fact {
+                    Fact::FunctionSignature {
+                        qualified_name: q, ..
+                    } => q == qualified_name,
+                    _ => false,
+                })
+                .filter(|obs| {
+                    let post_cfg: std::collections::BTreeSet<String> =
+                        obs.cfg_attribute_set.iter().cloned().collect();
+                    post_cfg == t0_disamb.cfg_set
+                        && obs.impl_receiver_type == t0_disamb.impl_receiver
+                })
+                .nth(t0_disamb.ordinal)
+                .map(|obs| match obs.fact {
+                    Fact::FunctionSignature {
+                        span, content_hash, ..
+                    } => (span, content_hash),
+                    _ => unreachable!("filter above guarantees FunctionSignature"),
+                })
         })),
         Fact::Field { qualified_path, .. } => Ok(post_ast.and_then(|ast| {
             field::extract(ast, path).find_map(|f| match f {
@@ -69,29 +103,73 @@ pub(super) fn matching_post_fact(
                 | Fact::TestAssertion { .. } => None,
             })
         })),
-        Fact::PublicSymbol { qualified_name, .. } => Ok(post_ast.and_then(|ast| {
-            // First: check if the item is still bare-pub (happy path).
-            let still_bare_pub = symbol_existence::extract(ast, path).find_map(|f| match f {
-                Fact::PublicSymbol {
-                    qualified_name: q,
-                    span,
-                    content_hash,
-                    ..
-                } if q == *qualified_name => Some((span, content_hash)),
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            });
-            if still_bare_pub.is_some() {
-                return still_bare_pub;
+        Fact::PublicSymbol {
+            qualified_name,
+            content_hash: observed_hash,
+            ..
+        } => Ok(post_ast.and_then(|ast| {
+            use symbol_existence::PublicSymbolForm;
+            // Collect post-state PublicSymbol occurrences matching the
+            // T₀ fact's qualified_name. Distinguishes Definition
+            // (`pub fn`/`pub struct`/etc.) from BarePubUse (`pub use …
+            // name;` or `pub use … Original as name;`). Pass-5 Cluster G
+            // semantics: Definition is the primary match; BarePubUse
+            // is a surface-continuity fallback that preserves Valid
+            // when the form changed from direct definition to re-export.
+            let occurrences: Vec<_> = symbol_existence::extract_occurrences(ast, path)
+                .filter(|o| match &o.fact {
+                    Fact::PublicSymbol {
+                        qualified_name: q, ..
+                    } => q == qualified_name,
+                    _ => false,
+                })
+                .collect();
+
+            // Prefer Definition: if one exists, return its (span, hash)
+            // as today. Upstream `classify_against_commit`:
+            //   - matching hash → Valid (unchanged).
+            //   - differing hash → StaleSourceChanged.
+            // This preserves pass-3's structural-source-changed behavior
+            // for `pub fn X` body changes and similar.
+            if let Some(def) = occurrences
+                .iter()
+                .find(|o| matches!(o.form, PublicSymbolForm::Definition))
+            {
+                if let Fact::PublicSymbol {
+                    span, content_hash, ..
+                } = &def.fact
+                {
+                    return Some((span.clone(), content_hash.clone()));
+                }
             }
-            // Second: item is absent from the bare-pub extract — check whether
-            // it still exists with a narrowed visibility (pub(crate), pub(super),
-            // pub(in …), or private).  The simple name is the last segment of
-            // the qualified_name (e.g. "Config" from "my_mod::Config").
-            // `rsplit` always yields at least one element, so `.next()` is `Some`.
+
+            // No Definition matched. Check for a BarePubUse occurrence
+            // for the same exported name. SPEC §5 surface-continuity:
+            // the public symbol `qualified_name` is still publicly
+            // exported, just via a `pub use` re-export instead of a
+            // direct definition. Return the bare-pub-use post span
+            // (safe to slice from `post_bytes` upstream) paired with
+            // the T₀ observed_hash so `structural = post_hash !=
+            // observed_hash` evaluates `false` → Valid.
+            //
+            // Note: `extract_use_declaration` is gated by
+            // `is_bare_pub`, so `pub(crate) use`, `pub(super) use`,
+            // `pub(in …) use`, and plain `use` do NOT emit
+            // PublicSymbolOccurrence::BarePubUse — they fall through
+            // to the visibility-narrowing path below.
+            if let Some(bpu) = occurrences
+                .iter()
+                .find(|o| matches!(o.form, PublicSymbolForm::BarePubUse { .. }))
+            {
+                if let Fact::PublicSymbol { span, .. } = &bpu.fact {
+                    return Some((span.clone(), observed_hash.clone()));
+                }
+            }
+
+            // Neither Definition nor BarePubUse found at the same
+            // qualified_name. Check whether the item still exists at
+            // narrowed visibility (pass-3 path): pub fn X → pub(crate)
+            // fn X stays here.
             let simple_name = qualified_name
                 .rsplit("::")
                 .next()
@@ -99,10 +177,7 @@ pub(super) fn matching_post_fact(
             symbol_existence::find_item_by_name(ast, simple_name).and_then(|found| {
                 use symbol_existence::VisibilityKind;
                 match found.visibility {
-                    // Still bare-pub — would have been caught by the extract above.
                     VisibilityKind::BarePub => None,
-                    // Narrowed to restricted or private: signal a structural
-                    // change so `classify` emits `StaleSourceChanged`.
                     VisibilityKind::Restricted | VisibilityKind::Private => {
                         Some((found.span, found.content_hash))
                     }

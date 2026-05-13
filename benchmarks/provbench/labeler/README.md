@@ -164,6 +164,48 @@ Phase 0b is accepted iff:
   matcher to be perfect. See
   `benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md`.
 
+- **FunctionSignature matching is disambiguated by `(qualified_name, cfg_attribute_set, impl_receiver_type)`.**
+  `function_signature::extract` emits one `Fact::FunctionSignature`
+  per `fn` declaration; when the same `qualified_name` appears in
+  multiple `#[cfg(...)]` variants or across multiple `impl` blocks,
+  pass-5 disambiguates post-commit matching by the normalized cfg
+  attribute set plus the enclosing impl receiver type, with a zero-
+  based ordinal as a within-key tiebreaker for genuine duplicates.
+  The disambiguator lives on the private replay-internal
+  `ObservedFact`; `Fact` enum + `fact_id` format are unchanged.
+  Pre-pass-5, a deleted cfg variant could mis-pair against a surviving
+  variant's span/hash → `StaleSourceChanged`; pass-5 routes such
+  deletions to `NeedsRevalidation` when a same-qualified-name survivor
+  exists in `CommitSymbolIndex` (or `StaleSourceDeleted` when none
+  does). See `benchmarks/provbench/spotcheck/2026-05-13-post-pass4-findings.md`.
+
+- **PublicSymbol bare `pub use` re-exports preserve public surface continuity.**
+  When a T₀ `pub fn X` (or `pub struct X`, `pub trait X`, etc.) is
+  replaced at a later commit by `pub use path::X;` or
+  `pub use path::Original as X;`, the exported name `X` is still
+  publicly available from the crate even though the underlying form
+  changed. Pass-5 classifies these as `Valid`. Restricted-visibility
+  uses (`pub(crate) use`, `pub(super) use`, `pub(in path) use`,
+  plain `use`) and glob re-exports (`pub use path::*;`) do NOT take
+  this path; they fall through to the existing pass-3 narrowing
+  logic or the absent-symbol logic and continue to classify as
+  `StaleSourceChanged` / `StaleSourceDeleted`. See
+  `benchmarks/provbench/spotcheck/2026-05-13-post-pass4-findings.md`.
+
+- **Field same-file same-leaf moves route to `NeedsRevalidation`.**
+  When a T₀ field's exact `qualified_path` (e.g. `Config::dfa_size_limit`)
+  no longer resolves at a later commit but the same leaf name appears
+  in another struct or enum-struct variant in the SAME file (e.g.
+  `ConfigInner::dfa_size_limit` after a nesting refactor, or
+  `SinkContext::Match::kind` after a struct-to-enum conversion), the
+  labeler routes the row to `NeedsRevalidation`. Same-leaf-different-
+  container is the gray area the SPEC §5 label set reserves for LLM
+  follow-up review. Cross-file field-leaf tracking is intentionally
+  not extended into `CommitSymbolIndex` — cross-file matching of bare
+  leaf names like `kind` / `name` / `id` / `path` collides across
+  hundreds of unrelated structs. See
+  `benchmarks/provbench/spotcheck/2026-05-13-post-pass4-findings.md`.
+
 - **Spot-check seed is configurable but defaults are deterministic.**
   The stratified sampler is seeded by `DEFAULT_SEED`
   (`0xC0DEBABEDEADBEEF`) unless `--seed <u64>` is supplied. Re-running
