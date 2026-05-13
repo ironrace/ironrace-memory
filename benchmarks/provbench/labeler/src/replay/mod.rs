@@ -132,7 +132,15 @@ impl Replay {
         let commits: Vec<CommitRef> = pilot.walk_first_parent()?.collect();
 
         // Extract the fact set at T₀ across every .rs file present at T₀.
+        //
+        // We also stash each fact-source blob's T₀ bytes in `t0_blobs` so
+        // the per-commit step-3 fast-path below can compare them to the
+        // post-commit bytes without re-reading. The map is bounded by the
+        // number of fact-source paths and is tiny relative to the corpus;
+        // see SPEC §5 invariant in
+        // `benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md`.
         let mut facts: Vec<ObservedFact> = Vec::new();
+        let mut t0_blobs: BTreeMap<PathBuf, Vec<u8>> = BTreeMap::new();
         let rust_paths = rust_paths_at(&pilot, &cfg.t0_sha)?;
         let mut facts_so_far: Vec<Fact> = Vec::new();
         for path in &rust_paths {
@@ -160,6 +168,7 @@ impl Replay {
                 let test_facts: Vec<Fact> =
                     test_assertion::extract(&ast, path, &facts_so_far).collect();
                 push_test_assertion_facts(&mut facts, &mut facts_so_far, &blob, test_facts);
+                t0_blobs.insert(path.clone(), blob);
             }
         }
         let rust_dirs = rust_paths
@@ -176,6 +185,7 @@ impl Replay {
                         format!("parse README at {} @ {}", path.display(), cfg.t0_sha)
                     })?;
                 push_observed_facts(&mut facts, &mut facts_so_far, &blob, doc_facts);
+                t0_blobs.insert(path, blob);
             }
         }
 
@@ -220,6 +230,32 @@ impl Replay {
             // ── Step 3: classify each fact ────────────────────────────────────
             for (path, facts_at_path) in &facts_by_path {
                 let post_bytes = cached_blobs.get(path).and_then(|b| b.as_deref());
+
+                // SPEC §5 invariant: an unchanged source file cannot
+                // contain a stale fact. When the blob at `commit_sha`
+                // is byte-identical to its T₀ counterpart, classify
+                // every fact at this path as `Valid` and skip per-fact
+                // matching entirely. The bypass lives at the call site
+                // (not inside `classify_against_commit`) so it is
+                // computed once per `(path, commit)` and visibly
+                // sidesteps `matching_post_fact`, `symbol_exists_in_tree`,
+                // rename detection, and whitespace/comment diffing.
+                // Rationale: benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md.
+                let file_byte_identical = match (post_bytes, t0_blobs.get(path)) {
+                    (Some(p), Some(t)) => p == t.as_slice(),
+                    _ => false,
+                };
+                if file_byte_identical {
+                    for observed in facts_at_path {
+                        rows.push(FactAtCommit {
+                            fact_id: fact_id(&observed.fact),
+                            commit_sha: commit.sha.clone(),
+                            label: Label::Valid,
+                        });
+                    }
+                    continue;
+                }
+
                 let post_ast = post_asts.get(path).and_then(|a| a.as_ref());
                 let t0_names: &HashSet<String> =
                     t0_names_by_path.get(path).unwrap_or(&EMPTY_STRING_SET);
