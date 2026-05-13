@@ -186,24 +186,47 @@ an error and aborts the run:
 
   **Local-dev override:** if your rustup-managed `rust-analyzer` drifts
   from the SPEC §13.1 pin (rustup auto-updates routinely move it),
-  install the pinned `1.85.0 (4d91de4e 2025-02-17)` binary side-by-side
-  and point the labeler at it via env var:
+  install the pinned `1.85.0 (4d91de4e 2025-02-17)` binary
+  side-by-side and point the labeler at it via the
+  `PROVBENCH_RUST_ANALYZER` env var. The matching recipe depends on
+  which row of `PINNED_BINARIES` your host falls under, because the
+  two pinned hashes correspond to **different upstream artifacts**
+  (rustup component on macOS, GitHub release `.gz` on Linux).
+
+  **macOS aarch64** — pinned hash is the rustup
+  `1.85.0-aarch64-apple-darwin` component. The GitHub release `.gz`
+  does NOT match this hash; use rustup:
 
   ```bash
-  # macOS aarch64 example — Linux uses the .gz at the same release tag.
+  rustup toolchain install 1.85.0 --component rust-analyzer
+  RA=$(rustup which --toolchain 1.85.0 rust-analyzer)
+  shasum -a 256 "$RA"   # must print f85740bf…0e1f9aee
+  export PROVBENCH_RUST_ANALYZER="$RA"
+  ```
+
+  Installing the `1.85.0` toolchain leaves your active toolchain
+  untouched, so your IDE keeps using whatever rust-analyzer it had.
+
+  **Linux x86_64** — pinned hash is the decompressed
+  `rust-analyzer-x86_64-unknown-linux-gnu.gz` from the upstream
+  `2025-02-17` GitHub release; rustup builds for Linux currently
+  differ. Use the GitHub artifact:
+
+  ```bash
   curl -L -o /tmp/ra.gz \
-    https://github.com/rust-lang/rust-analyzer/releases/download/2025-02-17/rust-analyzer-aarch64-apple-darwin.gz
+    https://github.com/rust-lang/rust-analyzer/releases/download/2025-02-17/rust-analyzer-x86_64-unknown-linux-gnu.gz
   gunzip -f /tmp/ra.gz && chmod +x /tmp/ra
-  shasum -a 256 /tmp/ra   # must print f85740bf…0e1f9aee
+  shasum -a 256 /tmp/ra   # must print e7a85d27…65f7410
   mkdir -p $HOME/.local/provbench && mv /tmp/ra $HOME/.local/provbench/rust-analyzer
   export PROVBENCH_RUST_ANALYZER=$HOME/.local/provbench/rust-analyzer
   ```
 
-  The override is `PROVBENCH_RUST_ANALYZER` and `PROVBENCH_TREE_SITTER`
-  respectively. Resolution priority: env var → `PATH` → documented
-  fallback. The override moves the discovery point only; the resolved
-  binary's bytes are still hash-checked against the SPEC §13.1 freeze
-  record. There is no way to bypass the freeze via this knob.
+  Resolution priority for both overrides
+  (`PROVBENCH_RUST_ANALYZER`, `PROVBENCH_TREE_SITTER`): env var →
+  `PATH` → documented fallback. The override moves the discovery
+  point only; the resolved binary's bytes are still hash-checked
+  against the SPEC §13.1 freeze record. There is no way to bypass
+  the freeze via this knob.
 - **Invalid UTF-8 in markdown.** The doc-claim extractor refuses to
   silently produce zero facts on a corrupted README; it returns `Err`
   with the offending file path so reviewers can locate the bad blob.
