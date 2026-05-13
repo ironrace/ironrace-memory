@@ -730,6 +730,37 @@ fn classify_against_commit(
                     }
                 }
                 None => {
+                    // Pass-5 Cluster F: for `Fact::Field`, before any
+                    // tree-wide symbol-resolution branch, do a file-
+                    // local same-leaf-elsewhere check. If the field's
+                    // exact `qualified_path` is gone but the leaf
+                    // name appears in another struct/variant in the
+                    // SAME file (e.g. `Config::dfa_size_limit` →
+                    // `ConfigInner::dfa_size_limit` after a nesting
+                    // refactor), route to `NeedsRevalidation`. The
+                    // check is file-local; it does not depend on
+                    // `cfg.skip_symbol_resolution` or `commit_index`,
+                    // so unit-test fixtures with
+                    // `skip_symbol_resolution = true` get the same
+                    // routing as production runs. SPEC §5 rationale
+                    // in `benchmarks/provbench/spotcheck/2026-05-13-post-pass4-findings.md`.
+                    if let Fact::Field { qualified_path, .. } = fact {
+                        if let Some(ast) = post_ast {
+                            if field::same_file_leaf_elsewhere(ast, path, qualified_path) {
+                                return Ok(classify(
+                                    fact,
+                                    &CommitState {
+                                        file_exists: true,
+                                        post_span_hash: None,
+                                        structurally_classifiable: false,
+                                        whitespace_or_comment_only: false,
+                                        symbol_resolves: true,
+                                        rename: None,
+                                    },
+                                ));
+                            }
+                        }
+                    }
                     // Symbol not found at its original path in the post-commit AST.
                     if cfg.skip_symbol_resolution {
                         // Unit-test mode: no cross-file or rename detection.
