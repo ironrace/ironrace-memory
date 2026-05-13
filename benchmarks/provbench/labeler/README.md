@@ -131,16 +131,38 @@ Phase 0b is accepted iff:
   the test fn name still exists in the tree, `StaleSourceDeleted` if
   it is gone wholesale.
 
+  **Known limitation:** ordinal pairing is fragile to "insertion above"
+  edits. If a future commit inserts a new assertion *before* an
+  existing one in the same `test_fn`, every subsequent T₀ assertion's
+  ordinal mismatches its post-commit counterpart by one, causing
+  unchanged assertions at the new index to misclassify as
+  `StaleSourceChanged` (and the inserted assertion to be invisible to
+  any T₀ fact). A hybrid neighborhood/hash matcher is the pass-5+ path
+  for this edge case; pass-4 ships pure ordinal because the dominant
+  failure mode the labeler must catch is "assertion #N's text changed",
+  which ordinal pairing handles correctly. See
+  `benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md`
+  for the full SPEC §5 analysis that motivated the choice.
+
 - **Byte-identical source files short-circuit to `Valid`.** SPEC §5
   structural invariant: when a fact's source path is byte-identical
   between T₀ and the replay commit, the labeler classifies every fact
   at that path as `Valid` before per-fact matching is invoked. The
   guardrail covers all five fact kinds (including `DocClaim` on
-  byte-identical markdown) and protects against per-fact-matcher
-  ambiguity for any kind. It is computed once per `(path, commit)`
-  and visibly bypasses `matching_post_fact`,
+  byte-identical markdown) and is computed once per `(path, commit)`,
+  visibly bypassing `matching_post_fact`,
   `CommitSymbolIndex::symbol_exists_in_tree`, rename detection, and
   whitespace/comment diffing.
+
+  **Defense-in-depth rationale:** per-fact matchers should
+  independently uphold "unchanged file ⇒ Valid for every fact at that
+  path", but a structural guardrail makes the invariant a property of
+  the labeler rather than a property only of well-behaved matchers.
+  Pass-3's spot-check surfaced one such matcher-correctness gap as a
+  `FunctionSignature::is_hidden` byte-identical violation; the
+  guardrail covers that class structurally without requiring each
+  matcher to be perfect. See
+  `benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md`.
 
 - **Spot-check seed is configurable but defaults are deterministic.**
   The stratified sampler is seeded by `DEFAULT_SEED`

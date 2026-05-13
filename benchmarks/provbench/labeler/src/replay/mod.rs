@@ -167,7 +167,7 @@ impl Replay {
                 );
                 let test_facts: Vec<Fact> =
                     test_assertion::extract(&ast, path, &facts_so_far).collect();
-                push_test_assertion_facts(&mut facts, &mut facts_so_far, &blob, test_facts);
+                push_test_assertion_facts(&mut facts, &mut facts_so_far, &blob, path, test_facts);
                 t0_blobs.insert(path.clone(), blob);
             }
         }
@@ -305,22 +305,31 @@ fn push_observed_facts(
 }
 
 /// Append `Fact::TestAssertion` items to `facts`, computing each fact's
-/// zero-based ordinal among same-`test_fn` siblings in the order they
-/// arrive from `test_assertion::extract`. The ordinal is a structural
-/// disambiguator carried only on the private `ObservedFact`; it does
-/// NOT appear in the serialized `Fact` or `fact_id` and therefore does
-/// not affect the corpus schema.
+/// zero-based ordinal among same-`(source_path, test_fn)` siblings in
+/// the order they arrive from `test_assertion::extract`.
+///
+/// The ordinal is a structural disambiguator carried only on the
+/// private [`ObservedFact`]; it does NOT appear in the serialized
+/// [`Fact`] or `fact_id` and therefore does not affect the corpus
+/// schema. The counter map is keyed by `(path, test_fn)` so a future
+/// refactor that batches facts from multiple source paths into a
+/// single call cannot silently alias ordinals across files — the
+/// contract is enforced by the key, not by the caller's invocation
+/// pattern.
 fn push_test_assertion_facts(
     facts: &mut Vec<ObservedFact>,
     facts_so_far: &mut Vec<Fact>,
     blob: &[u8],
+    path: &Path,
     extracted: impl IntoIterator<Item = Fact>,
 ) {
-    let mut counters: HashMap<String, usize> = HashMap::new();
+    let mut counters: HashMap<(PathBuf, String), usize> = HashMap::new();
     for fact in extracted {
         let ordinal = match &fact {
             Fact::TestAssertion { test_fn, .. } => {
-                let counter = counters.entry(test_fn.clone()).or_insert(0);
+                let counter = counters
+                    .entry((path.to_path_buf(), test_fn.clone()))
+                    .or_insert(0);
                 let n = *counter;
                 *counter += 1;
                 Some(n)

@@ -18,12 +18,18 @@ use std::path::Path;
 /// blob cannot be parsed (e.g. invalid UTF-8 in a markdown file).
 ///
 /// `test_assertion_ordinal` carries the zero-based position of a
-/// `Fact::TestAssertion` among same-`test_fn` siblings at T₀, computed
-/// in `replay::run_inner`. It is consumed only by the `Fact::TestAssertion`
-/// arm to disambiguate which post-commit assertion to compare against —
-/// without it, a test fn with N assertions silently collapses to
-/// assertion #1 for every match (pre-pass-4 bug). For non-TestAssertion
-/// facts the value is ignored.
+/// `Fact::TestAssertion` among same-`(source_path, test_fn)` siblings at T₀,
+/// computed by `replay::push_test_assertion_facts`. It is consumed only by
+/// the `Fact::TestAssertion` arm to disambiguate which post-commit
+/// assertion to compare against — without it, a test fn with N
+/// assertions silently collapses to assertion #1 for every match
+/// (pre-pass-4 bug).
+///
+/// - For non-`TestAssertion` facts the value is ignored.
+/// - For `Fact::TestAssertion` it MUST be `Some(n)`; receiving `None`
+///   indicates a constructed-without-`push_test_assertion_facts`
+///   programming error and triggers a panic rather than a silent
+///   misclassification.
 pub(super) fn matching_post_fact(
     fact: &Fact,
     path: &Path,
@@ -133,7 +139,11 @@ pub(super) fn matching_post_fact(
             // the test fn survives in `commit_index`, `StaleSourceDeleted`
             // otherwise. SPEC §5 rationale in
             // `benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md`.
-            let ordinal = test_assertion_ordinal?;
+            let ordinal = test_assertion_ordinal.expect(
+                "Fact::TestAssertion must carry an ordinal; \
+                 see replay::push_test_assertion_facts. Routing through \
+                 None would silently misclassify post-commit assertions.",
+            );
             test_assertion::extract(ast, path, &[])
                 .filter_map(|f| match f {
                     Fact::TestAssertion {
