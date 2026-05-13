@@ -118,6 +118,30 @@ Phase 0b is accepted iff:
   A claim that moves to a different line or section in a later commit is
   still matched correctly as long as the qualified name is preserved.
 
+- **TestAssertion matching is disambiguated by ordinal within `test_fn`.**
+  `test_assertion::extract` emits one `Fact::TestAssertion` per
+  `assert!`/`assert_eq!`/`assert_ne!` invocation, so a test fn with N
+  assertions produces N facts at T₀. Post-commit pairing is by
+  `(test_fn, zero-based ordinal in tree-sitter walk order)` — not by
+  `test_fn` alone — so a body-modified assertion at the same ordinal
+  classifies `StaleSourceChanged` and unchanged siblings stay `Valid`.
+  When the post-commit test fn has fewer assertions than the T₀
+  ordinal (deleted-tail), `matching_post_fact` returns `None`: with
+  `commit_index` present the row routes to `NeedsRevalidation` if
+  the test fn name still exists in the tree, `StaleSourceDeleted` if
+  it is gone wholesale.
+
+- **Byte-identical source files short-circuit to `Valid`.** SPEC §5
+  structural invariant: when a fact's source path is byte-identical
+  between T₀ and the replay commit, the labeler classifies every fact
+  at that path as `Valid` before per-fact matching is invoked. The
+  guardrail covers all five fact kinds (including `DocClaim` on
+  byte-identical markdown) and protects against per-fact-matcher
+  ambiguity for any kind. It is computed once per `(path, commit)`
+  and visibly bypasses `matching_post_fact`,
+  `CommitSymbolIndex::symbol_exists_in_tree`, rename detection, and
+  whitespace/comment diffing.
+
 - **Spot-check seed is configurable but defaults are deterministic.**
   The stratified sampler is seeded by `DEFAULT_SEED`
   (`0xC0DEBABEDEADBEEF`) unless `--seed <u64>` is supplied. Re-running
