@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **ProvBench labeler — Phase 0b hardening pass 5 (2026-05-13).**
+  Three structural fixes addressing the post-pass-4 spot-check
+  findings (`benchmarks/provbench/spotcheck/2026-05-13-post-pass4-findings.md`):
+  (1) `FunctionSignature` post-commit pairing now uses a private
+  replay-time disambiguator keyed on `(qualified_name,
+  cfg_attribute_set, impl_receiver_type)` with a zero-based ordinal
+  tiebreaker, mirroring pass-4's `TestAssertion` ordinal fix. When a
+  T₀ fact's specific cfg/impl variant is deleted at a later commit
+  while same-qualified-name survivors exist in other variants, the
+  row routes to `NeedsRevalidation` (gray area for LLM follow-up)
+  instead of mis-pairing against a survivor's span/hash and emitting
+  `StaleSourceChanged`. ~9 sample rows fix.
+  (2) `PublicSymbol` bare `pub use` re-exports (including
+  `pub use … Original as Alias`) now preserve public-surface
+  continuity → `Valid`, even when the post declaration span hashes
+  differently from a T₀ definition span. Restricted-visibility uses
+  (`pub(crate) use`, `pub(super) use`, `pub(in …) use`) remain
+  narrowed → `StaleSourceChanged` via the pass-3 visibility-narrowing
+  path. Glob re-exports (`pub use path::*;`) remain out of scope.
+  ~2 sample rows fix.
+  (3) `Fact::Field` post-commit matching now consults a private
+  file-local `same_file_leaf_elsewhere` helper. When the T₀ field's
+  exact `qualified_path` no longer resolves but the same leaf name
+  appears in another struct or enum-variant in the same file, the
+  row routes to `NeedsRevalidation` (file-local restructure gray
+  area). Cross-file field-leaf tracking is intentionally not
+  extended into `CommitSymbolIndex`. ~3 sample rows fix.
+  The `Fact` enum, JSONL schema, and `fact_id` format are all
+  byte-stable across this pass. `sample-eaf82d2.csv` remains the
+  diagnostic ground-truth for the pass-4 gate FAIL; SPEC §9.1
+  acceptance requires a freshly regenerated corpus + new-seed sample
+  post-merge.
+
 - **ProvBench labeler — Phase 0b hardening pass 4 (2026-05-13).**
   Two structural fixes addressing the post-pass-3 spot-check findings
   (`benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md`):
