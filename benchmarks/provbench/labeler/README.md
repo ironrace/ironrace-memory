@@ -183,6 +183,27 @@ an error and aborts the run:
   (or at the documented fallback) does not match the SHA-256 in
   `PINNED_BINARIES` for the current platform. Distros patch — version
   strings are not enough. Replay itself no longer calls rust-analyzer.
+
+  **Local-dev override:** if your rustup-managed `rust-analyzer` drifts
+  from the SPEC §13.1 pin (rustup auto-updates routinely move it),
+  install the pinned `1.85.0 (4d91de4e 2025-02-17)` binary side-by-side
+  and point the labeler at it via env var:
+
+  ```bash
+  # macOS aarch64 example — Linux uses the .gz at the same release tag.
+  curl -L -o /tmp/ra.gz \
+    https://github.com/rust-lang/rust-analyzer/releases/download/2025-02-17/rust-analyzer-aarch64-apple-darwin.gz
+  gunzip -f /tmp/ra.gz && chmod +x /tmp/ra
+  shasum -a 256 /tmp/ra   # must print f85740bf…0e1f9aee
+  mkdir -p $HOME/.local/provbench && mv /tmp/ra $HOME/.local/provbench/rust-analyzer
+  export PROVBENCH_RUST_ANALYZER=$HOME/.local/provbench/rust-analyzer
+  ```
+
+  The override is `PROVBENCH_RUST_ANALYZER` and `PROVBENCH_TREE_SITTER`
+  respectively. Resolution priority: env var → `PATH` → documented
+  fallback. The override moves the discovery point only; the resolved
+  binary's bytes are still hash-checked against the SPEC §13.1 freeze
+  record. There is no way to bypass the freeze via this knob.
 - **Invalid UTF-8 in markdown.** The doc-claim extractor refuses to
   silently produce zero facts on a corrupted README; it returns `Err`
   with the offending file path so reviewers can locate the bad blob.
