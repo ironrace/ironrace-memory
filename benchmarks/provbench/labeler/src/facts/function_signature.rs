@@ -56,7 +56,7 @@ pub fn extract<'a>(ast: &'a RustAst, source_path: &'a Path) -> impl Iterator<Ite
 /// or `fact_id`; the labeler's corpus schema is byte-stable across
 /// pass-5. Only the private replay layer reads them.
 #[derive(Debug, Clone)]
-pub struct FunctionSignatureObservation {
+pub(crate) struct FunctionSignatureObservation {
     /// The public fact emitted by `extract`. Always a
     /// [`Fact::FunctionSignature`] variant.
     pub fact: Fact,
@@ -78,7 +78,7 @@ pub struct FunctionSignatureObservation {
 /// disambiguator. The emitted [`Fact`] values and their order are
 /// identical to what `extract` produces — `extract` is now a thin
 /// mapper over this function, so T₀ extraction output is byte-stable.
-pub fn extract_observations<'a>(
+pub(crate) fn extract_observations<'a>(
     ast: &'a RustAst,
     source_path: &'a Path,
 ) -> impl Iterator<Item = FunctionSignatureObservation> + 'a {

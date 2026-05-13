@@ -32,7 +32,7 @@ pub fn extract<'a>(ast: &'a RustAst, source_path: &'a Path) -> impl Iterator<Ite
 /// `extract_use_declaration` (gated by `is_bare_pub`), so they don't
 /// appear as occurrences.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PublicSymbolForm {
+pub(crate) enum PublicSymbolForm {
     /// `pub fn X / pub struct X / pub enum X / pub mod X / pub trait X
     /// / pub const X / pub static X / pub type X`.
     Definition,
@@ -56,7 +56,7 @@ pub enum PublicSymbolForm {
 /// `Fact::PublicSymbol` plus the structural form-tag describing
 /// which extraction branch emitted it.
 #[derive(Debug, Clone)]
-pub struct PublicSymbolOccurrence {
+pub(crate) struct PublicSymbolOccurrence {
     pub fact: Fact,
     pub form: PublicSymbolForm,
 }
@@ -70,7 +70,7 @@ pub struct PublicSymbolOccurrence {
 /// definitions. The emitted [`Fact`] values and their order are
 /// identical to what [`extract`] produces, so T₀ extraction is byte-
 /// stable across pass-5.
-pub fn extract_occurrences<'a>(
+pub(crate) fn extract_occurrences<'a>(
     ast: &'a RustAst,
     source_path: &'a Path,
 ) -> impl Iterator<Item = PublicSymbolOccurrence> + 'a {
@@ -90,12 +90,10 @@ fn walk_with_form(
     match node.kind() {
         "function_item" | "struct_item" | "enum_item" | "mod_item" | "trait_item"
         | "const_item" | "static_item" | "type_item" => {
-            let pre_len = out.len();
             extract_named_item_occurrences(node, src, source_path, out);
-            // post-condition: each newly pushed occurrence is Definition
-            for occ in &mut out[pre_len..] {
-                occ.form = PublicSymbolForm::Definition;
-            }
+            // (`extract_named_item_occurrences` already stamps
+            // `form = Definition` on each pushed occurrence — see its
+            // body. No second pass needed.)
             // Still recurse into mod_item bodies to catch nested pub items.
             if node.kind() == "mod_item" {
                 if let Some(body) = node.child_by_field_name("body") {

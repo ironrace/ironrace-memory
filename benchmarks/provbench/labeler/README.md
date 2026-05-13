@@ -177,7 +177,7 @@ Phase 0b is accepted iff:
   variant's span/hash → `StaleSourceChanged`; pass-5 routes such
   deletions to `NeedsRevalidation` when a same-qualified-name survivor
   exists in `CommitSymbolIndex` (or `StaleSourceDeleted` when none
-  does).
+  does). See `benchmarks/provbench/spotcheck/2026-05-13-post-pass4-findings.md`.
 
 - **PublicSymbol bare `pub use` re-exports preserve public surface continuity.**
   When a T₀ `pub fn X` (or `pub struct X`, `pub trait X`, etc.) is
@@ -189,7 +189,8 @@ Phase 0b is accepted iff:
   plain `use`) and glob re-exports (`pub use path::*;`) do NOT take
   this path; they fall through to the existing pass-3 narrowing
   logic or the absent-symbol logic and continue to classify as
-  `StaleSourceChanged` / `StaleSourceDeleted`.
+  `StaleSourceChanged` / `StaleSourceDeleted`. See
+  `benchmarks/provbench/spotcheck/2026-05-13-post-pass4-findings.md`.
 
 - **Field same-file same-leaf moves route to `NeedsRevalidation`.**
   When a T₀ field's exact `qualified_path` (e.g. `Config::dfa_size_limit`)
@@ -202,7 +203,8 @@ Phase 0b is accepted iff:
   follow-up review. Cross-file field-leaf tracking is intentionally
   not extended into `CommitSymbolIndex` — cross-file matching of bare
   leaf names like `kind` / `name` / `id` / `path` collides across
-  hundreds of unrelated structs.
+  hundreds of unrelated structs. See
+  `benchmarks/provbench/spotcheck/2026-05-13-post-pass4-findings.md`.
 
 - **Spot-check seed is configurable but defaults are deterministic.**
   The stratified sampler is seeded by `DEFAULT_SEED`

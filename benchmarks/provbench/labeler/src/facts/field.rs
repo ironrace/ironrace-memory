@@ -30,7 +30,11 @@ pub fn extract<'a>(ast: &'a RustAst, source_path: &'a Path) -> impl Iterator<Ite
 /// `NeedsRevalidation` (gray area for LLM follow-up). Cross-file
 /// field-leaf tracking is intentionally out of scope; this helper
 /// only consults the per-file post AST.
-pub fn same_file_leaf_elsewhere(ast: &RustAst, path: &Path, t0_qualified_path: &str) -> bool {
+pub(crate) fn same_file_leaf_elsewhere(
+    ast: &RustAst,
+    path: &Path,
+    t0_qualified_path: &str,
+) -> bool {
     let t0_leaf = match t0_qualified_path.rsplit("::").next() {
         Some(s) if !s.is_empty() => s,
         _ => return false,

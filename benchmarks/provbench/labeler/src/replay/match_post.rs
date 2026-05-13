@@ -40,6 +40,12 @@ use std::path::Path;
 /// multi-impl `fn`s). Same fail-loud contract as the TestAssertion
 /// ordinal: a `None` here for a `Fact::FunctionSignature` is a
 /// programming error and panics.
+///
+/// **For every fact kind other than `Fact::FunctionSignature`,
+/// callers must pass `None`** — those arms do not read the
+/// disambiguator. Same applies to `test_assertion_ordinal` for every
+/// kind other than `Fact::TestAssertion`. The two parameters are
+/// per-kind contract pieces, not generic context.
 pub(super) fn matching_post_fact(
     fact: &Fact,
     path: &Path,
