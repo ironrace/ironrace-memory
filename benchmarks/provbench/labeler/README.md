@@ -71,20 +71,48 @@ Phase 0b is accepted iff:
 
 ## Behavior
 
+- **Visibility narrowing classified as source changed.** Public symbols
+  whose visibility is narrowed to `pub(crate)`, `pub(super)`,
+  `pub(in path)`, or private are classified as `StaleSourceChanged` rather
+  than `NeedsRevalidation`. Per SPEC §5 rule ordering, a narrowing
+  represents a semantic change to the public API surface and is therefore
+  treated as a source change, not merely a revalidation trigger.
+
+- **Replay symbol resolution is commit-tree-local.** For each commit a
+  `CommitSymbolIndex` is built from that commit's `.rs` tree (via
+  tree-sitter) before any fact is classified; `rust-analyzer` is no longer
+  consulted at replay time. This eliminates the runtime RA dependency for the
+  hot classification path. Live RA tooling and the `PINNED_BINARIES`
+  tooling-pin table (in `src/tooling.rs`) remain in the crate for
+  `tests/replay_ra.rs` (pinned-binary test) and for future cross-crate /
+  macro-expanded work. Files added after T₀ are included in the per-commit
+  index, so same-qualified symbols moved into new files route to
+  `NeedsRevalidation` rather than `StaleSourceDeleted`.
+
+- **Rename detection requires AST context match.** A `RenameCandidate` is a
+  typed struct carrying `container` (the enclosing module or impl block)
+  along with `qualified_name`, `leaf_name`, and `span`. Same-kind filtering
+  is enforced upstream by `rename_candidates_for_typed`, which only collects
+  candidates from the original fact's kind. A candidate is only promoted to
+  a rename when the container matches the original symbol *and* the
+  candidate was not already present at T₀ — the structural T₀-presence
+  check prevents false positives from pre-existing symbols with the same
+  name.
+
+- **DocClaim matching is relocation-tolerant.** The post-state doc-claim
+  lookup searches by `qualified_name` rather than by byte-offset hash.
+  A claim that moves to a different line or section in a later commit is
+  still matched correctly as long as the qualified name is preserved.
+
 The labeler is **fail-closed** by design. Silently producing labels in any
 of the following situations would corrupt the corpus, so each surfaces as
 an error and aborts the run:
 
-- **Tooling-pin mismatch.** `verify-tooling` and `Replay::run` both call
+- **Tooling-pin mismatch.** `verify-tooling` calls
   `tooling::resolve_from_env()`, which hard-fails when a binary on `PATH`
   (or at the documented fallback) does not match the SHA-256 in
   `PINNED_BINARIES` for the current platform. Distros patch — version
-  strings are not enough.
-- **rust-analyzer indexing timeout.** When the LSP client observes a
-  `$/progress` `begin` but the matching `end` does not arrive before the
-  hard wall-clock deadline, replay returns `Err` rather than answering
-  symbol queries against an incomplete index. The error message includes
-  the workspace root.
+  strings are not enough. Replay itself no longer calls rust-analyzer.
 - **Invalid UTF-8 in markdown.** The doc-claim extractor refuses to
   silently produce zero facts on a corrupted README; it returns `Err`
   with the offending file path so reviewers can locate the bad blob.
@@ -106,9 +134,11 @@ round-trips through reader/writer correctly.
 - v1 supports Rust only. The held-out Python repo (`flask`) is **not**
   exercised by this labeler. A `tree-sitter`-based Python path is
   future work and **not** required for Phase 0b acceptance.
-- `rust-analyzer` is invoked over LSP stdio per commit. Wall-clock cost
-  scales with commit count; the pilot run on ripgrep at T₀ → T₀+~600
-  commits is expected to take 30–90 minutes on an M-series Mac.
+- Per-commit classification uses a tree-sitter-built `CommitSymbolIndex`
+  rather than a live `rust-analyzer` query. This loses semantic resolution
+  for cross-crate references and macro-expanded symbols. The pinned RA
+  binary is still covered by `verify-tooling` and `tests/replay_ra.rs` for
+  future work that needs deeper semantic resolution.
 
 ## Reproducibility / supported platforms
 
@@ -140,5 +170,5 @@ requires running `shasum -a 256` against the decompressed upstream
 artifact and committing the result to `PINNED_BINARIES` — never copy a
 hash from a secondary source.
 
-Phase 0b labels remain valid only when produced on a supported
+Phase 0b tooling verification remains valid only on a supported
 platform. `resolve_from_env()` hard-fails on any other host.

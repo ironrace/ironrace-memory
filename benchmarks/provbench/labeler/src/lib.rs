@@ -22,8 +22,9 @@
 //! - [`replay`]: per-commit replay driver — reads blobs at each commit,
 //!   classifies, and emits `FactAtCommit` rows.
 //! - [`repo`]: pilot repo handle (gix) and first-parent commit walker.
-//! - [`resolve`]: language-agnostic symbol resolver trait + the
-//!   rust-analyzer LSP backend used in production.
+//! - [`resolve`]: language-agnostic symbol resolver trait + the legacy
+//!   rust-analyzer LSP backend retained for ignored RA tooling tests and
+//!   future semantic-resolution work.
 //! - [`spotcheck`]: stratified deterministic sampler and Wilson lower-bound
 //!   reporter for SPEC §9.1 acceptance.
 //! - [`tooling`]: pinned-binary verification per SPEC §13.1.

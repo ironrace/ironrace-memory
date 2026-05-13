@@ -1,0 +1,10 @@
+# Large generated artifacts that aren't reproducible from git state alone:
+# - Corpus JSONL is regeneratable from the labeler binary + ripgrep clone
+# - Spot-check working-copy files (.bak, .PARKED) are local-only
+corpus/*.jsonl
+spotcheck/*.bak
+spotcheck/*.PARKED
+work/
+
+# Keep the directory itself tracked via .gitkeep
+!.gitkeep

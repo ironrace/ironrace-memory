@@ -7,19 +7,28 @@
 //! engine ([`crate::label::classify`]) to each (fact, commit) pair.
 //! Output is unsorted; deterministic ordering is the writer's
 //! responsibility (see [`crate::output::write_jsonl`]).
+//!
+//! ## Symbol resolution model (Task 3 / Cluster B)
+//! Classification is commit-tree-local.  For each commit a
+//! [`commit_index::CommitSymbolIndex`] is built from that commit's blobs
+//! before any fact is classified; `rust-analyzer` is **not** consulted
+//! at replay time.  Live RA tooling stays in the crate for
+//! `tests/replay_ra.rs` (pinned-binary test) and for future
+//! cross-crate / macro-expanded work.
 
-use crate::ast::{
-    spans::{content_hash, Span},
-    RustAst,
-};
-use crate::diff::{is_whitespace_or_comment_only, rename_candidate};
+pub mod commit_index;
+mod match_post;
+
+use crate::ast::{spans::Span, RustAst};
+use crate::diff::{is_whitespace_or_comment_only, rename_candidate_typed, RenameOrigin};
 use crate::facts::{doc_claim, field, function_signature, symbol_existence, test_assertion, Fact};
 use crate::label::{classify, Label, PostCommitState};
 use crate::repo::{normalize_path_for_fact_id, CommitRef, Pilot, PilotRepoSpec};
-use crate::resolve::{rust_analyzer::RustAnalyzer, SymbolResolver};
+use crate::resolve::SymbolResolver;
 use anyhow::{Context, Result};
+use commit_index::CommitSymbolIndex;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 // ── Public surface ────────────────────────────────────────────────────────────
@@ -41,10 +50,11 @@ pub struct FactAtCommit {
 pub struct ReplayConfig {
     pub repo_path: PathBuf,
     pub t0_sha: String,
-    /// When `true`, the driver does not consult rust-analyzer; symbol
-    /// resolution is approximated as "the bound source path still exists AND
-    /// the function signature still appears at any location in the post-commit
-    /// AST".  Used by unit tests; production runs must set this `false`.
+    /// When `true`, the per-commit symbol index is not built and cross-file
+    /// symbol lookup is skipped entirely.  Symbol resolution is then
+    /// approximated as "the fact's qualified name still appears at its
+    /// original source path".  Used by unit tests; production runs must set
+    /// this `false`.
     pub skip_symbol_resolution: bool,
 }
 
@@ -61,27 +71,52 @@ impl Replay {
     /// per (fact, commit) pair.
     ///
     /// Steps:
-    /// 1. Verify pinned tooling (when not in `skip_symbol_resolution`
-    ///    mode) and spawn the rust-analyzer LSP client.
-    /// 2. Extract the closed enum of facts from every `.rs` file present at
+    /// 1. Extract the closed enum of facts from every `.rs` file present at
     ///    `cfg.t0_sha`, then doc-claim facts from eligible markdown files.
-    /// 3. Walk first-parent descendants of T₀ and classify every fact
+    /// 2. Walk first-parent descendants of T₀ and classify every fact
     ///    against each commit's blobs via the SPEC §5 rule engine.
+    ///    Classification is commit-tree-local: a [`CommitSymbolIndex`] is
+    ///    built from each commit's blobs before any fact is classified.
+    ///    `rust-analyzer` is **not** consulted at replay time.
     ///
-    /// Fail-closed: returns `Err` on tooling-pin mismatch, rust-analyzer
-    /// indexing timeout, or invalid UTF-8 in a markdown blob (any of these
-    /// silently degrading would corrupt the corpus).
+    /// Fail-closed: returns `Err` on invalid UTF-8 in a markdown blob
+    /// (silently degrading would corrupt the corpus).
     pub fn run(cfg: &ReplayConfig) -> Result<Vec<FactAtCommit>> {
-        let mut resolver: Option<RustAnalyzer> = if cfg.skip_symbol_resolution {
-            None
-        } else {
-            crate::tooling::resolve_from_env()?;
-            // TODO(phase-0b-pilot): replay production labeling against a
-            // per-commit worktree before each rust-analyzer query so the LSP
-            // view matches the commit being classified.
-            Some(RustAnalyzer::spawn(&cfg.repo_path)?)
-        };
+        Self::run_inner(cfg, None)
+    }
 
+    /// Test-only entry point preserved for API compatibility after Task 3.
+    /// The `resolver` parameter is accepted but never invoked; per-commit
+    /// classification uses [`CommitSymbolIndex`] exclusively.
+    /// Use [`Self::run`] for production.
+    #[doc(hidden)]
+    pub fn run_with_resolver(
+        cfg: &ReplayConfig,
+        _resolver: Option<Box<dyn SymbolResolver>>,
+    ) -> Result<Vec<FactAtCommit>> {
+        // skip_symbol_resolution must be false so the CommitSymbolIndex is
+        // built and per-commit tree resolution is exercised.  Returns Err
+        // rather than panicking — this is a `pub` entry point even with
+        // `#[doc(hidden)]`.
+        anyhow::ensure!(
+            !cfg.skip_symbol_resolution,
+            "run_with_resolver: set skip_symbol_resolution=false so the \
+             per-commit tree resolution path is exercised"
+        );
+        Self::run_inner(cfg, None)
+    }
+
+    /// Shared implementation used by both [`Self::run`] and
+    /// [`Self::run_with_resolver`].
+    ///
+    /// When `cfg.skip_symbol_resolution` is `false`, a
+    /// [`CommitSymbolIndex`] is built for each commit (reusing blobs already
+    /// read for fact-source paths) and used as the authoritative source for
+    /// cross-file symbol presence checks.
+    fn run_inner(
+        cfg: &ReplayConfig,
+        _resolver: Option<Box<dyn SymbolResolver>>,
+    ) -> Result<Vec<FactAtCommit>> {
         let pilot = Pilot::open(&AdHocSpec {
             path: cfg.repo_path.clone(),
             t0_sha: cfg.t0_sha.clone(),
@@ -140,25 +175,57 @@ impl Replay {
         crate::repo::reset_read_blob_at_call_count();
 
         let facts_by_path = group_facts_by_source_path(&facts);
+        // Build the T₀ qualified-name index per source path.  Used by the
+        // rename-candidate filter pipeline (Gate 2: "candidate was not a T₀
+        // fact") to reject surviving siblings from consideration as rename
+        // targets.  Keyed the same way as `facts_by_path` so the lookup at
+        // classify time is O(1).
+        let t0_names_by_path = build_t0_names_by_path(&facts);
+
         let mut rows: Vec<FactAtCommit> = Vec::new();
         for commit in &commits {
+            // ── Step 1: read post-commit blobs for all fact-source paths ──────
+            // Collect into a HashMap so we can pass them as the blob cache to
+            // CommitSymbolIndex::build without double-reading.
+            let mut cached_blobs: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
+            let mut post_asts: HashMap<PathBuf, Option<RustAst>> = HashMap::new();
+            for path in facts_by_path.keys() {
+                let blob = pilot.read_blob_at(&commit.sha, path)?;
+                let ast = blob.as_ref().and_then(|bytes| RustAst::parse(bytes).ok());
+                cached_blobs.insert(path.clone(), blob);
+                post_asts.insert(path.clone(), ast);
+            }
+
+            // ── Step 2: build commit-local symbol index (when enabled) ────────
+            let commit_index: Option<CommitSymbolIndex> = if cfg.skip_symbol_resolution {
+                None
+            } else {
+                let commit_rs_paths = rust_paths_at(&pilot, &commit.sha)?;
+                Some(CommitSymbolIndex::build(
+                    &pilot,
+                    &commit.sha,
+                    &commit_rs_paths,
+                    &cached_blobs,
+                )?)
+            };
+
+            // ── Step 3: classify each fact ────────────────────────────────────
             for (path, facts_at_path) in &facts_by_path {
-                let post_bytes = pilot.read_blob_at(&commit.sha, path)?;
-                let post_ast = post_bytes
-                    .as_ref()
-                    .and_then(|bytes| RustAst::parse(bytes).ok());
+                let post_bytes = cached_blobs.get(path).and_then(|b| b.as_deref());
+                let post_ast = post_asts.get(path).and_then(|a| a.as_ref());
+                let t0_names: &HashSet<String> =
+                    t0_names_by_path.get(path).unwrap_or(&EMPTY_STRING_SET);
                 for observed in facts_at_path {
-                    let resolver_ref = resolver
-                        .as_mut()
-                        .map(|resolver| resolver as &mut dyn SymbolResolver);
                     let label = classify_against_commit(
                         &observed.fact,
                         path,
-                        post_bytes.as_deref(),
-                        post_ast.as_ref(),
+                        post_bytes,
+                        post_ast,
                         &observed.t0_span_bytes,
                         cfg,
-                        resolver_ref,
+                        commit_index.as_ref(),
+                        t0_names,
+                        &commit.sha,
                     )?;
                     rows.push(FactAtCommit {
                         fact_id: fact_id(&observed.fact),
@@ -171,6 +238,10 @@ impl Replay {
         Ok(rows)
     }
 }
+
+/// Shared empty set for paths that have no T₀ facts (avoids allocation).
+static EMPTY_STRING_SET: std::sync::LazyLock<HashSet<String>> =
+    std::sync::LazyLock::new(HashSet::new);
 
 fn push_observed_facts(
     facts: &mut Vec<ObservedFact>,
@@ -196,6 +267,38 @@ fn group_facts_by_source_path(facts: &[ObservedFact]) -> BTreeMap<PathBuf, Vec<&
             .push(observed);
     }
     grouped
+}
+
+/// Build a map from source path → set of T₀ qualified names at that path.
+///
+/// Used by the rename-candidate Gate 2 ("candidate was not a T₀ fact"):
+/// before accepting a post-commit symbol as a rename target we verify it
+/// did NOT exist at T₀ as an independent fact in the same file.
+fn build_t0_names_by_path(facts: &[ObservedFact]) -> BTreeMap<PathBuf, HashSet<String>> {
+    let mut by_path: BTreeMap<PathBuf, HashSet<String>> = BTreeMap::new();
+    for observed in facts {
+        let key = qualified_key_for(&observed.fact).to_string();
+        by_path
+            .entry(source_path_for(&observed.fact).to_path_buf())
+            .or_default()
+            .insert(key);
+    }
+    by_path
+}
+
+/// Return the qualified key that uniquely identifies a fact for T₀-presence
+/// checks.  Mirrors the per-kind primary key used by `matching_post_fact`:
+/// - `FunctionSignature` / `PublicSymbol` / `DocClaim` → `qualified_name`
+/// - `Field` → `qualified_path`
+/// - `TestAssertion` → `test_fn`
+fn qualified_key_for(fact: &Fact) -> &str {
+    match fact {
+        Fact::FunctionSignature { qualified_name, .. } => qualified_name,
+        Fact::Field { qualified_path, .. } => qualified_path,
+        Fact::PublicSymbol { qualified_name, .. } => qualified_name,
+        Fact::DocClaim { qualified_name, .. } => qualified_name,
+        Fact::TestAssertion { test_fn, .. } => test_fn,
+    }
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -388,7 +491,20 @@ impl CommitState {
     }
 }
 
-/// Classify `fact` against the post-commit blob at `commit_sha`.
+/// Classify `fact` against the post-commit blob.
+///
+/// Symbol presence is determined commit-tree-locally:
+/// - If `matching_post_fact` finds the symbol at its original path → the
+///   symbol is present; compute hash/whitespace deltas and classify.
+/// - If not found at the original path AND `commit_index` is `Some`:
+///   - If the index says the symbol exists elsewhere in the tree
+///     (moved to a different file) → `symbol_resolves = true, no hash`
+///     → `classify` returns `NeedsRevalidation` (gray area for LLM).
+///   - Otherwise → `symbol_resolves = false` → attempt rename detection
+///     → `StaleSourceDeleted` or `StaleSymbolRenamed`.
+/// - When `commit_index` is `None` (`skip_symbol_resolution = true`) →
+///   bypass cross-file lookup (unit-test mode).
+#[allow(clippy::too_many_arguments)]
 fn classify_against_commit(
     fact: &Fact,
     path: &Path,
@@ -396,7 +512,9 @@ fn classify_against_commit(
     post_ast: Option<&RustAst>,
     t0_span_bytes: &[u8],
     cfg: &ReplayConfig,
-    resolver: Option<&mut dyn SymbolResolver>,
+    commit_index: Option<&CommitSymbolIndex>,
+    t0_qualified_names: &HashSet<String>,
+    commit_sha: &str,
 ) -> Result<Label> {
     let state = match post_blob {
         // File was deleted at this commit.
@@ -406,11 +524,12 @@ fn classify_against_commit(
             let observed_hash = observed_hash_for(fact);
 
             // Search the post-commit file for the same fact kind/key.
-            let post_fact = matching_post_fact(fact, path, post_bytes, post_ast);
+            let post_fact =
+                match_post::matching_post_fact(fact, path, post_bytes, post_ast, commit_sha)?;
 
             match post_fact {
                 Some((post_span, post_hash)) => {
-                    // Symbol found — compute whitespace/structural deltas.
+                    // Symbol found at its original path — compute deltas.
                     let after_bytes = &post_bytes[post_span.byte_range.clone()];
                     let ws_only = is_whitespace_or_comment_only(t0_span_bytes, after_bytes);
                     // Any signature-level hash difference is structurally classifiable.
@@ -425,9 +544,9 @@ fn classify_against_commit(
                     }
                 }
                 None => {
-                    // Symbol not found in post-commit AST.
+                    // Symbol not found at its original path in the post-commit AST.
                     if cfg.skip_symbol_resolution {
-                        // Unit-test mode: no rename detection.
+                        // Unit-test mode: no cross-file or rename detection.
                         CommitState {
                             file_exists: true,
                             post_span_hash: None,
@@ -436,33 +555,65 @@ fn classify_against_commit(
                             symbol_resolves: false,
                             rename: None,
                         }
-                    } else {
-                        if let Some(resolver) = resolver {
-                            let resolved = resolver.resolve(qualified_name_for(fact))?;
-                            if resolved.is_some() {
-                                return Ok(classify(
-                                    fact,
-                                    &CommitState {
-                                        file_exists: true,
-                                        post_span_hash: None,
-                                        structurally_classifiable: false,
-                                        whitespace_or_comment_only: false,
-                                        symbol_resolves: true,
-                                        rename: None,
-                                    },
-                                ));
+                    } else if let Some(index) = commit_index {
+                        // Commit-tree-local resolution: check whether the symbol
+                        // exists anywhere in this commit's tree.
+                        //
+                        // Case 1 — symbol exists at a different path: the fact's
+                        // source was moved to another file.  This is a gray area
+                        // for the LLM (moved vs. renamed vs. coincidental name
+                        // match), so we route to NeedsRevalidation without
+                        // triggering StaleSymbolRenamed.
+                        //
+                        // Case 2 — symbol absent from the commit tree entirely:
+                        // the qualified name is gone from every file.  Run the
+                        // typed rename pipeline against the same-file post-commit
+                        // AST to detect within-file renames (e.g. `old_name` →
+                        // `new_name` in the same module/impl block).  If a
+                        // candidate passes all four gates → StaleSymbolRenamed;
+                        // otherwise → StaleSourceDeleted.
+                        if index.symbol_exists_in_tree(fact) {
+                            CommitState {
+                                file_exists: true,
+                                post_span_hash: None,
+                                structurally_classifiable: false,
+                                whitespace_or_comment_only: false,
+                                symbol_resolves: true,
+                                rename: None,
+                            }
+                        } else {
+                            let candidates = match_post::rename_candidates_for_typed(
+                                fact, path, post_bytes, post_ast,
+                            );
+                            let origin = RenameOrigin::new(qualified_key_for(fact), t0_span_bytes);
+                            let rename = rename_candidate_typed(
+                                &origin,
+                                &candidates,
+                                t0_qualified_names,
+                                0.6,
+                            );
+                            CommitState {
+                                file_exists: true,
+                                post_span_hash: None,
+                                structurally_classifiable: false,
+                                whitespace_or_comment_only: false,
+                                symbol_resolves: false,
+                                rename,
                             }
                         }
-                        // Production mode: attempt rename detection.
-                        let candidates = rename_candidates_for(fact, path, post_bytes, post_ast);
-                        let rename = rename_candidate(t0_span_bytes, &candidates, 0.6);
+                    } else {
+                        // `skip_symbol_resolution = false` but `commit_index` is
+                        // `None`.  This cannot happen in practice: `run_inner`
+                        // always builds the index when `skip_symbol_resolution`
+                        // is `false`.  Treat as deleted (no rename detection)
+                        // rather than panicking so behaviour is defined.
                         CommitState {
                             file_exists: true,
                             post_span_hash: None,
                             structurally_classifiable: false,
                             whitespace_or_comment_only: false,
                             symbol_resolves: false,
-                            rename,
+                            rename: None,
                         }
                     }
                 }
@@ -475,154 +626,6 @@ fn classify_against_commit(
 
 fn observed_span_bytes(blob: &[u8], fact: &Fact) -> Vec<u8> {
     blob[span_for(fact).byte_range.clone()].to_vec()
-}
-
-fn matching_post_fact(
-    fact: &Fact,
-    path: &Path,
-    post_bytes: &[u8],
-    post_ast: Option<&RustAst>,
-) -> Option<(Span, String)> {
-    match fact {
-        Fact::FunctionSignature { qualified_name, .. } => post_ast.and_then(|ast| {
-            function_signature::extract(ast, path).find_map(|f| match f {
-                Fact::FunctionSignature {
-                    qualified_name: q,
-                    span,
-                    content_hash,
-                    ..
-                } if q == *qualified_name => Some((span, content_hash)),
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
-        }),
-        Fact::Field { qualified_path, .. } => post_ast.and_then(|ast| {
-            field::extract(ast, path).find_map(|f| match f {
-                Fact::Field {
-                    qualified_path: q,
-                    span,
-                    content_hash,
-                    ..
-                } if q == *qualified_path => Some((span, content_hash)),
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
-        }),
-        Fact::PublicSymbol { qualified_name, .. } => post_ast.and_then(|ast| {
-            symbol_existence::extract(ast, path).find_map(|f| match f {
-                Fact::PublicSymbol {
-                    qualified_name: q,
-                    span,
-                    content_hash,
-                    ..
-                } if q == *qualified_name => Some((span, content_hash)),
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
-        }),
-        Fact::DocClaim { mention_span, .. } => {
-            let range = mention_span.byte_range.clone();
-            if range.end > post_bytes.len() {
-                return None;
-            }
-            Some((
-                Span {
-                    byte_range: range.clone(),
-                    line_start: mention_span.line_start,
-                    line_end: mention_span.line_end,
-                },
-                content_hash(&post_bytes[range]),
-            ))
-        }
-        Fact::TestAssertion { test_fn, .. } => post_ast.and_then(|ast| {
-            test_assertion::extract(ast, path, &[]).find_map(|f| match f {
-                Fact::TestAssertion {
-                    test_fn: q,
-                    span,
-                    content_hash,
-                    ..
-                } if q == *test_fn => Some((span, content_hash)),
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
-        }),
-    }
-}
-
-fn rename_candidates_for(
-    fact: &Fact,
-    path: &Path,
-    post_bytes: &[u8],
-    post_ast: Option<&RustAst>,
-) -> Vec<(String, Vec<u8>)> {
-    let Some(ast) = post_ast else {
-        return Vec::new();
-    };
-    match fact {
-        Fact::FunctionSignature { .. } => function_signature::extract(ast, path)
-            .filter_map(|f| match f {
-                Fact::FunctionSignature {
-                    qualified_name,
-                    span,
-                    ..
-                } => Some((qualified_name, post_bytes[span.byte_range].to_vec())),
-                Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
-            .collect(),
-        Fact::Field { .. } => field::extract(ast, path)
-            .filter_map(|f| match f {
-                Fact::Field {
-                    qualified_path,
-                    span,
-                    ..
-                } => Some((qualified_path, post_bytes[span.byte_range].to_vec())),
-                Fact::FunctionSignature { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
-            .collect(),
-        Fact::PublicSymbol { .. } => symbol_existence::extract(ast, path)
-            .filter_map(|f| match f {
-                Fact::PublicSymbol {
-                    qualified_name,
-                    span,
-                    ..
-                } => Some((qualified_name, post_bytes[span.byte_range].to_vec())),
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
-            .collect(),
-        Fact::DocClaim { .. } => Vec::new(),
-        Fact::TestAssertion { .. } => test_assertion::extract(ast, path, &[])
-            .filter_map(|f| match f {
-                Fact::TestAssertion { test_fn, span, .. } => {
-                    Some((test_fn, post_bytes[span.byte_range].to_vec()))
-                }
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. } => None,
-            })
-            .collect(),
-    }
 }
 
 fn span_for(fact: &Fact) -> &Span {
@@ -652,16 +655,6 @@ fn observed_hash_for(fact: &Fact) -> &str {
         Fact::PublicSymbol { content_hash, .. } => content_hash,
         Fact::DocClaim { mention_hash, .. } => mention_hash,
         Fact::TestAssertion { content_hash, .. } => content_hash,
-    }
-}
-
-fn qualified_name_for(fact: &Fact) -> &str {
-    match fact {
-        Fact::FunctionSignature { qualified_name, .. } => qualified_name,
-        Fact::Field { qualified_path, .. } => qualified_path,
-        Fact::PublicSymbol { qualified_name, .. } => qualified_name,
-        Fact::DocClaim { qualified_name, .. } => qualified_name,
-        Fact::TestAssertion { test_fn, .. } => test_fn,
     }
 }
 

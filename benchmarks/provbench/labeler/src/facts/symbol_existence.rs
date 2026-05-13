@@ -202,3 +202,142 @@ fn last_identifier(node: Node<'_>, src: &[u8]) -> Option<String> {
         .and_then(|n| n.utf8_text(src).ok())
         .map(|t| t.to_string())
 }
+
+// ── Visibility-aware item lookup ──────────────────────────────────────────────
+
+/// Describes the visibility of a Rust item as parsed from its AST node.
+///
+/// Used by [`find_item_by_name`] to distinguish items that exist but are no
+/// longer bare-`pub` from items that are genuinely absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VisibilityKind {
+    /// Bare `pub` — the item is publicly exported.
+    BarePub,
+    /// Restricted: `pub(crate)`, `pub(super)`, or `pub(in <path>)`.
+    Restricted,
+    /// No visibility modifier — item is private to its module.
+    Private,
+}
+
+/// Result of a visibility-aware item lookup.
+#[derive(Debug)]
+pub struct FoundItem {
+    /// How the item is currently visible.
+    pub visibility: VisibilityKind,
+    /// Span of the item node (from the visibility modifier / `fn`/`struct`/…
+    /// keyword through the end of the name node).
+    pub span: crate::ast::spans::Span,
+    /// SHA-256 content hash of the span bytes.
+    pub content_hash: String,
+}
+
+/// Search `ast` for the first named item or `use`-introduced name that matches
+/// `simple_name`, regardless of its visibility.
+///
+/// Returns `None` only when no item with that name exists in the file at all.
+/// When the item exists, `FoundItem::visibility` tells you whether it is still
+/// bare `pub`, was narrowed to a restricted visibility, or became private.
+///
+/// Used by the `matching_post_fact` path in `replay.rs` to detect visibility
+/// narrowing and emit `StaleSourceChanged` instead of `StaleSourceDeleted`.
+pub fn find_item_by_name(ast: &RustAst, simple_name: &str) -> Option<FoundItem> {
+    let src = ast.source();
+    let root = ast.root();
+    find_in_subtree(root, src, simple_name)
+}
+
+fn find_in_subtree(node: Node<'_>, src: &[u8], target: &str) -> Option<FoundItem> {
+    match node.kind() {
+        // Terminal named-item kinds. We early-return None after checking the
+        // item itself because these kinds don't contain sibling named items
+        // accessible by simple name (a `fn` body has locals, not exports).
+        // Only `mod_item` recurses, since modules contain nested items.
+        // If you add a new item kind here that DOES contain reachable named
+        // items (e.g. `impl_item`), remove the early return for that arm.
+        "function_item" | "struct_item" | "enum_item" | "mod_item" | "trait_item"
+        | "const_item" | "static_item" | "type_item" | "union_item" => {
+            if let Some(found) = check_named_item(node, src, target) {
+                return Some(found);
+            }
+            // Recurse into mod_item bodies for nested items.
+            if node.kind() == "mod_item" {
+                if let Some(body) = node.child_by_field_name("body") {
+                    let mut cursor = body.walk();
+                    for child in body.named_children(&mut cursor) {
+                        if let Some(found) = find_in_subtree(child, src, target) {
+                            return Some(found);
+                        }
+                    }
+                }
+            }
+            return None;
+        }
+        "use_declaration" => {
+            return check_use_declaration(node, src, target);
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if let Some(found) = find_in_subtree(child, src, target) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn check_named_item(node: Node<'_>, src: &[u8], target: &str) -> Option<FoundItem> {
+    let name_node = node.child_by_field_name("name")?;
+    let name = name_node.utf8_text(src).ok()?;
+    if name != target {
+        return None;
+    }
+
+    let vis_node = visibility_child(node);
+    let vis_kind = match vis_node {
+        Some(v) if is_bare_pub(v, src) => VisibilityKind::BarePub,
+        Some(_) => VisibilityKind::Restricted,
+        None => VisibilityKind::Private,
+    };
+
+    // Build span from the first token of the item through the name's end byte.
+    // Use `line_span_from_node` on the full item node so we capture everything
+    // the way `extract_named_item` does for bare-pub items.
+    let start_node = vis_node.unwrap_or(name_node);
+    let span = crate::ast::line_span_through(src, start_node, name_node.end_byte());
+    let hash = crate::ast::spans::content_hash(&src[span.byte_range.clone()]);
+
+    Some(FoundItem {
+        visibility: vis_kind,
+        span,
+        content_hash: hash,
+    })
+}
+
+fn check_use_declaration(node: Node<'_>, src: &[u8], target: &str) -> Option<FoundItem> {
+    // Walk named children skipping the visibility_modifier to find the use arg.
+    let mut cursor = node.walk();
+    let arg = node
+        .named_children(&mut cursor)
+        .find(|c| c.kind() != "visibility_modifier")?;
+
+    let names = collect_use_names(arg, src);
+    if !names.iter().any(|n| n == target) {
+        return None;
+    }
+
+    let vis_kind = match visibility_child(node) {
+        Some(v) if is_bare_pub(v, src) => VisibilityKind::BarePub,
+        Some(_) => VisibilityKind::Restricted,
+        None => VisibilityKind::Private,
+    };
+
+    let span = crate::ast::line_span_from_node(src, node);
+    let hash = crate::ast::spans::content_hash(&src[span.byte_range.clone()]);
+
+    Some(FoundItem {
+        visibility: vis_kind,
+        span,
+        content_hash: hash,
+    })
+}

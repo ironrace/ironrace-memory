@@ -28,7 +28,7 @@ enum Cmd {
         /// Output JSONL path.
         #[arg(long)]
         out: std::path::PathBuf,
-        /// Skip rust-analyzer symbol resolution (unit-test mode).
+        /// Skip commit-tree symbol resolution (unit-test mode).
         #[arg(long, default_value_t = false)]
         skip_symbol_resolution: bool,
     },
