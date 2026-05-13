@@ -1058,10 +1058,10 @@ fn hp4_byte_identical_source_file_forces_all_path_facts_valid() {
     // filter below is exhaustive for fact-source paths in this fixture.
     let mut violations: Vec<&FactAtCommit> = Vec::new();
     for row in &c1_rows {
-        if row.fact_id.contains("::src/lib.rs::") || row.fact_id.contains("::README.md::") {
-            if row.label != Label::Valid {
-                violations.push(row);
-            }
+        if (row.fact_id.contains("::src/lib.rs::") || row.fact_id.contains("::README.md::"))
+            && row.label != Label::Valid
+        {
+            violations.push(row);
         }
     }
     assert!(

@@ -64,6 +64,14 @@ pub struct Replay;
 struct ObservedFact {
     fact: Fact,
     t0_span_bytes: Vec<u8>,
+    /// Zero-based position of this `Fact::TestAssertion` among same-
+    /// `(source_path, test_fn)` siblings, in tree-sitter extraction
+    /// order. `None` for every other fact kind. Used by
+    /// `match_post::matching_post_fact` to pair T₀ assertion #N with
+    /// post-commit assertion #N inside the same test fn — see SPEC §5
+    /// rationale in
+    /// `benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md`.
+    test_assertion_ordinal: Option<usize>,
 }
 
 impl Replay {
@@ -151,7 +159,7 @@ impl Replay {
                 );
                 let test_facts: Vec<Fact> =
                     test_assertion::extract(&ast, path, &facts_so_far).collect();
-                push_observed_facts(&mut facts, &mut facts_so_far, &blob, test_facts);
+                push_test_assertion_facts(&mut facts, &mut facts_so_far, &blob, test_facts);
             }
         }
         let rust_dirs = rust_paths
@@ -222,6 +230,7 @@ impl Replay {
                         post_bytes,
                         post_ast,
                         &observed.t0_span_bytes,
+                        observed.test_assertion_ordinal,
                         cfg,
                         commit_index.as_ref(),
                         t0_names,
@@ -253,6 +262,39 @@ fn push_observed_facts(
         facts.push(ObservedFact {
             t0_span_bytes: observed_span_bytes(blob, &fact),
             fact: fact.clone(),
+            test_assertion_ordinal: None,
+        });
+        facts_so_far.push(fact);
+    }
+}
+
+/// Append `Fact::TestAssertion` items to `facts`, computing each fact's
+/// zero-based ordinal among same-`test_fn` siblings in the order they
+/// arrive from `test_assertion::extract`. The ordinal is a structural
+/// disambiguator carried only on the private `ObservedFact`; it does
+/// NOT appear in the serialized `Fact` or `fact_id` and therefore does
+/// not affect the corpus schema.
+fn push_test_assertion_facts(
+    facts: &mut Vec<ObservedFact>,
+    facts_so_far: &mut Vec<Fact>,
+    blob: &[u8],
+    extracted: impl IntoIterator<Item = Fact>,
+) {
+    let mut counters: HashMap<String, usize> = HashMap::new();
+    for fact in extracted {
+        let ordinal = match &fact {
+            Fact::TestAssertion { test_fn, .. } => {
+                let counter = counters.entry(test_fn.clone()).or_insert(0);
+                let n = *counter;
+                *counter += 1;
+                Some(n)
+            }
+            _ => None,
+        };
+        facts.push(ObservedFact {
+            t0_span_bytes: observed_span_bytes(blob, &fact),
+            fact: fact.clone(),
+            test_assertion_ordinal: ordinal,
         });
         facts_so_far.push(fact);
     }
@@ -511,6 +553,7 @@ fn classify_against_commit(
     post_blob: Option<&[u8]>,
     post_ast: Option<&RustAst>,
     t0_span_bytes: &[u8],
+    test_assertion_ordinal: Option<usize>,
     cfg: &ReplayConfig,
     commit_index: Option<&CommitSymbolIndex>,
     t0_qualified_names: &HashSet<String>,
@@ -524,8 +567,14 @@ fn classify_against_commit(
             let observed_hash = observed_hash_for(fact);
 
             // Search the post-commit file for the same fact kind/key.
-            let post_fact =
-                match_post::matching_post_fact(fact, path, post_bytes, post_ast, commit_sha)?;
+            let post_fact = match_post::matching_post_fact(
+                fact,
+                path,
+                post_bytes,
+                post_ast,
+                test_assertion_ordinal,
+                commit_sha,
+            )?;
 
             match post_fact {
                 Some((post_span, post_hash)) => {

@@ -16,11 +16,20 @@ use std::path::Path;
 /// key).  Returns `Ok(Some((post_span, post_content_hash)))` when found,
 /// `Ok(None)` when the symbol is absent, or `Err` when the post-commit
 /// blob cannot be parsed (e.g. invalid UTF-8 in a markdown file).
+///
+/// `test_assertion_ordinal` carries the zero-based position of a
+/// `Fact::TestAssertion` among same-`test_fn` siblings at T₀, computed
+/// in `replay::run_inner`. It is consumed only by the `Fact::TestAssertion`
+/// arm to disambiguate which post-commit assertion to compare against —
+/// without it, a test fn with N assertions silently collapses to
+/// assertion #1 for every match (pre-pass-4 bug). For non-TestAssertion
+/// facts the value is ignored.
 pub(super) fn matching_post_fact(
     fact: &Fact,
     path: &Path,
     post_bytes: &[u8],
     post_ast: Option<&RustAst>,
+    test_assertion_ordinal: Option<usize>,
     commit_sha: &str,
 ) -> Result<Option<(Span, String)>> {
     match fact {
@@ -111,19 +120,35 @@ pub(super) fn matching_post_fact(
             Ok(best.map(|m| (m.span.clone(), m.mention_hash.clone())))
         }
         Fact::TestAssertion { test_fn, .. } => Ok(post_ast.and_then(|ast| {
-            test_assertion::extract(ast, path, &[]).find_map(|f| match f {
-                Fact::TestAssertion {
-                    test_fn: q,
-                    span,
-                    content_hash,
-                    ..
-                } if q == *test_fn => Some((span, content_hash)),
-                Fact::FunctionSignature { .. }
-                | Fact::Field { .. }
-                | Fact::PublicSymbol { .. }
-                | Fact::DocClaim { .. }
-                | Fact::TestAssertion { .. } => None,
-            })
+            // Pair T₀ → post by `(test_fn, ordinal)`. `test_assertion::extract`
+            // emits one fact per `assert!`/`assert_eq!`/`assert_ne!` invocation
+            // in tree-sitter walk order, which matches the ordering used at T₀
+            // (see `replay::push_test_assertion_facts`). Returning the
+            // post fact at index `ordinal` makes a body-modified assertion at
+            // the same position route to `StaleSourceChanged` via
+            // `post_hash != observed_hash`, and an unchanged sibling stay
+            // `Valid`. An out-of-range ordinal (deleted-tail assertion) yields
+            // `None`, which upstream `classify_against_commit` routes via the
+            // existing "symbol not found" path — `NeedsRevalidation` when
+            // the test fn survives in `commit_index`, `StaleSourceDeleted`
+            // otherwise. SPEC §5 rationale in
+            // `benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md`.
+            let ordinal = test_assertion_ordinal?;
+            test_assertion::extract(ast, path, &[])
+                .filter_map(|f| match f {
+                    Fact::TestAssertion {
+                        test_fn: q,
+                        span,
+                        content_hash,
+                        ..
+                    } if q == *test_fn => Some((span, content_hash)),
+                    Fact::FunctionSignature { .. }
+                    | Fact::Field { .. }
+                    | Fact::PublicSymbol { .. }
+                    | Fact::DocClaim { .. }
+                    | Fact::TestAssertion { .. } => None,
+                })
+                .nth(ordinal)
         })),
     }
 }
