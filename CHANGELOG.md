@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **ProvBench labeler — Phase 0b hardening pass 4 (2026-05-13).**
+  Two structural fixes addressing the post-pass-3 spot-check findings
+  (`benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md`):
+  (1) `TestAssertion` post-commit pairing was matching by `test_fn`
+  alone via `find_map`, returning the first assertion in the
+  post-commit test fn for every T₀ fact in that fn. Non-first
+  assertions in a multi-assertion `#[test]` body silently routed to
+  `StaleSourceChanged` even in byte-identical files. Pairing now uses
+  `(test_fn, zero-based ordinal)` via a private replay-time
+  disambiguator on `ObservedFact`; the `Fact` enum, JSONL schema, and
+  `fact_id` format are byte-stable. Blast radius across the ripgrep
+  pilot corpus before this fix: 80.7% of `TestAssertion` fact_ids
+  (667/827) were subject to misclassification.
+  (2) Added a SPEC §5 byte-identical-file structural guardrail in
+  `Replay::run_inner` step 3: when a fact's source path is
+  byte-identical between T₀ and `commit_sha`, every fact at that path
+  classifies `Valid` without invoking per-fact matching, symbol
+  resolution, rename detection, or whitespace/comment diffing.
+  Defense-in-depth: catches per-fact-matcher ambiguity for all five
+  fact kinds (including `DocClaim` on byte-identical markdown), and
+  structurally covers the lone `FunctionSignature::is_hidden` outlier
+  from the pre-merge sample without chasing its per-fact root cause.
+  `sample-e96c9fe.csv` was drawn against the buggy corpus and is
+  diagnostic-only; the SPEC §9.1 acceptance gate must be re-run on a
+  freshly regenerated corpus drawn with a NEW seed.
+
 ### Added
 
 - **ProvBench labeler — `spotcheck --seed <u64>` (2026-05-12).** The

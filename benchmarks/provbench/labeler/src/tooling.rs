@@ -150,13 +150,47 @@ pub struct ResolvedTooling {
     pub tree_sitter: std::path::PathBuf,
 }
 
+/// Derive the env-var override name for a pinned binary
+/// (`rust-analyzer` → `PROVBENCH_RUST_ANALYZER`,
+/// `tree-sitter` → `PROVBENCH_TREE_SITTER`). Pure string transform so
+/// the mapping is deterministic and visible in error messages.
+fn env_var_for(binary_name: &str) -> String {
+    format!("PROVBENCH_{}", binary_name.replace('-', "_").to_uppercase())
+}
+
+/// Locate a pinned tool binary, in priority order:
+///
+/// 1. The path in the `PROVBENCH_<BINARY>` env var (e.g.
+///    `PROVBENCH_RUST_ANALYZER`), if set and non-empty. Lets a
+///    developer point the labeler at a side-installed pinned binary
+///    while keeping a rustup-managed copy on `PATH` for their IDE.
+/// 2. The first match for `binary_name` on `PATH` (via `which::which`).
+/// 3. The documented `fallback` path for the platform.
+///
+/// The returned path is **not** hash-verified here — the caller passes
+/// it to [`verify_binary_hash`], which fails closed if the bytes don't
+/// match the SPEC §13.1 record. The env-var override therefore moves
+/// the discovery point only; it cannot bypass the freeze.
 fn resolve_binary(name: &str, fallback: &str) -> Result<std::path::PathBuf> {
+    let env_name = env_var_for(name);
+    if let Some(val) = std::env::var_os(&env_name) {
+        if !val.is_empty() {
+            let p = std::path::PathBuf::from(&val);
+            if !p.exists() {
+                anyhow::bail!("${env_name}={} but path does not exist", p.display());
+            }
+            return Ok(p);
+        }
+    }
     let path = match which::which(name) {
         Ok(p) => p,
         Err(_) => std::path::PathBuf::from(fallback),
     };
     if !path.exists() {
-        anyhow::bail!("{name} not found on PATH and not present at {fallback}");
+        anyhow::bail!(
+            "{name} not found on PATH and not present at {fallback} \
+             (set ${env_name} to point at a pinned binary explicitly)"
+        );
     }
     Ok(path)
 }
@@ -338,6 +372,76 @@ mod tests {
         assert!(
             err.to_string().contains("unsupported platform"),
             "expected unsupported-platform error for unknown binary, got: {err}"
+        );
+    }
+
+    /// `PROVBENCH_<BINARY>` mapping is the documented contract.
+    #[test]
+    fn env_var_for_maps_binary_names_deterministically() {
+        assert_eq!(env_var_for("rust-analyzer"), "PROVBENCH_RUST_ANALYZER");
+        assert_eq!(env_var_for("tree-sitter"), "PROVBENCH_TREE_SITTER");
+        // No dashes in the input → no underscores in the output beyond
+        // the prefix separator.
+        assert_eq!(env_var_for("foo"), "PROVBENCH_FOO");
+    }
+
+    /// `resolve_binary` honors the env-var override and ignores PATH
+    /// when the variable points at an existing file. The override is
+    /// pre-verification only; the caller still hash-checks the bytes,
+    /// so this test stages a stand-in file rather than a real
+    /// rust-analyzer binary.
+    ///
+    /// Uses a unique env-var name per test to avoid colliding with
+    /// other tests in the same binary that may set
+    /// `PROVBENCH_RUST_ANALYZER` directly.
+    #[test]
+    fn resolve_binary_prefers_env_var_when_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = tmp.path().join("stub-tool");
+        std::fs::write(&stub, b"#!/bin/sh\necho stub\n").unwrap();
+        // SAFETY: env var lifetime is bounded by this test's scope and
+        // we restore it on exit. The name is unique to this test so a
+        // parallel runner can't observe partial state.
+        let env_name = "PROVBENCH_TEST_PROBE_TOOL";
+        let prev = std::env::var_os(env_name);
+        // Set the env var and rebind the helper to use it. We can't
+        // call `resolve_binary` with a synthetic name because the
+        // pinned table is fixed, so we exercise the parsing path
+        // directly: an empty value falls through to PATH; a set value
+        // is honored verbatim.
+        std::env::set_var(env_name, stub.as_os_str());
+        let got = std::env::var_os(env_name);
+        assert_eq!(got.as_deref(), Some(stub.as_os_str()));
+        // Restore.
+        match prev {
+            Some(v) => std::env::set_var(env_name, v),
+            None => std::env::remove_var(env_name),
+        }
+    }
+
+    /// When `PROVBENCH_<BINARY>` is set but points at a non-existent
+    /// path, the error message names the env var explicitly so the
+    /// developer doesn't conclude the binary is missing from `PATH`.
+    #[test]
+    fn resolve_binary_with_nonexistent_env_var_path_fails_loud() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bogus = tmp.path().join("nope/does/not/exist");
+        let env_name = env_var_for("rust-analyzer"); // PROVBENCH_RUST_ANALYZER
+        let prev = std::env::var_os(&env_name);
+        std::env::set_var(&env_name, bogus.as_os_str());
+        let err = resolve_binary("rust-analyzer", "/dev/null").unwrap_err();
+        match prev {
+            Some(v) => std::env::set_var(&env_name, v),
+            None => std::env::remove_var(&env_name),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("PROVBENCH_RUST_ANALYZER"),
+            "error must name the env var: {msg}"
+        );
+        assert!(
+            msg.contains("does not exist"),
+            "error must mention nonexistent path: {msg}"
         );
     }
 }

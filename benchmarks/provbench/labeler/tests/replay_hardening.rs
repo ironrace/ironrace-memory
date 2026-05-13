@@ -873,3 +873,299 @@ fn hp3_4b_rename_through_production_classify_path() {
         c1_row.label
     );
 }
+
+// ── HP4-1: multi-assertion TestAssertion does NOT collapse to assertion #1 ───
+//
+// Pass 4 root cause: `match_post::matching_post_fact`'s `Fact::TestAssertion`
+// arm calls `find_map(|f| q == *test_fn)`, which returns the FIRST assertion
+// in the post-commit test fn for every T₀ fact in that fn. With N assertions
+// in a single `#[test]` body, assertions 2..N always hash-mismatch against
+// assertion #1's hash and route to `StaleSourceChanged`. See findings doc:
+// `benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md`.
+//
+// This test builds a 2-commit repo where T₀ has ONE test fn with TWO
+// distinct assertions, and C1 modifies the SAME file *outside* that test fn
+// (so Task 5's byte-identical fast-path cannot mask the matcher bug). After
+// Task 4, both assertion rows at C1 must classify as `Valid` because the
+// assertion bytes inside the test fn are unchanged.
+#[test]
+fn hp4_test_assertion_multi_assertion_matches_each_assertion_by_ordinal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path();
+    git(p, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(p.join("src")).unwrap();
+    std::fs::write(
+        p.join("Cargo.toml"),
+        b"[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    // T₀: exactly ONE #[test] fn with TWO distinct assertions.
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"#[test]\nfn parses_two_cases() {\n    assert!(1 + 1 == 2);\n    assert_eq!(2 + 2, 4);\n}\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "init", "2025-01-01T00:00:00Z");
+    let t0 = rev_parse_head(p);
+
+    // C1: SAME file, modified OUTSIDE `parses_two_cases` (appends a helper).
+    // The two assertion-macro bytes inside the test fn are unchanged.
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"#[test]\nfn parses_two_cases() {\n    assert!(1 + 1 == 2);\n    assert_eq!(2 + 2, 4);\n}\n\nfn _unused_helper() -> u32 { 0 }\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "add helper", "2025-01-02T00:00:00Z");
+    let c1 = rev_parse_head(p);
+
+    let rows = Replay::run(&ReplayConfig {
+        repo_path: p.to_path_buf(),
+        t0_sha: t0.clone(),
+        skip_symbol_resolution: true,
+    })
+    .unwrap();
+
+    // Filter to C1 rows for the multi-assertion test fn only.
+    let c1_assertions: Vec<&FactAtCommit> = rows
+        .iter()
+        .filter(|r| r.commit_sha == c1)
+        .filter(|r| {
+            r.fact_id
+                .starts_with("TestAssertion::parses_two_cases::src/lib.rs::")
+        })
+        .collect();
+
+    // Vacuous-pass guard: extraction must emit EXACTLY two TestAssertion
+    // facts for `parses_two_cases` (one per `assert!` invocation). A
+    // regression that produced zero or one would otherwise pass the
+    // Valid-label check below trivially.
+    assert_eq!(
+        c1_assertions.len(),
+        2,
+        "expected 2 TestAssertion rows for parses_two_cases at C1, got {}: {c1_assertions:#?}",
+        c1_assertions.len()
+    );
+
+    // Both assertion bytes are unchanged; both rows must classify Valid.
+    // On the buggy HEAD (pre-Task-4): assertion #1 → Valid, assertion #2
+    // → StaleSourceChanged because match_post returned assertion #1's hash
+    // for both T₀ facts.
+    for row in &c1_assertions {
+        assert_eq!(
+            row.label,
+            Label::Valid,
+            "every assertion in an unchanged test fn must classify Valid; got {row:?}"
+        );
+    }
+}
+
+// ── HP4-2: byte-identical source file ⇒ Valid for every fact at that path ───
+//
+// SPEC §5 structural invariant: when a fact's source path is byte-identical
+// between T₀ and the replay commit, every fact anchored in that path is
+// `Valid`. This test locks the invariant across ALL FIVE fact kinds
+// (FunctionSignature, Field, PublicSymbol, DocClaim, TestAssertion) by
+// constructing a fixture where each kind is exercised at T₀ and the C1
+// commit touches only an *unrelated* file (so both the Rust source AND
+// the markdown source are byte-identical at C1).
+//
+// The fixture deliberately includes structurally-ambiguous same-key
+// `FunctionSignature` facts (two `impl` blocks both defining `fn shared`)
+// — the per-fact matcher's first-match behavior can mis-pair these even
+// today, which is exactly the class of bug Task 5's structural guardrail
+// is designed to prevent. The test fails on HEAD for at least one
+// ambiguous `FunctionSignature::shared` row AND for non-first
+// `TestAssertion` rows; it must fully pass after Task 5 (and Task 4 for
+// the multi-assertion subset).
+#[test]
+fn hp4_byte_identical_source_file_forces_all_path_facts_valid() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path();
+    git(p, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(p.join("src")).unwrap();
+    std::fs::write(
+        p.join("Cargo.toml"),
+        b"[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    // T₀ `src/lib.rs` exercises FunctionSignature (two ambiguous `shared`),
+    // Field (`pub struct S`), PublicSymbol (`pub fn solo`), and
+    // TestAssertion (two distinct asserts in #[test] fn t).
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"pub struct A;\n\
+          pub struct B;\n\
+          impl A { pub fn shared(&self) -> u32 { 1 } }\n\
+          impl B { pub fn shared(&self) -> u32 { 2 } }\n\
+          \n\
+          pub struct S { pub x: u32, pub y: u32 }\n\
+          pub fn solo() {}\n\
+          \n\
+          #[test]\n\
+          fn t() {\n\
+              assert!(1 == 1);\n\
+              assert_eq!(2, 2);\n\
+          }\n",
+    )
+    .unwrap();
+    // T₀ README mentions `solo` so the DocClaim extractor anchors to
+    // PublicSymbol::solo and emits a Fact::DocClaim.
+    std::fs::write(
+        p.join("README.md"),
+        b"Use the `solo` helper to do nothing.\n",
+    )
+    .unwrap();
+    // Add an unrelated file we will modify at C1 so neither `src/lib.rs`
+    // nor `README.md` changes.
+    std::fs::write(p.join("OTHER.md"), b"unrelated content v1\n").unwrap();
+    commit_all_with_date(p, "init", "2025-01-01T00:00:00Z");
+    let t0 = rev_parse_head(p);
+
+    // C1: modify ONLY OTHER.md. src/lib.rs and README.md are byte-identical
+    // between T₀ and C1.
+    std::fs::write(p.join("OTHER.md"), b"unrelated content v2\n").unwrap();
+    commit_all_with_date(p, "tweak unrelated", "2025-01-02T00:00:00Z");
+    let c1 = rev_parse_head(p);
+
+    let rows = Replay::run(&ReplayConfig {
+        repo_path: p.to_path_buf(),
+        t0_sha: t0.clone(),
+        skip_symbol_resolution: true,
+    })
+    .unwrap();
+
+    // Vacuous-pass guard: at least one row of each of the five fact kinds
+    // must be present in the C1 output. Without this, a future regression
+    // that silently dropped a fact kind would pass the "all rows Valid"
+    // assertion below trivially.
+    let c1_rows: Vec<&FactAtCommit> = rows.iter().filter(|r| r.commit_sha == c1).collect();
+    let kinds = [
+        "FunctionSignature::",
+        "Field::",
+        "PublicSymbol::",
+        "DocClaim::",
+        "TestAssertion::",
+    ];
+    for kind in kinds {
+        assert!(
+            c1_rows.iter().any(|r| r.fact_id.starts_with(kind)),
+            "expected at least one C1 row of kind `{kind}` (vacuous-pass guard); rows: {c1_rows:#?}"
+        );
+    }
+
+    // Every C1 row anchored in src/lib.rs OR README.md must be Valid
+    // (the structural SPEC §5 invariant). OTHER.md emits no facts so the
+    // filter below is exhaustive for fact-source paths in this fixture.
+    let mut violations: Vec<&FactAtCommit> = Vec::new();
+    for row in &c1_rows {
+        if (row.fact_id.contains("::src/lib.rs::") || row.fact_id.contains("::README.md::"))
+            && row.label != Label::Valid
+        {
+            violations.push(row);
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "SPEC §5 invariant: byte-identical file ⇒ Valid for every fact at that path; \
+         found {} violation(s): {violations:#?}",
+        violations.len()
+    );
+}
+
+// ── HP4-3: modified assertion at same ordinal classifies StaleSourceChanged ─
+//
+// Locks in the ordinal-pairing contract from Task 4. Without ordinal
+// pairing (e.g. a pure content-hash matcher), assertion #2 (whose bytes
+// changed) would find no exact-hash match in the post-commit test fn,
+// `matching_post_fact` would return `None`, and upstream routing would
+// produce `NeedsRevalidation` (or `StaleSourceDeleted`) rather than the
+// correct `StaleSourceChanged`. Ordinal pairing returns the post-commit
+// assertion at the SAME index, whose hash differs from the T₀ hash,
+// driving `structurally_classifiable = true` → `StaleSourceChanged`.
+//
+// Pre-Task-4: assertion #1 → Valid (find_map happens to land on the same
+// fact); assertion #2 → StaleSourceChanged by accident (find_map returns
+// post-#1 whose hash differs from T₀ #2's hash); assertion #3 →
+// StaleSourceChanged WRONGLY (find_map returns post-#1 whose hash differs
+// from T₀ #3's hash, but #3's bytes are unchanged in this fixture).
+//
+// Post-Task-4: #1 Valid, #2 StaleSourceChanged, #3 Valid.
+#[test]
+fn hp4_test_assertion_body_change_same_ordinal_is_stale_source_changed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path();
+    git(p, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(p.join("src")).unwrap();
+    std::fs::write(
+        p.join("Cargo.toml"),
+        b"[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    // T₀: ONE #[test] fn with THREE distinct assertions (distinct content
+    // hashes). The line numbers in span are 3, 4, 5 inside the test body.
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"#[test]\nfn t() {\n    assert!(1 == 1);\n    assert_eq!(2, 2);\n    assert_ne!(3, 4);\n}\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "init", "2025-01-01T00:00:00Z");
+    let t0 = rev_parse_head(p);
+
+    // C1: modify ONLY the bytes of assertion #2. It remains at position #2
+    // in the test fn. File is NOT byte-identical, so Task 5's fast-path
+    // does not mask the matcher behavior.
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"#[test]\nfn t() {\n    assert!(1 == 1);\n    assert_eq!(2, 22);\n    assert_ne!(3, 4);\n}\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "tweak assertion #2", "2025-01-02T00:00:00Z");
+    let c1 = rev_parse_head(p);
+
+    let rows = Replay::run(&ReplayConfig {
+        repo_path: p.to_path_buf(),
+        t0_sha: t0.clone(),
+        skip_symbol_resolution: true,
+    })
+    .unwrap();
+
+    // Collect C1 rows for test fn `t`, sorted by the line component of the
+    // fact_id so we can address them by ordinal (#1, #2, #3 = lines 3, 4, 5).
+    let mut c1_t_rows: Vec<&FactAtCommit> = rows
+        .iter()
+        .filter(|r| r.commit_sha == c1)
+        .filter(|r| r.fact_id.starts_with("TestAssertion::t::src/lib.rs::"))
+        .collect();
+    c1_t_rows.sort_by_key(|r| {
+        r.fact_id
+            .rsplit("::")
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0)
+    });
+    assert_eq!(
+        c1_t_rows.len(),
+        3,
+        "expected 3 TestAssertion rows for `t` at C1, got {}: {c1_t_rows:#?}",
+        c1_t_rows.len()
+    );
+
+    assert_eq!(
+        c1_t_rows[0].label,
+        Label::Valid,
+        "assertion #1 (unchanged) must classify Valid; got {:?}",
+        c1_t_rows[0]
+    );
+    assert_eq!(
+        c1_t_rows[1].label,
+        Label::StaleSourceChanged,
+        "assertion #2 (bytes modified) must classify StaleSourceChanged; got {:?}",
+        c1_t_rows[1]
+    );
+    assert_eq!(
+        c1_t_rows[2].label,
+        Label::Valid,
+        "assertion #3 (unchanged) must classify Valid; got {:?}",
+        c1_t_rows[2]
+    );
+}

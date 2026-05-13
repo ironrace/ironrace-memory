@@ -174,6 +174,16 @@ In rough priority order:
    pinpointed and fix-tested independently to avoid a hidden
    regression class.
 
+   **Status after pass 4 (2026-05-13):** consciously deferred. The
+   pass-4 byte-identical-file fast path (item 2) structurally masks
+   the symptom for any unchanged file, including this one. The
+   underlying per-fact matcher root cause has NOT been investigated;
+   it remains an open follow-up for pass 5 (alongside the
+   insertion-above ordinal-shift TestAssertion limitation). A targeted
+   pass-5 RED test should reproduce the hash mismatch with the
+   fast-path disabled in a test-only configuration so the matcher bug
+   can be pinpointed without relying on the guardrail.
+
 After fixes (1)+(2), regenerate
 `benchmarks/provbench/corpus/ripgrep-af6b6c54-<labeler-sha>.jsonl`,
 draw a fresh stratified sample (new seed) via

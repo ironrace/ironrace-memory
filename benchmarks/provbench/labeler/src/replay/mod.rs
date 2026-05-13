@@ -64,6 +64,14 @@ pub struct Replay;
 struct ObservedFact {
     fact: Fact,
     t0_span_bytes: Vec<u8>,
+    /// Zero-based position of this `Fact::TestAssertion` among same-
+    /// `(source_path, test_fn)` siblings, in tree-sitter extraction
+    /// order. `None` for every other fact kind. Used by
+    /// `match_post::matching_post_fact` to pair T₀ assertion #N with
+    /// post-commit assertion #N inside the same test fn — see SPEC §5
+    /// rationale in
+    /// `benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md`.
+    test_assertion_ordinal: Option<usize>,
 }
 
 impl Replay {
@@ -124,7 +132,15 @@ impl Replay {
         let commits: Vec<CommitRef> = pilot.walk_first_parent()?.collect();
 
         // Extract the fact set at T₀ across every .rs file present at T₀.
+        //
+        // We also stash each fact-source blob's T₀ bytes in `t0_blobs` so
+        // the per-commit step-3 fast-path below can compare them to the
+        // post-commit bytes without re-reading. The map is bounded by the
+        // number of fact-source paths and is tiny relative to the corpus;
+        // see SPEC §5 invariant in
+        // `benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md`.
         let mut facts: Vec<ObservedFact> = Vec::new();
+        let mut t0_blobs: BTreeMap<PathBuf, Vec<u8>> = BTreeMap::new();
         let rust_paths = rust_paths_at(&pilot, &cfg.t0_sha)?;
         let mut facts_so_far: Vec<Fact> = Vec::new();
         for path in &rust_paths {
@@ -151,7 +167,8 @@ impl Replay {
                 );
                 let test_facts: Vec<Fact> =
                     test_assertion::extract(&ast, path, &facts_so_far).collect();
-                push_observed_facts(&mut facts, &mut facts_so_far, &blob, test_facts);
+                push_test_assertion_facts(&mut facts, &mut facts_so_far, &blob, path, test_facts);
+                t0_blobs.insert(path.clone(), blob);
             }
         }
         let rust_dirs = rust_paths
@@ -168,6 +185,7 @@ impl Replay {
                         format!("parse README at {} @ {}", path.display(), cfg.t0_sha)
                     })?;
                 push_observed_facts(&mut facts, &mut facts_so_far, &blob, doc_facts);
+                t0_blobs.insert(path, blob);
             }
         }
 
@@ -212,6 +230,32 @@ impl Replay {
             // ── Step 3: classify each fact ────────────────────────────────────
             for (path, facts_at_path) in &facts_by_path {
                 let post_bytes = cached_blobs.get(path).and_then(|b| b.as_deref());
+
+                // SPEC §5 invariant: an unchanged source file cannot
+                // contain a stale fact. When the blob at `commit_sha`
+                // is byte-identical to its T₀ counterpart, classify
+                // every fact at this path as `Valid` and skip per-fact
+                // matching entirely. The bypass lives at the call site
+                // (not inside `classify_against_commit`) so it is
+                // computed once per `(path, commit)` and visibly
+                // sidesteps `matching_post_fact`, `symbol_exists_in_tree`,
+                // rename detection, and whitespace/comment diffing.
+                // Rationale: benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md.
+                let file_byte_identical = match (post_bytes, t0_blobs.get(path)) {
+                    (Some(p), Some(t)) => p == t.as_slice(),
+                    _ => false,
+                };
+                if file_byte_identical {
+                    for observed in facts_at_path {
+                        rows.push(FactAtCommit {
+                            fact_id: fact_id(&observed.fact),
+                            commit_sha: commit.sha.clone(),
+                            label: Label::Valid,
+                        });
+                    }
+                    continue;
+                }
+
                 let post_ast = post_asts.get(path).and_then(|a| a.as_ref());
                 let t0_names: &HashSet<String> =
                     t0_names_by_path.get(path).unwrap_or(&EMPTY_STRING_SET);
@@ -222,6 +266,7 @@ impl Replay {
                         post_bytes,
                         post_ast,
                         &observed.t0_span_bytes,
+                        observed.test_assertion_ordinal,
                         cfg,
                         commit_index.as_ref(),
                         t0_names,
@@ -253,6 +298,48 @@ fn push_observed_facts(
         facts.push(ObservedFact {
             t0_span_bytes: observed_span_bytes(blob, &fact),
             fact: fact.clone(),
+            test_assertion_ordinal: None,
+        });
+        facts_so_far.push(fact);
+    }
+}
+
+/// Append `Fact::TestAssertion` items to `facts`, computing each fact's
+/// zero-based ordinal among same-`(source_path, test_fn)` siblings in
+/// the order they arrive from `test_assertion::extract`.
+///
+/// The ordinal is a structural disambiguator carried only on the
+/// private [`ObservedFact`]; it does NOT appear in the serialized
+/// [`Fact`] or `fact_id` and therefore does not affect the corpus
+/// schema. The counter map is keyed by `(path, test_fn)` so a future
+/// refactor that batches facts from multiple source paths into a
+/// single call cannot silently alias ordinals across files — the
+/// contract is enforced by the key, not by the caller's invocation
+/// pattern.
+fn push_test_assertion_facts(
+    facts: &mut Vec<ObservedFact>,
+    facts_so_far: &mut Vec<Fact>,
+    blob: &[u8],
+    path: &Path,
+    extracted: impl IntoIterator<Item = Fact>,
+) {
+    let mut counters: HashMap<(PathBuf, String), usize> = HashMap::new();
+    for fact in extracted {
+        let ordinal = match &fact {
+            Fact::TestAssertion { test_fn, .. } => {
+                let counter = counters
+                    .entry((path.to_path_buf(), test_fn.clone()))
+                    .or_insert(0);
+                let n = *counter;
+                *counter += 1;
+                Some(n)
+            }
+            _ => None,
+        };
+        facts.push(ObservedFact {
+            t0_span_bytes: observed_span_bytes(blob, &fact),
+            fact: fact.clone(),
+            test_assertion_ordinal: ordinal,
         });
         facts_so_far.push(fact);
     }
@@ -511,6 +598,7 @@ fn classify_against_commit(
     post_blob: Option<&[u8]>,
     post_ast: Option<&RustAst>,
     t0_span_bytes: &[u8],
+    test_assertion_ordinal: Option<usize>,
     cfg: &ReplayConfig,
     commit_index: Option<&CommitSymbolIndex>,
     t0_qualified_names: &HashSet<String>,
@@ -524,8 +612,14 @@ fn classify_against_commit(
             let observed_hash = observed_hash_for(fact);
 
             // Search the post-commit file for the same fact kind/key.
-            let post_fact =
-                match_post::matching_post_fact(fact, path, post_bytes, post_ast, commit_sha)?;
+            let post_fact = match_post::matching_post_fact(
+                fact,
+                path,
+                post_bytes,
+                post_ast,
+                test_assertion_ordinal,
+                commit_sha,
+            )?;
 
             match post_fact {
                 Some((post_span, post_hash)) => {

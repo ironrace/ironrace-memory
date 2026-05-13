@@ -118,6 +118,52 @@ Phase 0b is accepted iff:
   A claim that moves to a different line or section in a later commit is
   still matched correctly as long as the qualified name is preserved.
 
+- **TestAssertion matching is disambiguated by ordinal within `test_fn`.**
+  `test_assertion::extract` emits one `Fact::TestAssertion` per
+  `assert!`/`assert_eq!`/`assert_ne!` invocation, so a test fn with N
+  assertions produces N facts at T₀. Post-commit pairing is by
+  `(test_fn, zero-based ordinal in tree-sitter walk order)` — not by
+  `test_fn` alone — so a body-modified assertion at the same ordinal
+  classifies `StaleSourceChanged` and unchanged siblings stay `Valid`.
+  When the post-commit test fn has fewer assertions than the T₀
+  ordinal (deleted-tail), `matching_post_fact` returns `None`: with
+  `commit_index` present the row routes to `NeedsRevalidation` if
+  the test fn name still exists in the tree, `StaleSourceDeleted` if
+  it is gone wholesale.
+
+  **Known limitation:** ordinal pairing is fragile to "insertion above"
+  edits. If a future commit inserts a new assertion *before* an
+  existing one in the same `test_fn`, every subsequent T₀ assertion's
+  ordinal mismatches its post-commit counterpart by one, causing
+  unchanged assertions at the new index to misclassify as
+  `StaleSourceChanged` (and the inserted assertion to be invisible to
+  any T₀ fact). A hybrid neighborhood/hash matcher is the pass-5+ path
+  for this edge case; pass-4 ships pure ordinal because the dominant
+  failure mode the labeler must catch is "assertion #N's text changed",
+  which ordinal pairing handles correctly. See
+  `benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md`
+  for the full SPEC §5 analysis that motivated the choice.
+
+- **Byte-identical source files short-circuit to `Valid`.** SPEC §5
+  structural invariant: when a fact's source path is byte-identical
+  between T₀ and the replay commit, the labeler classifies every fact
+  at that path as `Valid` before per-fact matching is invoked. The
+  guardrail covers all five fact kinds (including `DocClaim` on
+  byte-identical markdown) and is computed once per `(path, commit)`,
+  visibly bypassing `matching_post_fact`,
+  `CommitSymbolIndex::symbol_exists_in_tree`, rename detection, and
+  whitespace/comment diffing.
+
+  **Defense-in-depth rationale:** per-fact matchers should
+  independently uphold "unchanged file ⇒ Valid for every fact at that
+  path", but a structural guardrail makes the invariant a property of
+  the labeler rather than a property only of well-behaved matchers.
+  Pass-3's spot-check surfaced one such matcher-correctness gap as a
+  `FunctionSignature::is_hidden` byte-identical violation; the
+  guardrail covers that class structurally without requiring each
+  matcher to be perfect. See
+  `benchmarks/provbench/spotcheck/2026-05-12-post-pass3-findings.md`.
+
 - **Spot-check seed is configurable but defaults are deterministic.**
   The stratified sampler is seeded by `DEFAULT_SEED`
   (`0xC0DEBABEDEADBEEF`) unless `--seed <u64>` is supplied. Re-running
@@ -137,6 +183,50 @@ an error and aborts the run:
   (or at the documented fallback) does not match the SHA-256 in
   `PINNED_BINARIES` for the current platform. Distros patch — version
   strings are not enough. Replay itself no longer calls rust-analyzer.
+
+  **Local-dev override:** if your rustup-managed `rust-analyzer` drifts
+  from the SPEC §13.1 pin (rustup auto-updates routinely move it),
+  install the pinned `1.85.0 (4d91de4e 2025-02-17)` binary
+  side-by-side and point the labeler at it via the
+  `PROVBENCH_RUST_ANALYZER` env var. The matching recipe depends on
+  which row of `PINNED_BINARIES` your host falls under, because the
+  two pinned hashes correspond to **different upstream artifacts**
+  (rustup component on macOS, GitHub release `.gz` on Linux).
+
+  **macOS aarch64** — pinned hash is the rustup
+  `1.85.0-aarch64-apple-darwin` component. The GitHub release `.gz`
+  does NOT match this hash; use rustup:
+
+  ```bash
+  rustup toolchain install 1.85.0 --component rust-analyzer
+  RA=$(rustup which --toolchain 1.85.0 rust-analyzer)
+  shasum -a 256 "$RA"   # must print f85740bf…0e1f9aee
+  export PROVBENCH_RUST_ANALYZER="$RA"
+  ```
+
+  Installing the `1.85.0` toolchain leaves your active toolchain
+  untouched, so your IDE keeps using whatever rust-analyzer it had.
+
+  **Linux x86_64** — pinned hash is the decompressed
+  `rust-analyzer-x86_64-unknown-linux-gnu.gz` from the upstream
+  `2025-02-17` GitHub release; rustup builds for Linux currently
+  differ. Use the GitHub artifact:
+
+  ```bash
+  curl -L -o /tmp/ra.gz \
+    https://github.com/rust-lang/rust-analyzer/releases/download/2025-02-17/rust-analyzer-x86_64-unknown-linux-gnu.gz
+  gunzip -f /tmp/ra.gz && chmod +x /tmp/ra
+  shasum -a 256 /tmp/ra   # must print e7a85d27…65f7410
+  mkdir -p $HOME/.local/provbench && mv /tmp/ra $HOME/.local/provbench/rust-analyzer
+  export PROVBENCH_RUST_ANALYZER=$HOME/.local/provbench/rust-analyzer
+  ```
+
+  Resolution priority for both overrides
+  (`PROVBENCH_RUST_ANALYZER`, `PROVBENCH_TREE_SITTER`): env var →
+  `PATH` → documented fallback. The override moves the discovery
+  point only; the resolved binary's bytes are still hash-checked
+  against the SPEC §13.1 freeze record. There is no way to bypass
+  the freeze via this knob.
 - **Invalid UTF-8 in markdown.** The doc-claim extractor refuses to
   silently produce zero facts on a corrupted README; it returns `Err`
   with the offending file path so reviewers can locate the bad blob.
