@@ -1169,3 +1169,565 @@ fn hp4_test_assertion_body_change_same_ordinal_is_stale_source_changed() {
         c1_t_rows[2]
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pass-5 regressions
+//
+// Three disagreement clusters from the post-pass-4 SPEC §9.1 gate FAIL
+// (sample-eaf82d2.csv, point estimate 93.00% / Wilson 88.59%):
+//
+//   E — cfg/impl-ambiguous FunctionSignature multi-def: find_map returns the
+//       wrong same-qualified-name survivor when the T₀ fact's specific
+//       cfg/impl variant is deleted. Mirror pass-4's TestAssertion ordinal
+//       disambiguator but key on (qualified_name, cfg_set, impl_receiver_type)
+//       with an ordinal tiebreaker.
+//
+//   G — PublicSymbol pub-use re-export form change: T₀ `pub fn X` → C1
+//       `pub use … X` hashes mismatch but the public surface is preserved.
+//       Bare pub-use re-exports + alias re-exports must classify Valid;
+//       restricted-visibility uses (pub(crate) use, etc.) MUST remain
+//       narrowed → StaleSourceChanged (pass-3 semantics preserved).
+//
+//   F — Field-out-of-named-container: field leaf appears in same file but
+//       inside a different struct/variant. File-local check routes to
+//       NeedsRevalidation; cross-file leaf tracking is explicitly out of
+//       scope per the pass-5 final plan.
+//
+// Full evidence + per-cluster row tables:
+// benchmarks/provbench/spotcheck/2026-05-13-post-pass4-findings.md (merged
+// to main via PR #36).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── HP5-1: FunctionSignature cfg-variant deletion routes to NeedsRevalidation
+
+/// Pass-5 Cluster E: T₀ has THREE same-qualified-name `pub fn load(...)`
+/// definitions guarded by distinct `#[cfg(...)]` attributes (unix, windows,
+/// wasm32 placeholder). C1 deletes ONLY the wasm32 placeholder; the unix
+/// and windows variants survive byte-identically. On the pre-fix labeler
+/// the wasm32 row mis-pairs against the unix variant via `find_map` and
+/// classifies StaleSourceChanged. After Task 2, the disambiguator
+/// `(cfg_set, impl_receiver=None)` for the T₀ wasm32 fact finds no match
+/// in the post AST → `matching_post_fact` returns `Ok(None)` → upstream
+/// `commit_index.symbol_exists_in_tree` sees the qualified name surviving
+/// in the unix/windows variants → routes to `NeedsRevalidation`.
+///
+/// Runs with `skip_symbol_resolution=false` so the commit_index path is
+/// exercised; this is the production code path Cluster E hits.
+#[test]
+fn hp5_function_signature_cfg_variant_deletion_routes_needs_revalidation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path();
+    git(p, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(p.join("src")).unwrap();
+    std::fs::write(
+        p.join("Cargo.toml"),
+        b"[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    // T₀: three cfg-gated `pub fn load` definitions, all sharing
+    // qualified_name = "load".
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"#[cfg(unix)]\npub fn load(p: &str) -> u32 { 1 }\n\
+          #[cfg(windows)]\npub fn load(p: &str) -> u32 { 2 }\n\
+          #[cfg(not(any(unix, windows)))]\npub fn load(p: &str) -> u32 { 3 }\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "init", "2025-01-01T00:00:00Z");
+    let t0 = rev_parse_head(p);
+
+    // C1: delete ONLY the wasm32 placeholder. unix and windows variants
+    // are byte-identical at C1; file as a whole is NOT byte-identical
+    // (so the pass-4 byte-identical fast-path doesn't mask the bug).
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"#[cfg(unix)]\npub fn load(p: &str) -> u32 { 1 }\n\
+          #[cfg(windows)]\npub fn load(p: &str) -> u32 { 2 }\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "drop wasm32 placeholder", "2025-01-02T00:00:00Z");
+    let c1 = rev_parse_head(p);
+
+    // Run with skip_symbol_resolution = false so commit_index engages.
+    // Use Replay::run_with_resolver (the production code path) with a
+    // null resolver — pass-3's hp3_2b proved this exercises the
+    // commit-tree-local index without an RA dependency.
+    struct NullResolver;
+    impl SymbolResolver for NullResolver {
+        fn resolve(&mut self, _name: &str) -> anyhow::Result<Option<ResolvedLocation>> {
+            Ok(None)
+        }
+    }
+    let cfg = ReplayConfig {
+        repo_path: p.to_path_buf(),
+        t0_sha: t0.clone(),
+        skip_symbol_resolution: false,
+    };
+    let rows = Replay::run_with_resolver(&cfg, Some(Box::new(NullResolver))).unwrap();
+
+    // Vacuous-pass guard: T₀ extraction must produce THREE
+    // FunctionSignature::load rows (one per cfg variant).
+    let t0_load_rows: Vec<&FactAtCommit> = rows
+        .iter()
+        .filter(|r| r.commit_sha == c1)
+        .filter(|r| r.fact_id.starts_with("FunctionSignature::load::src/lib.rs::"))
+        .collect();
+    assert_eq!(
+        t0_load_rows.len(),
+        3,
+        "expected 3 FunctionSignature::load rows at C1 (one per cfg variant); got {}: {t0_load_rows:#?}",
+        t0_load_rows.len(),
+    );
+
+    // The wasm32 variant's T₀ line is the third `pub fn load` declaration,
+    // emitted at the line where `#[cfg(not(any(unix, windows)))]` starts.
+    // In the T₀ fixture above that line is 5. We identify the wasm32 row
+    // by its line component.
+    let wasm32_row = t0_load_rows
+        .iter()
+        .find(|r| r.fact_id.ends_with("::5"))
+        .expect("wasm32 placeholder row at line 5 missing");
+    assert_eq!(
+        wasm32_row.label,
+        Label::NeedsRevalidation,
+        "wasm32-cfg `load` deleted while unix/windows survivors exist must \
+         classify NeedsRevalidation; got {:?}",
+        wasm32_row.label
+    );
+
+    // The unix and windows variants are byte-identical at C1 so they
+    // must classify Valid (file changed → fast-path doesn't apply, so
+    // the disambiguator's exact-match path returns the same span+hash).
+    for line in ["1", "3"] {
+        let suffix = format!("::{line}");
+        let row = t0_load_rows
+            .iter()
+            .find(|r| r.fact_id.ends_with(&suffix))
+            .unwrap_or_else(|| panic!("missing FunctionSignature::load row at line {line}"));
+        assert_eq!(
+            row.label,
+            Label::Valid,
+            "unchanged cfg variant at line {line} must classify Valid; got {:?}",
+            row.label
+        );
+    }
+}
+
+// ── HP5-2: FunctionSignature impl-receiver disambiguates same method name ───
+
+/// Pass-5 Cluster E: T₀ has `impl A { pub fn shared() -> u32 { 1 } }` and
+/// `impl B { pub fn shared() -> u32 { 2 } }`. Both extract to
+/// `qualified_name = "shared"` because the current extractor module-
+/// qualifies functions but does NOT include impl-receiver context. C1
+/// changes the SIGNATURE of `impl A::shared` (return type → `-> u64`) —
+/// NOT the body — so the bytes inside the FunctionSignature span
+/// (which stops before the body brace per `function_signature.rs:97-107`)
+/// produce a hash mismatch. `impl B::shared` is unchanged.
+///
+/// On the pre-fix labeler, find_map returns the first `shared` it sees
+/// at C1 — the changed impl-A signature — for BOTH T₀ facts, mis-pairing
+/// impl B with A's new hash → both flagged stale.
+///
+/// After Task 2, the disambiguator `(cfg_set={}, impl_receiver=Some("A"))`
+/// for T₀ fact #1 matches only the C1 impl-A signature → hash mismatch
+/// → StaleSourceChanged (correct). The disambiguator
+/// `(cfg_set={}, impl_receiver=Some("B"))` for T₀ fact #2 matches only
+/// the C1 impl-B signature → hash unchanged → Valid (correct).
+#[test]
+fn hp5_function_signature_impl_receiver_disambiguates_same_method_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path();
+    git(p, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(p.join("src")).unwrap();
+    std::fs::write(
+        p.join("Cargo.toml"),
+        b"[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    // T₀: two `impl` blocks each with `pub fn shared() -> u32`.
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"pub struct A;\npub struct B;\n\
+          impl A {\n    pub fn shared(&self) -> u32 { 1 }\n}\n\
+          impl B {\n    pub fn shared(&self) -> u32 { 2 }\n}\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "init", "2025-01-01T00:00:00Z");
+    let t0 = rev_parse_head(p);
+
+    // C1: change ONLY the signature (return type) of impl A::shared.
+    // Body bytes change as well (literal 1 stays), but the
+    // FunctionSignature span byte_range covers up through the `-> u32`
+    // or `-> u64` token — modifying the return type is what guarantees
+    // the content_hash changes. impl B::shared is unchanged.
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"pub struct A;\npub struct B;\n\
+          impl A {\n    pub fn shared(&self) -> u64 { 1 }\n}\n\
+          impl B {\n    pub fn shared(&self) -> u32 { 2 }\n}\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "widen impl A return", "2025-01-02T00:00:00Z");
+    let c1 = rev_parse_head(p);
+
+    let rows = Replay::run(&ReplayConfig {
+        repo_path: p.to_path_buf(),
+        t0_sha: t0.clone(),
+        skip_symbol_resolution: true,
+    })
+    .unwrap();
+
+    let c1_rows: Vec<&FactAtCommit> = rows
+        .iter()
+        .filter(|r| r.commit_sha == c1)
+        .filter(|r| r.fact_id.starts_with("FunctionSignature::shared::src/lib.rs::"))
+        .collect();
+    assert_eq!(
+        c1_rows.len(),
+        2,
+        "expected 2 FunctionSignature::shared rows (one per impl); got {}: {c1_rows:#?}",
+        c1_rows.len(),
+    );
+
+    // The T₀ impl-A `shared` is at line 4 (line of `impl A {` ... `fn shared`
+    // attribute-or-self span begins). impl-B `shared` is later (line 7-ish).
+    // Sort by the line component to address them as [A, B].
+    let mut sorted: Vec<&FactAtCommit> = c1_rows.clone();
+    sorted.sort_by_key(|r| {
+        r.fact_id
+            .rsplit("::")
+            .next()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0)
+    });
+
+    assert_eq!(
+        sorted[0].label,
+        Label::StaleSourceChanged,
+        "impl A::shared signature changed (return type widened) must classify \
+         StaleSourceChanged; got {:?}",
+        sorted[0]
+    );
+    assert_eq!(
+        sorted[1].label,
+        Label::Valid,
+        "impl B::shared unchanged must classify Valid; got {:?}",
+        sorted[1]
+    );
+}
+
+// ── HP5-3: PublicSymbol pub-use re-export is Valid ──────────────────────────
+
+/// Pass-5 Cluster G: T₀ has `pub fn pattern() {}` at the top level of
+/// `src/lib.rs`. C1 deletes the pub fn and replaces it with
+/// `mod inner; pub use crate::inner::pattern;` (with `mod inner;`
+/// referencing a sibling `src/inner.rs` that defines the actual pub
+/// fn). The public symbol `pattern` is still exported from the crate
+/// top-level via the bare pub-use, but the form changed from a direct
+/// definition to a re-export. `symbol_existence::extract` for
+/// `src/lib.rs` at C1 emits a PublicSymbol with `qualified_name =
+/// "pattern"` from the `pub use` declaration, but its span (the full
+/// use_declaration) hashes differently than T₀'s `pub fn` declaration
+/// span → `StaleSourceChanged` on the pre-fix labeler.
+///
+/// **Fixture note (intentional sibling file):** we use a sibling
+/// `src/inner.rs` rather than `mod inner { pub fn pattern() {} }`
+/// inline because the labeler's bare-name PublicSymbol matching would
+/// otherwise find the nested `pub fn pattern` and return its
+/// `(span, hash)` — which happens to hash identically to T₀'s
+/// top-level `pub fn pattern` because `extract_named_item` spans only
+/// `pub fn name` (no module prefix). That accidental hash-match would
+/// let the test pass on base for the wrong reason. A sibling file
+/// isolates the C1 lib.rs AST so the only `qualified_name = "pattern"`
+/// candidate at that path is the `pub use` itself.
+///
+/// After Task 3, the form-aware lookup detects the bare pub-use form
+/// for the same exported name and returns `(bare_pub_use_post_span,
+/// observed_hash.clone())` → `structural` evaluates `false` → Valid.
+#[test]
+fn hp5_public_symbol_pub_use_reexport_is_valid() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path();
+    git(p, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(p.join("src")).unwrap();
+    std::fs::write(
+        p.join("Cargo.toml"),
+        b"[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    // T₀: pub fn pattern at top level of lib.rs; no sibling file.
+    std::fs::write(p.join("src/lib.rs"), b"pub fn pattern() -> u32 { 1 }\n").unwrap();
+    commit_all_with_date(p, "init", "2025-01-01T00:00:00Z");
+    let t0 = rev_parse_head(p);
+
+    // C1: replace top-level pub fn with `mod inner; pub use ...` and add
+    // a sibling src/inner.rs holding the actual pub fn.
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"mod inner;\npub use crate::inner::pattern;\n",
+    )
+    .unwrap();
+    std::fs::write(p.join("src/inner.rs"), b"pub fn pattern() -> u32 { 1 }\n").unwrap();
+    commit_all_with_date(p, "reexport pattern via pub use", "2025-01-02T00:00:00Z");
+    let c1 = rev_parse_head(p);
+
+    let rows = Replay::run(&ReplayConfig {
+        repo_path: p.to_path_buf(),
+        t0_sha: t0.clone(),
+        skip_symbol_resolution: true,
+    })
+    .unwrap();
+
+    // The T₀ fact's fact_id is anchored at T₀ line 1.
+    let row = rows
+        .iter()
+        .find(|r| r.commit_sha == c1 && r.fact_id == "PublicSymbol::pattern::src/lib.rs::1")
+        .expect("PublicSymbol::pattern T₀ row at C1 missing");
+    assert_eq!(
+        row.label,
+        Label::Valid,
+        "bare `pub use crate::inner::pattern;` preserves the exported \
+         name `pattern` → public-surface continuity → Valid; got {:?}",
+        row.label
+    );
+}
+
+// ── HP5-4: PublicSymbol pub-use alias re-export is Valid ────────────────────
+
+/// Pass-5 Cluster G: same shape as hp5_3 but the re-export renames
+/// via `as`. T₀ has `pub fn pattern() {}` at the top level of lib.rs.
+/// C1 has `mod inner; pub use crate::inner::original_pattern as
+/// pattern;` with `src/inner.rs` defining `pub fn original_pattern`.
+/// The exported name `pattern` is preserved despite the underlying
+/// definition now having a different identifier.
+#[test]
+fn hp5_public_symbol_pub_use_alias_reexport_is_valid() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path();
+    git(p, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(p.join("src")).unwrap();
+    std::fs::write(
+        p.join("Cargo.toml"),
+        b"[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(p.join("src/lib.rs"), b"pub fn pattern() -> u32 { 1 }\n").unwrap();
+    commit_all_with_date(p, "init", "2025-01-01T00:00:00Z");
+    let t0 = rev_parse_head(p);
+
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"mod inner;\npub use crate::inner::original_pattern as pattern;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        p.join("src/inner.rs"),
+        b"pub fn original_pattern() -> u32 { 1 }\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "reexport via alias", "2025-01-02T00:00:00Z");
+    let c1 = rev_parse_head(p);
+
+    let rows = Replay::run(&ReplayConfig {
+        repo_path: p.to_path_buf(),
+        t0_sha: t0.clone(),
+        skip_symbol_resolution: true,
+    })
+    .unwrap();
+
+    let row = rows
+        .iter()
+        .find(|r| r.commit_sha == c1 && r.fact_id == "PublicSymbol::pattern::src/lib.rs::1")
+        .expect("PublicSymbol::pattern T₀ row at C1 missing");
+    assert_eq!(
+        row.label,
+        Label::Valid,
+        "`pub use crate::inner::original_pattern as pattern;` preserves \
+         the exported name `pattern` → Valid; got {:?}",
+        row.label
+    );
+}
+
+// ── HP5-5: Field moved to nested struct routes to NeedsRevalidation ─────────
+
+/// Pass-5 Cluster F: T₀ has `pub struct Config { pub dfa_size_limit:
+/// usize, … }`. C1 restructures into `pub struct Config { pub inner:
+/// ConfigInner } pub struct ConfigInner { pub dfa_size_limit: usize }` —
+/// the field leaf `dfa_size_limit` still exists in the same file but
+/// inside a different parent struct.
+///
+/// The labeler's exact-match `qualified_path = "Config::dfa_size_limit"`
+/// no longer resolves at C1. After Task 4, the file-local helper
+/// `field::same_file_leaf_elsewhere` detects that a Fact::Field with leaf
+/// `dfa_size_limit` exists at a different qualified_path → routes to
+/// NeedsRevalidation (gray area for LLM follow-up review).
+#[test]
+fn hp5_field_leaf_moved_to_nested_struct_routes_needs_revalidation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path();
+    git(p, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(p.join("src")).unwrap();
+    std::fs::write(
+        p.join("Cargo.toml"),
+        b"[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"pub struct Config {\n    pub dfa_size_limit: usize,\n    pub other: u32,\n}\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "init", "2025-01-01T00:00:00Z");
+    let t0 = rev_parse_head(p);
+
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"pub struct Config {\n    pub inner: ConfigInner,\n}\n\
+          pub struct ConfigInner {\n    pub dfa_size_limit: usize,\n    pub other: u32,\n}\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "nest fields into ConfigInner", "2025-01-02T00:00:00Z");
+    let c1 = rev_parse_head(p);
+
+    let rows = Replay::run(&ReplayConfig {
+        repo_path: p.to_path_buf(),
+        t0_sha: t0.clone(),
+        skip_symbol_resolution: true,
+    })
+    .unwrap();
+
+    let row = rows
+        .iter()
+        .find(|r| {
+            r.commit_sha == c1 && r.fact_id.starts_with("Field::Config::dfa_size_limit::")
+        })
+        .expect("Field::Config::dfa_size_limit T₀ row at C1 missing");
+    assert_eq!(
+        row.label,
+        Label::NeedsRevalidation,
+        "field leaf `dfa_size_limit` moved into nested struct ConfigInner \
+         (same file, same leaf, different container) must route \
+         NeedsRevalidation; got {:?}",
+        row.label
+    );
+}
+
+// ── HP5-6: Field moved to enum variant routes to NeedsRevalidation ──────────
+
+/// Pass-5 Cluster F variant: T₀ has `pub struct SinkContext { pub kind:
+/// u32 }`. C1 converts `SinkContext` into a struct-style enum where
+/// each variant carries a `kind` field. The leaf `kind` survives in
+/// same file but only as a per-variant struct field — the
+/// `Field::SinkContext::kind` qualified_path no longer exists as a
+/// top-level struct field.
+#[test]
+fn hp5_field_leaf_moved_to_enum_variant_routes_needs_revalidation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path();
+    git(p, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(p.join("src")).unwrap();
+    std::fs::write(
+        p.join("Cargo.toml"),
+        b"[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"pub struct SinkContext {\n    pub kind: u32,\n    pub other: u32,\n}\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "init", "2025-01-01T00:00:00Z");
+    let t0 = rev_parse_head(p);
+
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"pub enum SinkContext {\n    Match { kind: u32, other: u32 },\n    Context { kind: u32, other: u32 },\n}\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "convert SinkContext to enum", "2025-01-02T00:00:00Z");
+    let c1 = rev_parse_head(p);
+
+    let rows = Replay::run(&ReplayConfig {
+        repo_path: p.to_path_buf(),
+        t0_sha: t0.clone(),
+        skip_symbol_resolution: true,
+    })
+    .unwrap();
+
+    let row = rows
+        .iter()
+        .find(|r| r.commit_sha == c1 && r.fact_id.starts_with("Field::SinkContext::kind::"))
+        .expect("Field::SinkContext::kind T₀ row at C1 missing");
+    assert_eq!(
+        row.label,
+        Label::NeedsRevalidation,
+        "field leaf `kind` moved into enum-variant struct fields (same \
+         file, same leaf, different container kind) must route \
+         NeedsRevalidation; got {:?}",
+        row.label
+    );
+}
+
+// ── HP5-preservation: pub(crate) direct narrowing must remain stale ────────
+
+/// Pass-5 preservation: direct visibility narrowing
+/// `pub fn pattern` → `pub(crate) fn pattern` (same path, same name,
+/// narrowed visibility, no `use`-declaration) must continue to classify
+/// `StaleSourceChanged` via the existing pass-3 narrowing logic. Task 3's
+/// `pub use` form-aware path must NOT over-promote this case to `Valid`.
+///
+/// Note: pass-3 covers same-path-narrowing of named items. Narrowing
+/// via `pub(crate) use` (re-export under restricted visibility) is a
+/// separate case currently classified by the labeler as
+/// `StaleSourceDeleted` or `Valid` depending on whether an underlying
+/// `pub` fn of the same name is found anywhere in the file's mod tree.
+/// That `pub(crate) use` case is structurally distinct from this
+/// preservation test and is explicitly OUT of pass-5 scope.
+///
+/// MUST be GREEN on base `f26483d` and stay GREEN after Tasks 2-4.
+#[test]
+fn hp5_pub_crate_direct_narrowing_is_stale_source_changed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path();
+    git(p, &["init", "--initial-branch=main"]);
+    std::fs::create_dir(p.join("src")).unwrap();
+    std::fs::write(
+        p.join("Cargo.toml"),
+        b"[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(p.join("src/lib.rs"), b"pub fn pattern() -> u32 { 1 }\n").unwrap();
+    commit_all_with_date(p, "init", "2025-01-01T00:00:00Z");
+    let t0 = rev_parse_head(p);
+
+    // C1: narrow `pattern` directly to pub(crate) at the same path.
+    // Pass-3's visibility-narrowing logic handles this case →
+    // StaleSourceChanged.
+    std::fs::write(
+        p.join("src/lib.rs"),
+        b"pub(crate) fn pattern() -> u32 { 1 }\n",
+    )
+    .unwrap();
+    commit_all_with_date(p, "narrow pattern to pub(crate)", "2025-01-02T00:00:00Z");
+    let c1 = rev_parse_head(p);
+
+    let rows = Replay::run(&ReplayConfig {
+        repo_path: p.to_path_buf(),
+        t0_sha: t0.clone(),
+        skip_symbol_resolution: true,
+    })
+    .unwrap();
+
+    let row = rows
+        .iter()
+        .find(|r| r.commit_sha == c1 && r.fact_id == "PublicSymbol::pattern::src/lib.rs::1")
+        .expect("PublicSymbol::pattern T₀ row at C1 missing");
+    assert_eq!(
+        row.label,
+        Label::StaleSourceChanged,
+        "`pub fn pattern` → `pub(crate) fn pattern` is direct visibility \
+         narrowing → must classify StaleSourceChanged (pass-3 contract); \
+         got {:?}",
+        row.label
+    );
+}
