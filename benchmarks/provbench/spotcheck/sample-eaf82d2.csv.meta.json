@@ -1,0 +1,6 @@
+{
+  "corpus": "benchmarks/provbench/corpus/ripgrep-af6b6c54-eaf82d2.jsonl",
+  "seed": 18369548389359944979,
+  "n": 200,
+  "labeler_git_sha": "eaf82d2837101810c03dfc3e12bb334b2b07718d"
+}
