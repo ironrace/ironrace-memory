@@ -1,0 +1,6 @@
+{
+  "corpus": "../corpus/ripgrep-af6b6c54-e96c9fe.jsonl",
+  "seed": 2316867174693863500,
+  "n": 200,
+  "labeler_git_sha": "048ef61bfe8ecaea99e59311db43e76650bcfc59-dirty"
+}
