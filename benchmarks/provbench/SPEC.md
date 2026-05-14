@@ -178,6 +178,7 @@ If any fails: pivot to the engineering contribution ("fact freshness + source-ha
 |---|---|---|---|---|
 | _(pre-freeze)_ | _all_ | initial draft | — | — |
 | 2026-05-13 | §7.1 / §9.3 | First Phase 0c numeric result recorded (subset, 44%). Baseline runner gained skip-and-log on parse failure (commit `0b4d441`); batches 22–270 of the 2026-05-13 run produced under that binary, batches 1–21 under the pre-patch binary. Patch touches error-handling only; prompt + scoring byte-stable. | Five Sonnet responses returned non-JSON despite the addendum retry; aborting on each would have made any subset score impossible. The patch isolates the failure to a diagnostic sidecar so the run can complete to the budget cap. | None — the patch does not alter the prompt or scoring, and `tests/prompt_frozen.rs` covers prompt stability. Held-out repos (§9.4) and any future full-coverage run will use the post-patch binary by default. |
+| 2026-05-14 | §7 / §8 / §9.3 (record only) | First Phase 1 result recorded against the same Phase 0c canary subset (n=4,387 rows, ripgrep `af6b6c54…c2d3b7b`). New crates `scoring/` (shared SPEC §7 math) and `phase1/` (rules-based structural invalidator, `rule_set_version v1.0`, phase1 git SHA `554ccfedd9b3`) extracted/added under workspace-excluded paths; baseline runner edits limited to a `provbench-scoring` path dep and re-export shims that keep `provbench-baseline score` reproducing `results/phase0c/2026-05-13-canary/metrics.json` byte-for-byte (gated by `scoring/tests/byte_stable_canary.rs`). Pilot R3/R4 thresholds tuned during this run per §10 admission. Result: §8 #3 `valid_retention_accuracy.wilson_lower_95` 0.9716, §8 #4 `latency_p50_ms` 2 (per-row, see methodology note in `compare.rs`), §8 #5 `stale_detection.recall.wilson_lower_95` 0.9537. | Established the Phase 1 numeric floor for the §9.3 kill/continue gate; clears the §8 thresholds on the pilot canary. The §9.3 gate itself is unchanged — this entry records the result, not a spec change to §9.3 itself. | None for §7/§8 (no prompt or scoring math changed; verbatim move covered by byte-stable canary). The pilot rule tuning consumes the §10 leakage clock for **R3/R4 thresholds only**; §9.4 held-out evaluation must use the v1.0 rule set frozen at this commit. Findings: `benchmarks/provbench/results/phase1/2026-05-14-findings.md`. |
 
 ## 12. Known exclusions
 
@@ -198,7 +199,13 @@ benchmarks/provbench/
   SPEC.md                  # this document
   labeler/                 # mechanical labeler (Phase 0b)
   baseline/                # LLM-as-invalidator runner (Phase 0c)
+  scoring/                 # shared SPEC §7 scoring math + side-by-side `compare`
+                           #   (Phase 1+; consumed by `baseline/` and `phase1/`)
+  phase1/                  # rules-based structural invalidator (Phase 1, §9.3)
   corpus/                  # pilot corpus (Phase 0b output)
+  facts/                   # labeler fact + per-commit diff artifacts
+                           #   (`*.facts.jsonl` + `*.diffs/<sha>.json`)
+  work/                    # local checkouts of pilot/held-out repos used at run time
   spotcheck/               # hand-checks on pilot labels
   results/                 # numeric outputs, tagged by spec hash
 ```
