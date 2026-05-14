@@ -1081,19 +1081,35 @@ dependencies = [
  "futures",
  "hex",
  "indicatif",
+ "provbench-scoring",
  "rand 0.8.6",
  "rand_chacha 0.3.1",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
- "statrs",
  "tempfile",
  "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "wiremock",
+]
+
+[[package]]
+name = "provbench-scoring"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "rand 0.8.6",
+ "rand_chacha 0.3.1",
+ "serde",
+ "serde_json",
+ "sha2",
+ "statrs",
+ "thiserror",
 ]
 
 [[package]]

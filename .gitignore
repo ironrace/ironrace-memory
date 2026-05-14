@@ -20,3 +20,4 @@ __pycache__/
 benchmarks/provbench/work/
 benchmarks/provbench/labeler/target/
 benchmarks/provbench/baseline/target/
+benchmarks/provbench/scoring/target/

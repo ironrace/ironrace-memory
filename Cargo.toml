@@ -6,7 +6,11 @@ members = [
     "crates/ironrace-pref-extract",
     "crates/ironmem",
 ]
-exclude = ["benchmarks/provbench/labeler", "benchmarks/provbench/baseline"]
+exclude = [
+    "benchmarks/provbench/labeler",
+    "benchmarks/provbench/baseline",
+    "benchmarks/provbench/scoring",
+]
 resolver = "2"
 
 [workspace.package]
