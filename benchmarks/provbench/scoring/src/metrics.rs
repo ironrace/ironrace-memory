@@ -6,7 +6,7 @@
 //! Cohen κ with bootstrap 95% CI (seeded — reproducible).
 //!
 //! Population weights (one per coalesced ground-truth class) are accepted
-//! as input so [`report::score_run`] can compose them from the labeler
+//! as input so [`crate::report::score_llm_baseline_run`] can compose them from the labeler
 //! corpus's known stratum totals; tests can inject simple uniform
 //! weights.
 //!
