@@ -32,7 +32,8 @@ pub fn ingest(db: &Connection, dir: &Path) -> Result<usize> {
         if path.extension().and_then(|x| x.to_str()) != Some("json") {
             continue;
         }
-        let bytes = fs::read(&path)?;
+        let bytes =
+            fs::read(&path).with_context(|| format!("reading diff file {}", path.display()))?;
         let hash = sha256_hex(&bytes);
         let cd: CommitDiff = serde_json::from_slice(&bytes)
             .with_context(|| format!("parsing diff {}", path.display()))?;
