@@ -11,7 +11,6 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::time::Instant;
 
 use crate::PredictionRow;
 
@@ -52,8 +51,12 @@ pub fn run(baseline_run: &Path, candidate_run: &Path, candidate_name: &str) -> R
         .unwrap_or(u64::MAX);
 
     let mut deltas: BTreeMap<String, f64> = BTreeMap::new();
+    // NOTE: numerator and denominator are NOT in the same units — baseline is a
+    // per-commit median, candidate is a per-row median. See `score_candidate`
+    // for the full LATENCY METHODOLOGY block. The verbose key forces anyone
+    // quoting this number to copy the disambiguation along with it.
     deltas.insert(
-        "latency_p50_ms_speedup".into(),
+        "latency_p50_ratio_baseline_per_commit_to_candidate_per_row".into(),
         (baseline_p50 as f64) / (p50.max(1) as f64),
     );
     let mut thresholds: BTreeMap<String, bool> = BTreeMap::new();
@@ -125,8 +128,31 @@ fn score_candidate(candidate_run: &Path) -> Result<Value> {
     let stale_wlb = crate::metrics::wilson_lower_95(stale_tp, stale_tp + stale_fn_);
     let valid_wlb = crate::metrics::wilson_lower_95(valid_correct, valid_total);
 
-    // Latency p50 — use the same wall_ms convention as the baseline
-    // scorer (per-row wall_ms; phase1 records per-row classification cost).
+    // LATENCY METHODOLOGY (read before quoting numbers).
+    //
+    // The `wall_ms` field name is identical for the baseline (LLM) and
+    // candidate (rules) runners, but the granularity is NOT:
+    //   * Baseline (LLM): per-batch wall_ms — one record per Anthropic
+    //     API round-trip covering many facts. `metrics::latency()`
+    //     dedupes by batch_id and sums per commit_sha to get a
+    //     per-commit total, then nearest-rank p50 over commits.
+    //   * Phase 1 (rules): per-row wall_ms — one record per fact's
+    //     classification cost. We compute a naive floor-median over
+    //     per-row values, which is the natural per-row p50.
+    //
+    // The `latency_p50_ms` value in the candidate column is therefore
+    // a per-row median (µs-scale), while the baseline column is a
+    // per-commit median (ms-to-s scale).  `latency_p50_ms_speedup`
+    // in `deltas` is a useful headline but is NOT a direct apples-to-
+    // apples throughput comparison — readers should treat it as
+    // "baseline per-commit median ÷ candidate per-row median". The
+    // SPEC §8 #4 ≤727 ms threshold is on the candidate column alone,
+    // which the rules runner satisfies with margin (~2 ms).
+    //
+    // The right framing in the findings doc is: "Phase 1 classifies
+    // a fact in median ~2 ms; the LLM baseline took median ~7.3 s
+    // per commit." See benchmarks/provbench/results/phase1/
+    // 2026-05-14-findings.md for the audience-facing version.
     let mut walls: Vec<u64> = rows.iter().map(|r| r.wall_ms).collect();
     walls.sort();
     let p50 = if walls.is_empty() {
@@ -188,12 +214,4 @@ fn load_per_rule_confusion(
         *bucket.entry(key).or_insert(0) += 1;
     }
     Ok(out)
-}
-
-/// Bench helper — returns the value and discards timing (no tracing dep
-/// in this crate). Kept so callers that want to wrap a block in a timer
-/// can be added later without changing the public API.
-pub fn _timed<F: FnOnce() -> R, R>(_label: &str, f: F) -> R {
-    let _s = Instant::now();
-    f()
 }

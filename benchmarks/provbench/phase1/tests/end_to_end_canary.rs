@@ -20,7 +20,7 @@ fn spec_section_8_thresholds_clear_on_canary() {
     );
 
     let phase1_bin = env!("CARGO_BIN_EXE_provbench-phase1");
-    let score_bin = scoring_binary();
+    let score_bin = ensure_scoring_binary_built();
 
     let out = TempDir::new().unwrap();
     let out_p = out.path().to_path_buf();
@@ -101,8 +101,34 @@ fn spec_section_8_thresholds_clear_on_canary() {
     assert!(p50 <= 727, "§8 #4 latency p50 {} ms > 727", p50);
 }
 
-fn scoring_binary() -> PathBuf {
-    // Walk up to the scoring crate's release target.
-    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    here.join("../scoring/target/release/provbench-score")
+fn ensure_scoring_binary_built() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let scoring_manifest = manifest_dir.join("../scoring/Cargo.toml");
+    let bin_path = manifest_dir.join("../scoring/target/release/provbench-score");
+
+    // Build the scoring crate's provbench-score binary if not already present.
+    // This makes the §8 gate test self-contained: `cargo test --ignored` just works.
+    if !bin_path.exists() {
+        let status = std::process::Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "--manifest-path",
+                scoring_manifest.to_str().unwrap(),
+                "--bin",
+                "provbench-score",
+            ])
+            .status()
+            .expect("failed to spawn cargo build for provbench-score");
+        assert!(
+            status.success(),
+            "cargo build --release -p provbench-scoring failed; cannot run §8 gate"
+        );
+    }
+    assert!(
+        bin_path.exists(),
+        "provbench-score binary not found at {} even after cargo build",
+        bin_path.display()
+    );
+    bin_path
 }
