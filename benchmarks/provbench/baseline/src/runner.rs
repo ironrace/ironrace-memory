@@ -37,6 +37,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+pub use provbench_scoring::PredictionRow;
+
 /// Options for [`run`]. Constructed by the CLI from `RunArgs`.
 pub struct RunnerOpts {
     pub run_dir: PathBuf,
@@ -94,22 +96,6 @@ pub struct Batch {
     pub facts: Vec<FactBody>,
     pub rows: Vec<SampledRow>,
     pub batches_in_commit: usize,
-}
-
-/// Per-row checkpoint persisted to `predictions.jsonl`.
-///
-/// One row per line. JSON field order is fixed by serde derive order;
-/// existing rows are never rewritten so determinism is preserved across
-/// resumes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PredictionRow {
-    pub fact_id: String,
-    pub commit_sha: String,
-    pub batch_id: String,
-    pub ground_truth: String,
-    pub prediction: String,
-    pub request_id: String,
-    pub wall_ms: u64,
 }
 
 /// On-disk schema for `--fixture-mode <dir>` replay. One JSON per batch

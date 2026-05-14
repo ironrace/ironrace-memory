@@ -1,0 +1,321 @@
+//! Side-by-side metrics builder (LLM baseline column + candidate column).
+//!
+//! Loads the baseline run's already-scored `metrics.json`, scores the
+//! candidate run's `predictions.jsonl` against the same SPEC §7.1 axes,
+//! and emits a single JSON document with both columns, per-rule confusion
+//! (joined from `rule_traces.jsonl`), and SPEC §8 threshold flags.
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::path::Path;
+
+use crate::{metrics, PredictionRow};
+
+/// Side-by-side metrics rollup produced by `compare::run`.
+///
+/// Pairs the LLM baseline's already-scored `metrics.json` against a
+/// candidate (e.g. the Phase 1 rules runner) scored on the same
+/// SPEC §7.1 axes, with deltas, SPEC §8 pass/fail booleans, and a
+/// per-rule confusion matrix joined from `rule_traces.jsonl`.
+///
+/// The struct is the typed counterpart to the JSON document the CLI
+/// writes; consumers should prefer the JSON output for archival and
+/// only deserialize back into `Compare` when programmatic access is
+/// required.
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct Compare {
+    /// LLM baseline column: contents of `<baseline_run>/metrics.json`
+    /// loaded verbatim, used as the reference for deltas.
+    pub llm_baseline: Value,
+    /// Candidate column: SPEC §7.1 metrics scored directly from
+    /// `<candidate_run>/predictions.jsonl` by `score_candidate`.
+    pub candidate: Value,
+    pub candidate_name: String,
+    pub deltas: BTreeMap<String, f64>,
+    /// SPEC §8 pass/fail booleans (`section_8_3_valid_retention_ge_0_95`,
+    /// `section_8_4_latency_p50_le_727_ms`, `section_8_5_stale_recall_wlb_ge_0_30`).
+    pub thresholds: BTreeMap<String, bool>,
+    /// Per-rule confusion matrix: `rule_id → "<gt>__<pred>" → count`,
+    /// joined from `<candidate_run>/rule_traces.jsonl`.
+    pub per_rule_confusion: BTreeMap<String, BTreeMap<String, u64>>,
+}
+
+pub fn run(baseline_run: &Path, candidate_run: &Path, candidate_name: &str) -> Result<Value> {
+    // 1) Read the baseline run's pre-scored metrics.json.
+    let baseline_metrics: Value = {
+        let path = baseline_run.join("metrics.json");
+        let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        serde_json::from_slice(&bytes)?
+    };
+
+    // 2) Score the candidate predictions.jsonl directly.
+    let candidate_metrics: Value = score_candidate(candidate_run)?;
+
+    // 3) Build deltas and SPEC §8 threshold flags.
+    let stale_recall_wlb = candidate_metrics["section_7_1"]["stale_detection"]["wilson_lower_95"]
+        .as_f64()
+        .unwrap_or(0.0);
+    let valid_acc_wlb = candidate_metrics["section_7_1"]["valid_retention_accuracy"]
+        ["wilson_lower_95"]
+        .as_f64()
+        .unwrap_or(0.0);
+    let p50 = candidate_metrics["section_7_2_applicable"]["latency_p50_ms"]
+        .as_u64()
+        .unwrap_or(u64::MAX);
+    let baseline_p50 = baseline_metrics["section_7_2_applicable"]["latency_p50_ms"]
+        .as_u64()
+        .unwrap_or(u64::MAX);
+
+    let mut deltas: BTreeMap<String, f64> = BTreeMap::new();
+    deltas.insert(
+        "stale_recall_point_delta".into(),
+        metric_f64(
+            &candidate_metrics,
+            &["section_7_1", "stale_detection", "recall"],
+        ) - metric_f64(
+            &baseline_metrics,
+            &["section_7_1", "stale_detection", "recall"],
+        ),
+    );
+    deltas.insert(
+        "stale_precision_point_delta".into(),
+        metric_f64(
+            &candidate_metrics,
+            &["section_7_1", "stale_detection", "precision"],
+        ) - metric_f64(
+            &baseline_metrics,
+            &["section_7_1", "stale_detection", "precision"],
+        ),
+    );
+    deltas.insert(
+        "valid_retention_wilson_lower_95_delta".into(),
+        metric_f64(
+            &candidate_metrics,
+            &["section_7_1", "valid_retention_accuracy", "wilson_lower_95"],
+        ) - metric_f64(
+            &baseline_metrics,
+            &["section_7_1", "valid_retention_accuracy", "wilson_lower_95"],
+        ),
+    );
+    deltas.insert(
+        "needs_revalidation_routing_wilson_lower_95_delta".into(),
+        metric_f64(
+            &candidate_metrics,
+            &[
+                "section_7_1",
+                "needs_revalidation_routing_accuracy",
+                "wilson_lower_95",
+            ],
+        ) - metric_f64(
+            &baseline_metrics,
+            &[
+                "section_7_1",
+                "needs_revalidation_routing_accuracy",
+                "wilson_lower_95",
+            ],
+        ),
+    );
+    // NOTE: numerator and denominator are NOT in the same units — baseline is a
+    // per-commit median, candidate is a per-row median. See `score_candidate`
+    // for the full LATENCY METHODOLOGY block. The verbose key forces anyone
+    // quoting this number to copy the disambiguation along with it.
+    deltas.insert(
+        "latency_p50_ratio_baseline_per_commit_to_candidate_per_row".into(),
+        (baseline_p50 as f64) / (p50.max(1) as f64),
+    );
+    deltas.insert(
+        "cost_per_correct_invalidation_usd_delta".into(),
+        metric_f64(
+            &candidate_metrics,
+            &[
+                "section_7_2_applicable",
+                "cost_per_correct_invalidation",
+                "usd",
+            ],
+        ) - metric_f64(
+            &baseline_metrics,
+            &[
+                "section_7_2_applicable",
+                "cost_per_correct_invalidation",
+                "usd",
+            ],
+        ),
+    );
+    deltas.insert(
+        "cost_per_correct_invalidation_tokens_delta".into(),
+        metric_f64(
+            &candidate_metrics,
+            &[
+                "section_7_2_applicable",
+                "cost_per_correct_invalidation",
+                "tokens",
+            ],
+        ) - metric_f64(
+            &baseline_metrics,
+            &[
+                "section_7_2_applicable",
+                "cost_per_correct_invalidation",
+                "tokens",
+            ],
+        ),
+    );
+    let mut thresholds: BTreeMap<String, bool> = BTreeMap::new();
+    thresholds.insert(
+        "section_8_3_valid_retention_ge_0_95".into(),
+        valid_acc_wlb >= 0.95,
+    );
+    thresholds.insert("section_8_4_latency_p50_le_727_ms".into(), p50 <= 727);
+    thresholds.insert(
+        "section_8_5_stale_recall_wlb_ge_0_30".into(),
+        stale_recall_wlb >= 0.30,
+    );
+
+    // 4) Per-rule confusion (joined from candidate_run/rule_traces.jsonl).
+    let per_rule_confusion = load_per_rule_confusion(candidate_run)?;
+
+    Ok(json!({
+        "llm_baseline": baseline_metrics,
+        candidate_name: candidate_metrics,
+        "deltas": deltas,
+        "thresholds": thresholds,
+        "per_rule_confusion": per_rule_confusion,
+    }))
+}
+
+fn score_candidate(candidate_run: &Path) -> Result<Value> {
+    let preds_path = candidate_run.join("predictions.jsonl");
+    let text = fs::read_to_string(&preds_path)
+        .with_context(|| format!("reading {}", preds_path.display()))?;
+    let mut rows: Vec<PredictionRow> = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        rows.push(serde_json::from_str(line)?);
+    }
+
+    let total = rows.len() as u64;
+    let pop_weights: HashMap<String, f64> = HashMap::new();
+    let three = metrics::three_way(&rows, &pop_weights);
+    let cost = metrics::cost_per_correct_invalidation_from_totals(&rows, 0, 0.0);
+
+    // LATENCY METHODOLOGY (read before quoting numbers).
+    //
+    // The `wall_ms` field name is identical for the baseline (LLM) and
+    // candidate (rules) runners, but the granularity is NOT:
+    //   * Baseline (LLM): per-batch wall_ms — one record per Anthropic
+    //     API round-trip covering many facts. `metrics::latency()`
+    //     dedupes by batch_id and sums per commit_sha to get a
+    //     per-commit total, then nearest-rank p50 over commits.
+    //   * Phase 1 (rules): per-row wall_ms — one record per fact's
+    //     classification cost. We compute a naive floor-median over
+    //     per-row values, which is the natural per-row p50.
+    //
+    // The `latency_p50_ms` value in the candidate column is therefore
+    // a per-row median (µs-scale), while the baseline column is a
+    // per-commit median (ms-to-s scale).  `latency_p50_ms_speedup`
+    // in `deltas` is a useful headline but is NOT a direct apples-to-
+    // apples throughput comparison — readers should treat it as
+    // "baseline per-commit median ÷ candidate per-row median". The
+    // SPEC §8 #4 ≤727 ms threshold is on the candidate column alone,
+    // which the rules runner satisfies with margin (~2 ms).
+    //
+    // The right framing in the findings doc is: "Phase 1 classifies
+    // a fact in median ~2 ms; the LLM baseline took median ~7.3 s
+    // per commit." See benchmarks/provbench/results/phase1/
+    // 2026-05-14-findings.md for the audience-facing version.
+    let mut walls: Vec<u64> = rows.iter().map(|r| r.wall_ms).collect();
+    walls.sort();
+    let p50 = percentile_u64(&walls, 0.50);
+    let p95 = percentile_u64(&walls, 0.95);
+
+    Ok(json!({
+        "row_count": total,
+        "section_7_1": {
+            "stale_detection": {
+                "precision": three.stale_detection.precision,
+                "recall": three.stale_detection.recall,
+                "f1": three.stale_detection.f1,
+                "wilson_lower_95": three.stale_detection.wilson_lower_95,
+            },
+            "valid_retention_accuracy": {
+                "point": three.valid_retention_accuracy.point,
+                "wilson_lower_95": three.valid_retention_accuracy.wilson_lower_95,
+            },
+            "needs_revalidation_routing_accuracy": {
+                "point": three.needs_revalidation_routing_accuracy.point,
+                "wilson_lower_95": three.needs_revalidation_routing_accuracy.wilson_lower_95,
+            },
+        },
+        "section_7_2_applicable": {
+            "latency_p50_ms": p50,
+            "latency_p95_ms": p95,
+            "cost_per_correct_invalidation": {
+                "tokens": cost.tokens,
+                "usd": cost.usd,
+            },
+        },
+    }))
+}
+
+fn metric_f64(root: &Value, path: &[&str]) -> f64 {
+    let mut current = root;
+    for key in path {
+        current = &current[*key];
+    }
+    current
+        .as_f64()
+        .or_else(|| current.as_u64().map(|v| v as f64))
+        .unwrap_or(0.0)
+}
+
+fn percentile_u64(sorted: &[u64], q: f64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = (q * sorted.len() as f64).ceil() as usize;
+    let idx = rank.saturating_sub(1).min(sorted.len() - 1);
+    sorted[idx]
+}
+
+fn load_per_rule_confusion(
+    candidate_run: &Path,
+) -> Result<BTreeMap<String, BTreeMap<String, u64>>> {
+    let traces = candidate_run.join("rule_traces.jsonl");
+    let preds = candidate_run.join("predictions.jsonl");
+    let mut row_to_rule: BTreeMap<i64, String> = BTreeMap::new();
+    if let Ok(text) = fs::read_to_string(&traces) {
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let v: Value = serde_json::from_str(line)?;
+            let row_index = v["row_index"].as_i64().unwrap_or(-1);
+            let rule_id = v["rule_id"].as_str().unwrap_or("?").to_string();
+            row_to_rule.insert(row_index, rule_id);
+        }
+    }
+    let mut out: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+    let text = fs::read_to_string(&preds)?;
+    for (i, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let r: PredictionRow = serde_json::from_str(line)?;
+        let rule = row_to_rule
+            .get(&(i as i64))
+            .cloned()
+            .unwrap_or_else(|| "?".to_string());
+        let bucket = out.entry(rule).or_default();
+        let key = format!(
+            "{}__{}",
+            r.ground_truth.to_lowercase(),
+            r.prediction.to_lowercase()
+        );
+        *bucket.entry(key).or_insert(0) += 1;
+    }
+    Ok(out)
+}

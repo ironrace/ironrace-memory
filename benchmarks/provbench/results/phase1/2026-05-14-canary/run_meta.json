@@ -1,0 +1,9 @@
+{
+  "runner": "phase1",
+  "phase1_git_sha": "0ffb67bd1f542acacd7d6d6756bdb2e44d851db4",
+  "spec_freeze_hash": "683d023934c181a8714b9d24c53d011caed31f511becf82ed9e5def92e0ff37c",
+  "labeler_git_sha": "c2d3b7b03a51a9047ff2d50077200bb52f149448",
+  "rule_set_version": "v1.0",
+  "wall_seconds": 21,
+  "row_count": 4387
+}
