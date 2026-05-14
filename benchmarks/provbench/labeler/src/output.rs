@@ -6,7 +6,7 @@
 use crate::label::Label;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::Path;
 
 /// One on-disk row, prior to labeler-SHA stamping.
@@ -55,4 +55,167 @@ pub fn write_jsonl(path: &Path, rows: &[OutputRow], labeler_git_sha: &str) -> Re
     }
     f.flush()?;
     Ok(())
+}
+
+/// Read a JSONL corpus produced by [`write_jsonl`] back into
+/// [`OutputRow`] values. Lines that are empty after trimming are skipped
+/// (a trailing `"\n"` in the file is normal). The stamped
+/// `labeler_git_sha` field on disk is ignored by serde because
+/// [`OutputRow`] does not declare it; callers that need the stamp must
+/// parse the line into a [`serde_json::Value`] separately.
+pub fn read_jsonl(path: &Path) -> Result<Vec<OutputRow>> {
+    let f = std::fs::File::open(path)?;
+    let mut rows = Vec::new();
+    for line in std::io::BufReader::new(f).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        rows.push(serde_json::from_str(&line)?);
+    }
+    Ok(rows)
+}
+
+/// One T₀ fact body row, emitted by the `emit-facts` subcommand. Mirrors
+/// the baseline-side `FactBody` schema (single source of truth — Task 5
+/// in the Phase 0c plan deserializes JSONL produced by
+/// [`write_facts_jsonl`] back into this struct).
+///
+/// `body` is the SPEC §3 single-line claim string (e.g. `"function
+/// crate::add has parameters (a: i32, b: i32) with return type i32"`).
+/// `line_span` is `[start, end]` with 1-based inclusive line numbers.
+/// `content_hash_at_observation` is the 64-char lowercase hex SHA-256
+/// of the fact's bound span at T₀.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FactBodyRow {
+    pub fact_id: String,
+    pub kind: String,
+    pub body: String,
+    pub source_path: String,
+    pub line_span: [u32; 2],
+    pub symbol_path: String,
+    pub content_hash_at_observation: String,
+}
+
+#[derive(Debug, Serialize)]
+struct StampedFactBody<'a> {
+    fact_id: &'a str,
+    kind: &'a str,
+    body: &'a str,
+    source_path: &'a str,
+    line_span: [u32; 2],
+    symbol_path: &'a str,
+    content_hash_at_observation: &'a str,
+    labeler_git_sha: &'a str,
+}
+
+/// Per-commit diff artifact emitted by the `emit-diffs` subcommand
+/// (SPEC §6.1). Serialized as a single JSON object per file
+/// (`<commit_sha>.json`), with the variant discriminated by which fields
+/// are present (`unified_diff` vs. `excluded`) — i.e. `#[serde(untagged)]`.
+///
+/// Two shapes:
+/// - `Included { commit_sha, parent_sha, unified_diff }` — a normal commit
+///   with a parent whose diff is materialized at `-U999999` full file
+///   context.
+/// - `Excluded { commit_sha, excluded }` — a commit that has no parent
+///   (`excluded == "no_parent"`) or is T₀ itself (`excluded == "t0"`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DiffArtifact {
+    Included {
+        commit_sha: String,
+        parent_sha: String,
+        unified_diff: String,
+    },
+    Excluded {
+        commit_sha: String,
+        /// `"t0"` or `"no_parent"`.
+        excluded: String,
+    },
+}
+
+/// Write a single [`DiffArtifact`] to `<out_dir>/<commit_sha>.json`.
+///
+/// Creates `out_dir` if missing. Serialization is deterministic: the
+/// field order is fixed by the struct definition, there are no
+/// timestamps, and a single trailing newline is appended.
+pub fn write_diff_json(out_dir: &Path, artifact: &DiffArtifact) -> Result<()> {
+    let sha = match artifact {
+        DiffArtifact::Included { commit_sha, .. } => commit_sha,
+        DiffArtifact::Excluded { commit_sha, .. } => commit_sha,
+    };
+    std::fs::create_dir_all(out_dir)?;
+    let path = out_dir.join(format!("{sha}.json"));
+    let mut f = std::fs::File::create(path)?;
+    serde_json::to_writer(&mut f, artifact)?;
+    f.write_all(b"\n")?;
+    f.flush()?;
+    Ok(())
+}
+
+/// Write `rows` as JSONL, sorted by `fact_id` and stamped with
+/// `labeler_git_sha`. Byte-deterministic given the same inputs.
+pub fn write_facts_jsonl(path: &Path, rows: &[FactBodyRow], labeler_git_sha: &str) -> Result<()> {
+    let mut sorted: Vec<&FactBodyRow> = rows.iter().collect();
+    sorted.sort_by(|a, b| a.fact_id.cmp(&b.fact_id));
+    let mut f = std::fs::File::create(path)?;
+    for row in sorted {
+        let stamped = StampedFactBody {
+            fact_id: &row.fact_id,
+            kind: &row.kind,
+            body: &row.body,
+            source_path: &row.source_path,
+            line_span: row.line_span,
+            symbol_path: &row.symbol_path,
+            content_hash_at_observation: &row.content_hash_at_observation,
+            labeler_git_sha,
+        };
+        serde_json::to_writer(&mut f, &stamped)?;
+        f.write_all(b"\n")?;
+    }
+    f.flush()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod diff_artifact_roundtrip {
+    use super::*;
+
+    #[test]
+    fn included_round_trips() {
+        let a = DiffArtifact::Included {
+            commit_sha: "abc123".into(),
+            parent_sha: "def456".into(),
+            unified_diff: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n".into(),
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        let back: DiffArtifact = serde_json::from_str(&json).unwrap();
+        assert_eq!(a, back);
+    }
+
+    #[test]
+    fn excluded_round_trips() {
+        for reason in ["t0", "no_parent"] {
+            let a = DiffArtifact::Excluded {
+                commit_sha: "abc123".into(),
+                excluded: reason.into(),
+            };
+            let json = serde_json::to_string(&a).unwrap();
+            let back: DiffArtifact = serde_json::from_str(&json).unwrap();
+            assert_eq!(a, back);
+        }
+    }
+
+    #[test]
+    fn included_and_excluded_are_distinguishable() {
+        // Field-set disjointness: Included has `parent_sha`+`unified_diff`;
+        // Excluded has `excluded`. serde(untagged) must pick the right variant.
+        let inc_json = r#"{"commit_sha":"a","parent_sha":"b","unified_diff":"x"}"#;
+        let exc_json = r#"{"commit_sha":"a","excluded":"t0"}"#;
+        let inc: DiffArtifact = serde_json::from_str(inc_json).unwrap();
+        let exc: DiffArtifact = serde_json::from_str(exc_json).unwrap();
+        matches!(inc, DiffArtifact::Included { .. });
+        matches!(exc, DiffArtifact::Excluded { .. });
+    }
 }

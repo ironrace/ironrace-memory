@@ -43,6 +43,9 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Force stable toolchain default (macOS rustup-init shim workaround)
+        run: rustup default stable
+
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
 
       - name: cargo test

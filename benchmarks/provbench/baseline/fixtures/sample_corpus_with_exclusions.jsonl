@@ -1,0 +1,5 @@
+{"fact_id":"Fn::crate::add::1","commit_sha":"aaaa111111111111111111111111111111111111","label":"Valid","labeler_git_sha":"c2d3b7b03a51a9047ff2d50077200bb52f149448"}
+{"fact_id":"Fn::crate::add::1","commit_sha":"ffff666666666666666666666666666666666666","label":"Valid","labeler_git_sha":"c2d3b7b03a51a9047ff2d50077200bb52f149448"}
+{"fact_id":"Fn::crate::ghost::1","commit_sha":"aaaa111111111111111111111111111111111111","label":"StaleSourceChanged","labeler_git_sha":"c2d3b7b03a51a9047ff2d50077200bb52f149448"}
+{"fact_id":"Fn::crate::sub::1","commit_sha":"bbbb222222222222222222222222222222222222","label":"Valid","labeler_git_sha":"c2d3b7b03a51a9047ff2d50077200bb52f149448"}
+{"fact_id":"Fn::crate::mul::1","commit_sha":"cccc333333333333333333333333333333333333","label":{"StaleSymbolRenamed":{"new_name":"multiply"}},"labeler_git_sha":"c2d3b7b03a51a9047ff2d50077200bb52f149448"}

@@ -285,6 +285,67 @@ The spot-check CSV is written via the `csv` crate, not hand-rolled
 formatting, so a stray comma or newline in a `disagreement_notes` cell
 round-trips through reader/writer correctly.
 
+## Phase 0c artifacts (`emit-facts`, `emit-diffs`)
+
+Phase 0c's LLM-as-invalidator baseline (under
+`benchmarks/provbench/baseline/`) consumes two JSON artifact sets derived
+from a frozen labeler corpus. Both subcommands are read-only against the
+pilot repo and idempotent against the corpus JSONL — re-running them
+produces byte-identical output for a given `(corpus, repo, t0)` triple.
+
+### `emit-facts`
+
+Emit one T₀ fact-body row per unique `fact_id` referenced in the corpus,
+written as JSONL sorted by `fact_id`. Feeds the baseline runner's
+prompt assembly (SPEC §6.1).
+
+Arguments:
+- `--corpus <path>` — labeler corpus JSONL (`Run` output). Only the
+  `fact_id` column is consulted.
+- `--repo <path>` — local path to the cloned pilot repo at T₀.
+- `--t0 <sha>` — T₀ commit SHA (40-char lowercase hex).
+- `--out <path>` — output JSONL path (one `FactBodyRow` per line).
+
+Example (ripgrep pilot):
+
+```
+cargo run --release --manifest-path benchmarks/provbench/labeler/Cargo.toml -- emit-facts \
+  --corpus benchmarks/provbench/corpus/<run>.jsonl \
+  --repo   benchmarks/provbench/work/ripgrep \
+  --t0     af6b6c543b224d348a8876f0c06245d9ea7929c5 \
+  --out    benchmarks/provbench/baseline/work/facts.jsonl
+```
+
+### `emit-diffs`
+
+Emit one `<commit_sha>.json` artifact per distinct `commit_sha` in the
+corpus. Each artifact contains either a `unified_diff` (full file
+context per SPEC §6.1) or an `excluded` reason (`"t0"` for the T₀ commit
+itself, `"no_parent"` for root commits without a parent).
+
+Arguments:
+- `--corpus <path>` — labeler corpus JSONL (`Run` output). Only the
+  `commit_sha` column is consulted.
+- `--repo <path>` — local path to the cloned pilot repo.
+- `--t0 <sha>` — T₀ commit SHA (40-char lowercase hex). Used to mark
+  the T₀ commit's artifact as `excluded: "t0"`.
+- `--out-dir <path>` — output directory (one `<commit_sha>.json` per
+  distinct commit).
+
+Example (ripgrep pilot):
+
+```
+cargo run --release --manifest-path benchmarks/provbench/labeler/Cargo.toml -- emit-diffs \
+  --corpus  benchmarks/provbench/corpus/<run>.jsonl \
+  --repo    benchmarks/provbench/work/ripgrep \
+  --t0      af6b6c543b224d348a8876f0c06245d9ea7929c5 \
+  --out-dir benchmarks/provbench/baseline/work/diffs
+```
+
+Both outputs feed the Phase 0c baseline runner under
+`benchmarks/provbench/baseline/` (the runner's `sample` subcommand takes
+`--facts <out.jsonl>` and `--diffs-dir <out-dir>` directly).
+
 ## Limitations
 
 - v1 supports Rust only. The held-out Python repo (`flask`) is **not**

@@ -70,3 +70,71 @@ pub enum Fact {
         asserted_symbol: Option<String>,
     },
 }
+
+impl Fact {
+    /// SPEC §3 kind name used as the `kind` discriminator in
+    /// `FactBodyRow` and as the leading segment of `fact_id`.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Fact::FunctionSignature { .. } => "FunctionSignature",
+            Fact::Field { .. } => "Field",
+            Fact::PublicSymbol { .. } => "PublicSymbol",
+            Fact::DocClaim { .. } => "DocClaim",
+            Fact::TestAssertion { .. } => "TestAssertion",
+        }
+    }
+
+    /// Source file path the fact is bound to. For `DocClaim` this is the
+    /// markdown file; for every other kind it is the `.rs` file.
+    pub fn source_path(&self) -> &std::path::Path {
+        match self {
+            Fact::FunctionSignature { source_path, .. } => source_path,
+            Fact::Field { source_path, .. } => source_path,
+            Fact::PublicSymbol { source_path, .. } => source_path,
+            Fact::DocClaim { doc_path, .. } => doc_path,
+            Fact::TestAssertion { source_path, .. } => source_path,
+        }
+    }
+
+    /// `[line_start, line_end]` (1-based, inclusive) for the fact's
+    /// bound span — packaged in the order [`crate::output::FactBodyRow`]
+    /// expects.
+    pub fn line_span(&self) -> [u32; 2] {
+        let span = match self {
+            Fact::FunctionSignature { span, .. } => span,
+            Fact::Field { span, .. } => span,
+            Fact::PublicSymbol { span, .. } => span,
+            Fact::DocClaim { mention_span, .. } => mention_span,
+            Fact::TestAssertion { span, .. } => span,
+        };
+        [span.line_start, span.line_end]
+    }
+
+    /// Stable identifier of the fact's bound symbol. Used as the
+    /// `symbol_path` field in `FactBodyRow`. The exact shape varies per
+    /// kind (`qualified_name`, `qualified_path`, or `test_fn`) and
+    /// mirrors what the SPEC §5 rule engine uses as the primary key for
+    /// T₀ → post pairing.
+    pub fn symbol_path(&self) -> String {
+        match self {
+            Fact::FunctionSignature { qualified_name, .. } => qualified_name.clone(),
+            Fact::Field { qualified_path, .. } => qualified_path.clone(),
+            Fact::PublicSymbol { qualified_name, .. } => qualified_name.clone(),
+            Fact::DocClaim { qualified_name, .. } => qualified_name.clone(),
+            Fact::TestAssertion { test_fn, .. } => test_fn.clone(),
+        }
+    }
+
+    /// 64-char lowercase hex SHA-256 of the fact's bound span at T₀.
+    /// For `DocClaim` this is `mention_hash` (the inline-code mention),
+    /// matching how SPEC §5 step 3 hashes the bound span.
+    pub fn content_hash(&self) -> &str {
+        match self {
+            Fact::FunctionSignature { content_hash, .. } => content_hash,
+            Fact::Field { content_hash, .. } => content_hash,
+            Fact::PublicSymbol { content_hash, .. } => content_hash,
+            Fact::DocClaim { mention_hash, .. } => mention_hash,
+            Fact::TestAssertion { content_hash, .. } => content_hash,
+        }
+    }
+}

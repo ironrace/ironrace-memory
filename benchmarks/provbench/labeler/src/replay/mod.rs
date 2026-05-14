@@ -28,7 +28,7 @@ use crate::resolve::SymbolResolver;
 use anyhow::{Context, Result};
 use commit_index::CommitSymbolIndex;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 // ── Public surface ────────────────────────────────────────────────────────────
@@ -142,6 +142,115 @@ impl Replay {
              per-commit tree resolution path is exercised"
         );
         Self::run_inner(cfg, None)
+    }
+
+    /// Emit one [`crate::output::FactBodyRow`] per fact_id in `wanted`,
+    /// extracting the T₀ fact set the same way [`Self::run`] does but
+    /// stopping after the extraction phase.
+    ///
+    /// Bodies are rendered per SPEC §3 (single-line claim strings — see
+    /// [`render_fact_body`]). Source bytes are kept in memory long
+    /// enough to compute `FunctionSignature` parameter / return-type
+    /// text from the span; the function-signature extractor itself
+    /// doesn't store those fields on [`Fact`], so they're parsed from
+    /// the T₀ blob via tree-sitter at emit time.
+    ///
+    /// Returns rows in the order facts are extracted; the writer
+    /// ([`crate::output::write_facts_jsonl`]) is responsible for the
+    /// final sort by `fact_id`.
+    ///
+    /// Facts whose `fact_id` is not in `wanted` are skipped. If
+    /// `wanted` references a `fact_id` that doesn't exist at T₀, this
+    /// returns an error: the Phase 0c artifact contract is one emitted
+    /// fact body for every unique corpus fact id.
+    pub fn emit_facts(
+        cfg: &ReplayConfig,
+        wanted: &std::collections::BTreeSet<String>,
+    ) -> Result<Vec<crate::output::FactBodyRow>> {
+        let pilot = Pilot::open(&AdHocSpec {
+            path: cfg.repo_path.clone(),
+            t0_sha: cfg.t0_sha.clone(),
+        })?;
+        let mut facts: Vec<ObservedFact> = Vec::new();
+        let mut t0_blobs: BTreeMap<PathBuf, Vec<u8>> = BTreeMap::new();
+        let rust_paths = rust_paths_at(&pilot, &cfg.t0_sha)?;
+        let mut facts_so_far: Vec<Fact> = Vec::new();
+        for path in &rust_paths {
+            if let Some(blob) = pilot.read_blob_at(&cfg.t0_sha, path)? {
+                let ast = RustAst::parse(&blob)
+                    .with_context(|| format!("parse {} @ T0", path.display()))?;
+                push_function_signature_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    path,
+                    function_signature::extract_observations(&ast, path),
+                );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    field::extract(&ast, path),
+                );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    symbol_existence::extract(&ast, path),
+                );
+                let test_facts: Vec<Fact> =
+                    test_assertion::extract(&ast, path, &facts_so_far).collect();
+                push_test_assertion_facts(&mut facts, &mut facts_so_far, &blob, path, test_facts);
+                t0_blobs.insert(path.clone(), blob);
+            }
+        }
+        let rust_dirs = rust_paths
+            .iter()
+            .filter_map(|p| p.parent().map(Path::to_path_buf))
+            .collect::<std::collections::BTreeSet<_>>();
+        for path in markdown_paths_at(&pilot, &cfg.t0_sha)?
+            .into_iter()
+            .filter(|p| is_replay_doc_path(p, &rust_dirs))
+        {
+            if let Some(blob) = pilot.read_blob_at(&cfg.t0_sha, &path)? {
+                let doc_facts =
+                    doc_claim::extract(&blob, &path, &facts_so_far).with_context(|| {
+                        format!("parse README at {} @ {}", path.display(), cfg.t0_sha)
+                    })?;
+                push_observed_facts(&mut facts, &mut facts_so_far, &blob, doc_facts);
+                t0_blobs.insert(path, blob);
+            }
+        }
+
+        let mut out = Vec::with_capacity(wanted.len());
+        for observed in &facts {
+            let id = fact_id(&observed.fact);
+            if !wanted.contains(&id) {
+                continue;
+            }
+            let source_path_norm =
+                crate::repo::normalize_path_for_fact_id(observed.fact.source_path());
+            let blob = t0_blobs.get(observed.fact.source_path());
+            let body = render_fact_body(&observed.fact, blob.map(|v| v.as_slice()));
+            out.push(crate::output::FactBodyRow {
+                fact_id: id,
+                kind: observed.fact.kind_name().to_string(),
+                body,
+                source_path: source_path_norm,
+                line_span: observed.fact.line_span(),
+                symbol_path: observed.fact.symbol_path(),
+                content_hash_at_observation: observed.fact.content_hash().to_string(),
+            });
+        }
+        let emitted: BTreeSet<String> = out.iter().map(|row| row.fact_id.clone()).collect();
+        let missing: Vec<String> = wanted.difference(&emitted).take(10).cloned().collect();
+        anyhow::ensure!(
+            emitted.len() == wanted.len(),
+            "emit-facts could not reconstruct {} requested fact_id(s); first missing: {}",
+            wanted.len().saturating_sub(emitted.len()),
+            missing.join(", ")
+        );
+        Ok(out)
     }
 
     /// Shared implementation used by both [`Self::run`] and
@@ -439,7 +548,7 @@ fn group_facts_by_source_path(facts: &[ObservedFact]) -> BTreeMap<PathBuf, Vec<&
     let mut grouped: BTreeMap<PathBuf, Vec<&ObservedFact>> = BTreeMap::new();
     for observed in facts {
         grouped
-            .entry(source_path_for(&observed.fact).to_path_buf())
+            .entry(observed.fact.source_path().to_path_buf())
             .or_default()
             .push(observed);
     }
@@ -456,7 +565,7 @@ fn build_t0_names_by_path(facts: &[ObservedFact]) -> BTreeMap<PathBuf, HashSet<S
     for observed in facts {
         let key = qualified_key_for(&observed.fact).to_string();
         by_path
-            .entry(source_path_for(&observed.fact).to_path_buf())
+            .entry(observed.fact.source_path().to_path_buf())
             .or_default()
             .insert(key);
     }
@@ -558,7 +667,7 @@ pub fn validate_sha_hex(sha: &str) -> Result<()> {
 /// string transform) so that no absolute filesystem path can ever leak
 /// into a `fact_id`, regardless of the user's `pwd` or where the repo
 /// lives on disk.
-fn fact_id(fact: &Fact) -> String {
+pub(crate) fn fact_id(fact: &Fact) -> String {
     match fact {
         Fact::FunctionSignature {
             qualified_name,
@@ -700,7 +809,7 @@ fn classify_against_commit(
         None => CommitState::deleted(),
 
         Some(post_bytes) => {
-            let observed_hash = observed_hash_for(fact);
+            let observed_hash = fact.content_hash();
 
             // Search the post-commit file for the same fact kind/key.
             let post_fact = match_post::matching_post_fact(
@@ -841,6 +950,178 @@ fn classify_against_commit(
     Ok(classify(fact, &state))
 }
 
+/// Render the SPEC §3 single-line claim body for `fact`. For
+/// `Fact::FunctionSignature` the parameter list and return type are
+/// parsed from the T₀ source blob via tree-sitter (the public
+/// [`Fact::FunctionSignature`] variant only stores the qualified name
+/// and content hash — parameter and return-type text are not part of
+/// the serialized schema and would otherwise need a separate
+/// extraction pass).
+///
+/// `blob` should be the T₀ bytes of `fact.source_path()` when
+/// available; missing blobs fall back to a span-empty rendering so
+/// `emit_facts` never panics on a malformed input.
+pub fn render_fact_body(fact: &Fact, blob: Option<&[u8]>) -> String {
+    match fact {
+        Fact::FunctionSignature { qualified_name, .. } => {
+            let (params, ret) = blob
+                .map(|b| parse_fn_signature_parts(b, fact))
+                .unwrap_or((String::new(), "()".to_string()));
+            format!("function {qualified_name} has parameters ({params}) with return type {ret}")
+        }
+        Fact::Field {
+            qualified_path,
+            type_text,
+            ..
+        } => {
+            // Split `T::name` (or `E::Variant::name`) into `parent` + `name`.
+            // The leaf is always the last `::` segment; the parent is
+            // everything before it. Single-segment paths (shouldn't happen
+            // for fields but stay defensive) fall back to parent = "".
+            let (parent, name) = match qualified_path.rsplit_once("::") {
+                Some((p, n)) => (p, n),
+                None => ("", qualified_path.as_str()),
+            };
+            format!("type {parent} has field {name} of type {type_text}")
+        }
+        Fact::PublicSymbol {
+            qualified_name,
+            source_path,
+            ..
+        } => {
+            // The extractor stores only the leaf name in `qualified_name`
+            // (`extract_named_item` in `symbol_existence.rs`). Use the
+            // normalized source path as the module identifier so the body
+            // is stable across machines and never includes an absolute
+            // filesystem path.
+            let module = crate::repo::normalize_path_for_fact_id(source_path);
+            format!("exported name {qualified_name} resolves in module {module}")
+        }
+        Fact::DocClaim {
+            qualified_name,
+            doc_path,
+            ..
+        } => {
+            let doc_file = crate::repo::normalize_path_for_fact_id(doc_path);
+            format!("doc {doc_file} mentions symbol {qualified_name}")
+        }
+        Fact::TestAssertion {
+            test_fn,
+            asserted_symbol,
+            ..
+        } => {
+            // SPEC §3.1 binds the assertion to the test function and
+            // optionally to an asserted-on symbol. When the extractor
+            // can't resolve a symbol from the macro arguments
+            // (`asserted_symbol = None`), fall back to the literal
+            // `(none)` so the body string is always present.
+            let target = asserted_symbol.as_deref().unwrap_or("(none)");
+            format!("test {test_fn} asserts property about symbol {target}")
+        }
+    }
+}
+
+/// Parse the parameter list and return type out of the T₀ bytes of a
+/// `function_item`'s signature span. Returns `(params, ret)` where
+/// `params` is the contents of the `()` and `ret` is the return type
+/// text (with `()` as the default for functions whose declaration omits
+/// `-> R`).
+///
+/// Implementation note: we re-parse the entire source blob rather than
+/// trying to lex inside the span alone — the span ends before the
+/// function body's opening brace, so the `function_item` node is fully
+/// present in the AST and tree-sitter gives us labeled `parameters` /
+/// `return_type` child fields without further normalization. Matching
+/// is done by `(qualified_name, line_start)` so multiple `fn foo` items
+/// in the same file disambiguate cleanly.
+fn parse_fn_signature_parts(blob: &[u8], fact: &Fact) -> (String, String) {
+    let (qualified_name, line_start) = match fact {
+        Fact::FunctionSignature {
+            qualified_name,
+            span,
+            ..
+        } => (qualified_name.as_str(), span.line_start),
+        _ => return (String::new(), "()".to_string()),
+    };
+    let ast = match RustAst::parse(blob) {
+        Ok(ast) => ast,
+        Err(_) => return (String::new(), "()".to_string()),
+    };
+    let src = ast.source();
+    let leaf = qualified_name.rsplit("::").next().unwrap_or(qualified_name);
+    let mut found: Option<(String, String)> = None;
+    walk_function_items(ast.root(), src, leaf, line_start, &mut found);
+    found.unwrap_or((String::new(), "()".to_string()))
+}
+
+/// Maximum number of source lines that a function's leading attributes
+/// and doc comments may push the recorded fact span above the actual
+/// `fn` keyword line. Functions with deeper attribute stacks will fall
+/// through to the empty-params / `()` default in `parse_fn_signature_parts`.
+/// Set conservatively from the pilot corpus (ripgrep at af6b6c54);
+/// raise if a downstream test surfaces a missed match.
+const FN_ATTR_LINE_WINDOW: i64 = 8;
+
+fn walk_function_items(
+    node: tree_sitter::Node<'_>,
+    src: &[u8],
+    leaf: &str,
+    line_start: u32,
+    out: &mut Option<(String, String)>,
+) {
+    if out.is_some() {
+        return;
+    }
+    if node.kind() == "function_item" {
+        if let Some(name_node) = node.child_by_field_name("name") {
+            if let Ok(name) = name_node.utf8_text(src) {
+                if name == leaf {
+                    // The fact's `line_start` is the 1-based start of the
+                    // (possibly attribute-leading) signature span. The
+                    // tree-sitter `function_item` itself starts at the
+                    // `fn` keyword (or the visibility modifier), so we
+                    // accept any match whose `function_item` start row is
+                    // within a small window of `line_start` — leading
+                    // attributes and doc comments push the fact span
+                    // upwards but never downwards.
+                    let item_row = (node.start_position().row + 1) as i64;
+                    if (item_row - line_start as i64).abs() <= FN_ATTR_LINE_WINDOW {
+                        let params = node
+                            .child_by_field_name("parameters")
+                            .and_then(|n| n.utf8_text(src).ok())
+                            .map(|s| {
+                                // `parameters` includes the surrounding
+                                // `(` and `)`; strip them so the rendered
+                                // body uses our own parentheses.
+                                let t = s.trim();
+                                let inner = t
+                                    .strip_prefix('(')
+                                    .and_then(|s| s.strip_suffix(')'))
+                                    .unwrap_or(t);
+                                inner.trim().to_string()
+                            })
+                            .unwrap_or_default();
+                        let ret = node
+                            .child_by_field_name("return_type")
+                            .and_then(|n| n.utf8_text(src).ok())
+                            .map(|s| s.trim().to_string())
+                            .unwrap_or_else(|| "()".to_string());
+                        *out = Some((params, ret));
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_function_items(child, src, leaf, line_start, out);
+        if out.is_some() {
+            return;
+        }
+    }
+}
+
 fn observed_span_bytes(blob: &[u8], fact: &Fact) -> Vec<u8> {
     blob[span_for(fact).byte_range.clone()].to_vec()
 }
@@ -852,26 +1133,6 @@ fn span_for(fact: &Fact) -> &Span {
         Fact::PublicSymbol { span, .. } => span,
         Fact::DocClaim { mention_span, .. } => mention_span,
         Fact::TestAssertion { span, .. } => span,
-    }
-}
-
-fn source_path_for(fact: &Fact) -> &Path {
-    match fact {
-        Fact::FunctionSignature { source_path, .. } => source_path,
-        Fact::Field { source_path, .. } => source_path,
-        Fact::PublicSymbol { source_path, .. } => source_path,
-        Fact::DocClaim { doc_path, .. } => doc_path,
-        Fact::TestAssertion { source_path, .. } => source_path,
-    }
-}
-
-fn observed_hash_for(fact: &Fact) -> &str {
-    match fact {
-        Fact::FunctionSignature { content_hash, .. } => content_hash,
-        Fact::Field { content_hash, .. } => content_hash,
-        Fact::PublicSymbol { content_hash, .. } => content_hash,
-        Fact::DocClaim { mention_hash, .. } => mention_hash,
-        Fact::TestAssertion { content_hash, .. } => content_hash,
     }
 }
 

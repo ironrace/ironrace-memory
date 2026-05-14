@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **provbench-baseline** (Phase 0c): new workspace-excluded crate implementing
+  the LLM-as-invalidator baseline against `claude-sonnet-4-6` snapshot
+  2026-05-09 per SPEC §6.1. Three subcommands (`sample`, `run`, `score`).
+  Operational $25 budget cap (preflight + live abort) under the spec's
+  immutable $250 ceiling. Stratified sampler, atomic checkpointing,
+  `--resume`, schema-derived preflight estimator, prompt caching at the
+  static prefix, parse-error addendum retry, §7.1 three-way metrics +
+  §9.2 LLM-validator agreement with Wilson intervals + Cohen κ bootstrap.
+- **provbench-labeler**: two new subcommands `emit-facts` and `emit-diffs`
+  to produce the JSON artifacts consumed by the baseline runner.
+
 ### Fixed
 
 - **ProvBench labeler — Phase 0b hardening pass 5 (2026-05-13).**
