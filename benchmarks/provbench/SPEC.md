@@ -177,6 +177,7 @@ If any fails: pivot to the engineering contribution ("fact freshness + source-ha
 | Date | Section | Change | Justification | Re-evals required |
 |---|---|---|---|---|
 | _(pre-freeze)_ | _all_ | initial draft | — | — |
+| 2026-05-13 | §7.1 / §9.3 | First Phase 0c numeric result recorded (subset, 44%). Baseline runner gained skip-and-log on parse failure (commit `0b4d441`); batches 22–270 of the 2026-05-13 run produced under that binary, batches 1–21 under the pre-patch binary. Patch touches error-handling only; prompt + scoring byte-stable. | Five Sonnet responses returned non-JSON despite the addendum retry; aborting on each would have made any subset score impossible. The patch isolates the failure to a diagnostic sidecar so the run can complete to the budget cap. | None — the patch does not alter the prompt or scoring, and `tests/prompt_frozen.rs` covers prompt stability. Held-out repos (§9.4) and any future full-coverage run will use the post-patch binary by default. |
 
 ## 12. Known exclusions
 

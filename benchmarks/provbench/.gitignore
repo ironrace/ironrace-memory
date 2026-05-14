@@ -1,7 +1,11 @@
 # Large generated artifacts that aren't reproducible from git state alone:
 # - Corpus JSONL is regeneratable from the labeler binary + ripgrep clone
+# - Facts JSONL and per-commit diffs are regeneratable from the labeler's
+#   `emit-facts` / `emit-diffs` subcommands over the corpus + ripgrep clone
 # - Spot-check working-copy files (.bak, .PARKED) are local-only
 corpus/*.jsonl
+facts/*.facts.jsonl
+facts/*.diffs/
 spotcheck/*.bak
 spotcheck/*.PARKED
 work/
