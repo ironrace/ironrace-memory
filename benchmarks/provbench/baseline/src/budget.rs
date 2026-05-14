@@ -95,18 +95,28 @@ impl CostMeter {
         Self { cap, cost_usd: 0.0 }
     }
 
-    pub fn record(&mut self, u: &Usage) {
+    /// Record a single API call's `Usage`, accumulating its USD cost.
+    ///
+    /// Returns `Err` (rather than panicking) when the running total
+    /// reaches the SPEC §6.2 / §15 immutable ceiling. The caller is
+    /// expected to abort the run, persist `run_meta.json`, and exit
+    /// non-zero so CI surfaces the breach. The operational `cap`
+    /// (≤ ceiling) is enforced separately by
+    /// [`CostMeter::before_next_batch`] as a pre-dispatch gate.
+    pub fn record(&mut self, u: &Usage) -> anyhow::Result<()> {
         self.cost_usd += (u.input_tokens as f64 / 1_000_000.0) * PRICE_INPUT_UNCACHED_USD_PER_MTOK
             + (u.cache_creation_input_tokens as f64 / 1_000_000.0)
                 * PRICE_INPUT_CACHE_WRITE_USD_PER_MTOK
             + (u.cache_read_input_tokens as f64 / 1_000_000.0)
                 * PRICE_INPUT_CACHE_READ_USD_PER_MTOK
             + (u.output_tokens as f64 / 1_000_000.0) * PRICE_OUTPUT_USD_PER_MTOK;
-        assert!(
+        anyhow::ensure!(
             self.cost_usd < SPEC_BUDGET_USD,
-            "spec ceiling ${} breached — must not be possible",
-            SPEC_BUDGET_USD
+            "spec ceiling ${} breached: cost_usd={}",
+            SPEC_BUDGET_USD,
+            self.cost_usd
         );
+        Ok(())
     }
 
     pub fn before_next_batch(&self, estimated_next: f64) -> BatchDecision {

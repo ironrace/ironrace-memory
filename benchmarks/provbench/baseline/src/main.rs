@@ -78,6 +78,11 @@ struct RunArgs {
     /// default; primarily for smoke runs.
     #[arg(long)]
     max_batches: Option<usize>,
+    /// Operational budget ceiling in USD enforced by the runtime cost
+    /// meter (separate from the preflight refusal cap in `sample`).
+    /// Must remain ≤ the immutable SPEC §6.2 / §15 ceiling.
+    #[arg(long, name = "budget-usd", default_value_t = provbench_baseline::constants::DEFAULT_OPERATIONAL_BUDGET_USD)]
+    budget_usd: f64,
 }
 
 #[derive(Debug, clap::Args)]
@@ -128,7 +133,7 @@ fn main() -> Result<()> {
                 provbench_baseline::runner::run(provbench_baseline::runner::RunnerOpts {
                     run_dir,
                     manifest,
-                    budget_usd: provbench_baseline::constants::DEFAULT_OPERATIONAL_BUDGET_USD,
+                    budget_usd: args.budget_usd,
                     resume: args.resume,
                     dry_run: args.dry_run,
                     fixture_mode: args.fixture_mode,

@@ -15,23 +15,27 @@ const PER_BATCH_INPUT_TOKENS: u32 = 383_333;
 fn live_meter_aborts_at_95_percent_of_cap() {
     let mut meter = CostMeter::new(25.0);
     for _ in 0..19 {
-        meter.record(&Usage {
-            input_tokens: PER_BATCH_INPUT_TOKENS,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            output_tokens: 0,
-        });
+        meter
+            .record(&Usage {
+                input_tokens: PER_BATCH_INPUT_TOKENS,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                output_tokens: 0,
+            })
+            .expect("record under spec ceiling");
         assert!(matches!(
             meter.before_next_batch(1.20),
             BatchDecision::Proceed
         ));
     }
-    meter.record(&Usage {
-        input_tokens: PER_BATCH_INPUT_TOKENS,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-        output_tokens: 0,
-    });
+    meter
+        .record(&Usage {
+            input_tokens: PER_BATCH_INPUT_TOKENS,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            output_tokens: 0,
+        })
+        .expect("record under spec ceiling");
     assert!(matches!(
         meter.before_next_batch(1.20),
         BatchDecision::Abort { .. }

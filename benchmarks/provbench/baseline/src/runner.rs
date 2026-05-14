@@ -34,7 +34,6 @@ use crate::prompt::PromptBuilder;
 use crate::sample::SampledRow;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -216,7 +215,7 @@ pub async fn run(opts: RunnerOpts) -> Result<RunResult> {
             c.score_batch(blocks).await?
         };
 
-        meter.record(&response.usage);
+        meter.record(&response.usage)?;
 
         // Index predictions by id for the parallel-row lookup.
         let pred_by_id: HashMap<&str, &str> = response
@@ -396,23 +395,23 @@ fn verify_manifest_hash(run_dir: &Path, manifest: &SampleManifest) -> Result<()>
     let on_disk: SampleManifest = serde_json::from_slice(&bytes)
         .with_context(|| format!("parse manifest {}", on_disk_path.display()))?;
 
-    // Recompute on-disk hash via canonical_json with content_hash blanked.
-    let mut tmp = on_disk.clone();
-    tmp.content_hash = String::new();
-    let mut hasher = Sha256::new();
-    hasher.update(serde_json::to_vec(&tmp)?);
-    let recomputed = hex::encode(hasher.finalize());
+    // Recompute via the exact same helper the writer used. This guarantees
+    // identical bytes go into the SHA-256 input on both sides (in particular,
+    // serde_json's compact form rather than the pretty-printed on-disk file,
+    // and with `created_at` blanked alongside `content_hash`).
+    let recorded = on_disk.content_hash.clone();
+    let recomputed = on_disk.compute_content_hash();
 
     anyhow::ensure!(
-        recomputed == on_disk.content_hash,
+        recomputed == recorded,
         "on-disk manifest content_hash is inconsistent: recorded={} recomputed={}",
-        on_disk.content_hash,
+        recorded,
         recomputed
     );
     anyhow::ensure!(
-        on_disk.content_hash == manifest.content_hash,
+        recorded == manifest.content_hash,
         "resume manifest mismatch: on-disk={} in-memory={}",
-        on_disk.content_hash,
+        recorded,
         manifest.content_hash
     );
     Ok(())
@@ -438,8 +437,22 @@ fn read_done_keys(path: &Path) -> Result<HashSet<(String, String)>> {
 }
 
 /// Read `<dir>/<batch_id>.json` and return a [`BatchResponse`].
+///
+/// Defense-in-depth: after building the candidate path, canonicalize
+/// both the fixture directory and the resolved path and verify the
+/// latter is still rooted under the former. A malformed `batch_id`
+/// containing `..` segments would otherwise let `Path::join` silently
+/// escape the fixture directory and read arbitrary files.
 fn load_fixture_response(dir: &Path, batch_id: &str) -> Result<BatchResponse> {
     let path = dir.join(format!("{batch_id}.json"));
+    if let (Ok(canon_dir), Ok(canon_path)) = (dir.canonicalize(), path.canonicalize()) {
+        anyhow::ensure!(
+            canon_path.starts_with(&canon_dir),
+            "fixture path {} escapes fixture dir {}",
+            canon_path.display(),
+            canon_dir.display(),
+        );
+    }
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("read fixture {}", path.display()))?;
     let fix: FixtureBatchResponse =

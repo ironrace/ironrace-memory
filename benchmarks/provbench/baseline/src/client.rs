@@ -55,12 +55,26 @@ impl AnthropicClient {
         }
     }
 
+    /// Dispatch one batch of prompt blocks.
+    ///
+    /// Two independent retry axes:
+    ///   - `transient_attempt` — up to two retries for 5xx/429/network
+    ///     errors. Bounded so a flapping upstream cannot exhaust the
+    ///     runtime budget.
+    ///   - `parse_retried` — at most ONE retry that appends
+    ///     [`PARSE_RETRY_ADDENDUM`] after a malformed (non-JSON / wrong-
+    ///     shape) model response. This axis is independent of the
+    ///     transient axis: a parse retry does not consume a transient
+    ///     slot, and a transient retry does not consume the parse-retry
+    ///     slot.
     pub async fn score_batch(&self, blocks: Vec<ContentBlock>) -> Result<BatchResponse> {
         let started = std::time::Instant::now();
         let mut attempt_blocks = blocks;
+        let mut transient_attempt: usize = 0;
         let mut parse_retried = false;
+        const MAX_TRANSIENT_RETRIES: usize = 2;
 
-        for transient_attempt in 0..=2 {
+        loop {
             let body = build_request_body(&attempt_blocks);
             let resp = self
                 .client
@@ -74,28 +88,34 @@ impl AnthropicClient {
 
             let resp = match resp {
                 Ok(r) => r,
-                Err(e) if transient_attempt < 2 => {
-                    let backoff = backoff_for(transient_attempt);
-                    tokio::time::sleep(backoff).await;
-                    tracing::warn!("transient network error: {e}; retrying after {:?}", backoff);
-                    continue;
+                Err(e) => {
+                    if transient_attempt < MAX_TRANSIENT_RETRIES {
+                        let backoff = backoff_for(transient_attempt);
+                        transient_attempt += 1;
+                        tracing::warn!(
+                            "transient network error: {e}; retrying after {:?}",
+                            backoff
+                        );
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    return Err(e.into());
                 }
-                Err(e) => return Err(e.into()),
             };
 
             let status = resp.status();
             if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                if transient_attempt < 2 {
+                if transient_attempt < MAX_TRANSIENT_RETRIES {
                     let backoff = backoff_for(transient_attempt);
+                    transient_attempt += 1;
                     tokio::time::sleep(backoff).await;
                     continue;
-                } else {
-                    anyhow::bail!(
-                        "API {} after retries: {}",
-                        status,
-                        resp.text().await.unwrap_or_default()
-                    );
                 }
+                anyhow::bail!(
+                    "API {} after retries: {}",
+                    status,
+                    resp.text().await.unwrap_or_default()
+                );
             }
 
             let request_id = resp
@@ -132,7 +152,6 @@ impl AnthropicClient {
                 Err(e) => anyhow::bail!("response parse failed after addendum retry: {e}"),
             }
         }
-        anyhow::bail!("score_batch: exhausted retries")
     }
 }
 

@@ -42,8 +42,14 @@ pub struct SampleManifest {
     pub excluded_count_by_reason: BTreeMap<String, usize>,
     pub estimated_worst_case_usd: f64,
     pub rows: Vec<SampledRow>,
+    /// Wall-clock provenance metadata only. **Not** part of the
+    /// determinism contract — [`SampleManifest::compute_content_hash`]
+    /// blanks this field before hashing so two runs of the same
+    /// `(corpus, facts, diffs, seed, targets, budget, git HEAD)` produce
+    /// byte-identical `content_hash` values even seconds apart.
     pub created_at: String,
-    /// `sha256` of the canonical JSON with this field blanked.
+    /// `sha256` of the canonical JSON with `content_hash` and
+    /// `created_at` both blanked. See [`SampleManifest::compute_content_hash`].
     pub content_hash: String,
 }
 
@@ -159,9 +165,17 @@ impl SampleManifest {
         serde_json::to_string(self).expect("SampleManifest serialization must not fail")
     }
 
-    fn compute_content_hash(&self) -> String {
+    /// Compute the SHA-256 content hash of this manifest.
+    ///
+    /// Both `content_hash` and `created_at` are blanked before
+    /// serialization so the hash is stable across two runs that
+    /// otherwise share the same inputs (the wall-clock time differs).
+    /// Exposed `pub(crate)` so the runner's resume-time verifier can
+    /// recompute the exact same bytes.
+    pub(crate) fn compute_content_hash(&self) -> String {
         let mut tmp = self.clone();
         tmp.content_hash = String::new();
+        tmp.created_at = String::new();
         let mut hasher = Sha256::new();
         hasher
             .update(serde_json::to_vec(&tmp).expect("SampleManifest serialization must not fail"));

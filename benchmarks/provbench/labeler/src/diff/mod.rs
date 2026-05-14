@@ -12,6 +12,22 @@ use tree_sitter::{Node, Parser, Tree};
 /// exceeds this length (extremely unlikely).
 const FULL_FILE_CONTEXT_LINES: &str = "-U999999";
 
+/// Reject any string that isn't exactly 40 lowercase hex characters.
+///
+/// Defense-in-depth before a commit SHA is passed as an argv element
+/// to `git`. Without this guard, a corpus row containing
+/// `--upload-pack=…`, `HEAD:path`, `refs/…`, or any other git option
+/// or revision spelling could be smuggled into the subprocess argv via
+/// the `parent`/`commit` parameters. Restricting to 40 lowercase hex
+/// chars precisely matches a Git object ID and rejects every other form.
+fn validate_sha(s: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        s.len() == 40 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "commit SHA must be 40 lowercase hex chars, got: {s:?}"
+    );
+    Ok(())
+}
+
 /// Compute the unified diff between two commits with full file context
 /// (`-U999999`) restricted to files actually touched in the commit.
 ///
@@ -25,6 +41,8 @@ pub fn full_file_context_diff(
     commit: &str,
 ) -> anyhow::Result<String> {
     use anyhow::Context;
+    validate_sha(parent)?;
+    validate_sha(commit)?;
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)
@@ -45,6 +63,7 @@ pub fn full_file_context_diff(
 /// Used by the `emit-diffs` subcommand to discriminate the `no_parent`
 /// exclusion case from the diffable case.
 pub fn parent_sha(repo_path: &std::path::Path, commit: &str) -> anyhow::Result<Option<String>> {
+    validate_sha(commit)?;
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)
@@ -404,4 +423,45 @@ fn extract_leaf_name_from_span(span: &str) -> &str {
         .find(|c: char| !c.is_alphanumeric() && c != '_')
         .unwrap_or(trimmed.len());
     &trimmed[..end]
+}
+
+#[cfg(test)]
+mod sha_validation_tests {
+    use super::validate_sha;
+
+    #[test]
+    fn accepts_canonical_40_lowercase_hex() {
+        assert!(validate_sha(&"a".repeat(40)).is_ok());
+        assert!(validate_sha("0123456789abcdef0123456789abcdef01234567").is_ok());
+        assert!(validate_sha("af6b6c543b224d348a8876f0c06245d9ea7929c5").is_ok());
+    }
+
+    #[test]
+    fn rejects_git_option_smuggling() {
+        let err = validate_sha("--upload-pack=/x").unwrap_err();
+        assert!(err.to_string().contains("40 lowercase hex"));
+    }
+
+    #[test]
+    fn rejects_colon_path_form() {
+        assert!(validate_sha("HEAD:path").is_err());
+        assert!(validate_sha("refs/heads/main").is_err());
+    }
+
+    #[test]
+    fn rejects_short_sha_and_uppercase() {
+        assert!(validate_sha(&"a".repeat(39)).is_err());
+        assert!(validate_sha(&"a".repeat(41)).is_err());
+        // Uppercase hex is rejected even though git itself would accept
+        // it — we want a single canonical form so two corpora never
+        // disagree on equality of the same commit.
+        assert!(validate_sha(&"A".repeat(40)).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_and_non_hex() {
+        assert!(validate_sha("").is_err());
+        assert!(validate_sha(&"z".repeat(40)).is_err());
+        assert!(validate_sha(&"g".repeat(40)).is_err());
+    }
 }
