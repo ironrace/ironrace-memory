@@ -35,4 +35,46 @@ impl Repo {
         let obj = entry.object()?;
         Ok(Some(obj.data.clone()))
     }
+
+    /// Recursively list all blob (file) paths under the commit's tree.
+    /// Used by R7 (rename candidate) for whole-tree similarity search.
+    pub fn list_tree(&self, commit_sha: &str) -> Result<Vec<String>> {
+        let oid = ObjectId::from_hex(commit_sha.as_bytes())
+            .with_context(|| format!("parsing commit sha {}", commit_sha))?;
+        let commit = match self.inner.find_object(oid) {
+            Ok(o) => o.try_into_commit().context("not a commit")?,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let tree = commit.tree().context("commit has no tree")?;
+        let mut out = Vec::new();
+        walk_tree(&self.inner, &tree, "", &mut out)?;
+        out.sort();
+        Ok(out)
+    }
+}
+
+fn walk_tree(
+    repo: &gix::Repository,
+    tree: &gix::Tree<'_>,
+    prefix: &str,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    for entry in tree.iter() {
+        let entry = entry?;
+        let name = entry.filename().to_string();
+        let full = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", prefix, name)
+        };
+        let mode = entry.mode();
+        if mode.is_tree() {
+            let child = repo.find_object(entry.object_id())?;
+            let child_tree = child.try_into_tree().context("expected tree object")?;
+            walk_tree(repo, &child_tree, &full, out)?;
+        } else if mode.is_blob() {
+            out.push(full);
+        }
+    }
+    Ok(())
 }

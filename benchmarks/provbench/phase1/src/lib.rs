@@ -8,5 +8,9 @@
 pub mod baseline_run;
 pub mod diffs;
 pub mod facts;
+pub mod parse;
 pub mod repo;
+pub mod rules;
+pub mod runner;
+pub mod similarity;
 pub mod storage;
