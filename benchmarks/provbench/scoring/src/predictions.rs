@@ -12,6 +12,12 @@ pub struct PredictionRow {
     pub batch_id: String,
     pub ground_truth: String,
     pub prediction: String,
+    /// Runner-specific identifier:
+    ///   - Baseline emits the Anthropic API request id (`req_…`).
+    ///   - Phase 1 emits `phase1:<rule_set_version>:<commit_sha>:<row_index>`.
+    ///
+    /// Format is opaque to the scorer; it is preserved verbatim in
+    /// `predictions.jsonl` for audit / debugging.
     pub request_id: String,
     pub wall_ms: u64,
 }

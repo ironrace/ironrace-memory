@@ -43,12 +43,23 @@ impl Rule for R7RenameCandidate {
             }
         }
         if let Some((s, p)) = best {
+            // Preserve 3-decimal similarity by parsing the formatted
+            // string back into a JSON number; the round-trip avoids
+            // f32 precision noise in the trace artifact while keeping
+            // `to` safely escaped via serde_json.
+            let similarity_value: serde_json::Value = format!("{:.3}", s)
+                .parse::<f64>()
+                .map(serde_json::Value::from)
+                .unwrap_or(serde_json::Value::Null);
             return Some((
                 Decision::Stale,
-                format!(
-                    r#"{{"rule":"R7","reason":"stale_symbol_renamed","similarity":{:.3},"to":"{}"}}"#,
-                    s, p
-                ),
+                serde_json::json!({
+                    "rule": "R7",
+                    "reason": "stale_symbol_renamed",
+                    "similarity": similarity_value,
+                    "to": p,
+                })
+                .to_string(),
             ));
         }
         None

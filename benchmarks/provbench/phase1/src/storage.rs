@@ -61,6 +61,12 @@ CREATE INDEX IF NOT EXISTS idx_eval_rows_commit ON eval_rows(commit_sha);
 CREATE INDEX IF NOT EXISTS idx_predictions_commit ON predictions(commit_sha);
 "#;
 
+/// Open the phase1 SQLite database, enabling WAL mode and foreign keys.
+///
+/// The schema is idempotent (`CREATE TABLE IF NOT EXISTS`) so re-opening
+/// an existing database leaves data intact. Tables: `facts`,
+/// `diff_artifacts`, `eval_rows`, `predictions`, `rule_traces`. Indexes:
+/// `idx_eval_rows_commit`, `idx_predictions_commit`.
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(SCHEMA)?;

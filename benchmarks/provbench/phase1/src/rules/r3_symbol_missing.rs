@@ -39,10 +39,13 @@ impl Rule for R3SymbolMissing {
         if !resolves {
             return Some((
                 Decision::Stale,
-                format!(
-                    r#"{{"rule":"R3","reason":"stale_source_deleted","symbol":"{}","leaf":"{}"}}"#,
-                    qualified, leaf
-                ),
+                serde_json::json!({
+                    "rule": "R3",
+                    "reason": "stale_source_deleted",
+                    "symbol": qualified,
+                    "leaf": leaf,
+                })
+                .to_string(),
             ));
         }
         None

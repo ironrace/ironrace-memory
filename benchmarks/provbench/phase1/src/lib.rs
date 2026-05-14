@@ -2,7 +2,7 @@
 //!
 //! Consumes the labeler's `*.facts.jsonl` + per-commit diff artifacts, evaluates
 //! the row set pinned by `--baseline-run/predictions.jsonl`, and emits
-//! `predictions.jsonl` (matches `provbench_baseline::runner::PredictionRow`
+//! `predictions.jsonl` (matches `provbench_scoring::PredictionRow`
 //! byte-for-byte) + `rule_traces.jsonl`.
 
 pub mod baseline_run;

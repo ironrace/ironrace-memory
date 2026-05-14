@@ -14,13 +14,32 @@ use std::path::Path;
 
 use crate::PredictionRow;
 
+/// Side-by-side metrics rollup produced by `compare::run`.
+///
+/// Pairs the LLM baseline's already-scored `metrics.json` against a
+/// candidate (e.g. the Phase 1 rules runner) scored on the same
+/// SPEC §7.1 axes, with deltas, SPEC §8 pass/fail booleans, and a
+/// per-rule confusion matrix joined from `rule_traces.jsonl`.
+///
+/// The struct is the typed counterpart to the JSON document the CLI
+/// writes; consumers should prefer the JSON output for archival and
+/// only deserialize back into `Compare` when programmatic access is
+/// required.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Compare {
+    /// LLM baseline column: contents of `<baseline_run>/metrics.json`
+    /// loaded verbatim, used as the reference for deltas.
     pub llm_baseline: Value,
+    /// Candidate column: SPEC §7.1 metrics scored directly from
+    /// `<candidate_run>/predictions.jsonl` by `score_candidate`.
     pub candidate: Value,
     pub candidate_name: String,
     pub deltas: BTreeMap<String, f64>,
+    /// SPEC §8 pass/fail booleans (`section_8_3_valid_retention_ge_0_95`,
+    /// `section_8_4_latency_p50_le_727_ms`, `section_8_5_stale_recall_wlb_ge_0_30`).
     pub thresholds: BTreeMap<String, bool>,
+    /// Per-rule confusion matrix: `rule_id → "<gt>__<pred>" → count`,
+    /// joined from `<candidate_run>/rule_traces.jsonl`.
     pub per_rule_confusion: BTreeMap<String, BTreeMap<String, u64>>,
 }
 

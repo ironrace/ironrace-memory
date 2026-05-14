@@ -12,19 +12,44 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Score a baseline run's eval subset with the structural rule chain.
+    /// Reads facts.jsonl + per-commit diff artifacts + baseline-run
+    /// predictions.jsonl, writes predictions.jsonl + rule_traces.jsonl +
+    /// phase1.sqlite + a one-line summary on stderr.
     Score {
+        /// Path to the local git checkout (gix HEAD-only reader). The T0
+        /// commit must be reachable here.
         #[arg(long)]
         repo: PathBuf,
+
+        /// T0 commit SHA — the labeler's anchor commit; phase1 reads facts
+        /// against this commit's tree.
         #[arg(long)]
         t0: String,
+
+        /// Path to <repo>.facts.jsonl (output of `provbench-labeler emit-facts`).
         #[arg(long)]
         facts: PathBuf,
+
+        /// Directory of per-commit <sha>.json diff artifacts
+        /// (output of `provbench-labeler emit-diffs`).
         #[arg(long = "diffs-dir")]
         diffs_dir: PathBuf,
+
+        /// Directory containing the LLM baseline run (must include
+        /// predictions.jsonl, manifest.json, metrics.json, run_meta.json).
+        /// Phase 1 evaluates exactly the row set in this baseline's
+        /// predictions.jsonl.
         #[arg(long = "baseline-run")]
         baseline_run: PathBuf,
+
+        /// Output directory; will contain predictions.jsonl, rule_traces.jsonl,
+        /// and phase1.sqlite.
         #[arg(long)]
         out: PathBuf,
+
+        /// Rule-set version label embedded in request_id and recorded in
+        /// run_meta.json. Bump when rule semantics change.
         #[arg(long, default_value = "v1.0")]
         rule_set_version: String,
     },

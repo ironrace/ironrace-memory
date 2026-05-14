@@ -16,6 +16,18 @@ use crate::facts::FactBody;
 use crate::repo::Repo;
 use crate::rules::{Decision, RowCtx, RuleChain};
 
+/// Configuration for a single Phase 1 scoring run.
+///
+/// Aggregates the SQLite handle (already populated by `facts::ingest`,
+/// `diffs::ingest`, and `baseline_run::ingest`), a HEAD-only gix repo
+/// reader, the T0 anchor commit, the rule-set version label embedded in
+/// `request_id`, and the two output JSONL paths.
+///
+/// All references are short-lived (one `runner::run` call) and the
+/// struct is consumed by value; it intentionally borrows everything to
+/// avoid copying paths or duplicating the DB connection.
+// NOTE: this struct currently leaks `rusqlite::Connection` through the
+// public API; trait-ify before ironmem integration.
 pub struct RunnerOpts<'a> {
     pub db: &'a Connection,
     pub repo: &'a Repo,
@@ -190,6 +202,17 @@ pub fn run(opts: RunnerOpts<'_>) -> Result<RunStats> {
     Ok(stats)
 }
 
+/// Per-run decision tally emitted by `runner::run`.
+///
+/// `processed` is the total number of `eval_rows` scored; the remaining
+/// counters partition that total by final `Decision`.
+///
+/// `needs_reval` is expected to be 0 on the current rule chain: R7 is
+/// unreachable in practice (R3 always fires first when `post_blob` is
+/// `Some`), and the R9 fallback only triggers when no earlier rule
+/// matches — a state R3/R4 cover for every fact kind present in the
+/// canary corpus. A non-zero count is a §9.4 follow-up signal, not a
+/// bug.
 #[derive(Default, Debug)]
 pub struct RunStats {
     pub processed: u64,

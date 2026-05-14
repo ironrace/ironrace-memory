@@ -85,7 +85,11 @@ impl Rule for R4SpanHashChanged {
         if guard_passed && contains_subslice(post, &t0_span) {
             return Some((
                 Decision::Valid,
-                r#"{"rule":"R4","reason":"t0_span_found_in_post"}"#.into(),
+                serde_json::json!({
+                    "rule": "R4",
+                    "reason": "t0_span_found_in_post",
+                })
+                .to_string(),
             ));
         }
 
@@ -96,7 +100,11 @@ impl Rule for R4SpanHashChanged {
         // contained by the leaf+length guards above.
         Some((
             Decision::Stale,
-            r#"{"rule":"R4","reason":"stale_source_changed"}"#.into(),
+            serde_json::json!({
+                "rule": "R4",
+                "reason": "stale_source_changed",
+            })
+            .to_string(),
         ))
     }
 }

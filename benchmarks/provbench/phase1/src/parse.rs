@@ -18,7 +18,9 @@ pub enum FileKind {
 impl ParsedFile {
     pub fn parse_rust(src: &[u8]) -> Self {
         let mut p = Parser::new();
-        p.set_language(&tree_sitter_rust::language()).unwrap();
+        p.set_language(&tree_sitter_rust::language()).expect(
+            "tree-sitter Rust grammar ABI mismatch — update tree-sitter-rust crate version",
+        );
         let tree = p.parse(src, None);
         Self {
             source: src.to_vec(),
@@ -28,7 +30,9 @@ impl ParsedFile {
     }
     pub fn parse_markdown(src: &[u8]) -> Self {
         let mut p = Parser::new();
-        p.set_language(&tree_sitter_md::language()).unwrap();
+        p.set_language(&tree_sitter_md::language()).expect(
+            "tree-sitter Markdown grammar ABI mismatch — update tree-sitter-md crate version",
+        );
         let tree = p.parse(src, None);
         Self {
             source: src.to_vec(),
@@ -49,7 +53,8 @@ pub fn rust_tokens_equivalent(a: &[u8], b: &[u8]) -> bool {
 
 fn rust_token_stream(src: &[u8]) -> Vec<String> {
     let mut p = Parser::new();
-    p.set_language(&tree_sitter_rust::language()).unwrap();
+    p.set_language(&tree_sitter_rust::language())
+        .expect("tree-sitter Rust grammar ABI mismatch — update tree-sitter-rust crate version");
     let tree = match p.parse(src, None) {
         Some(t) => t,
         None => return vec![],
