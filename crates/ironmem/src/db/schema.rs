@@ -58,51 +58,90 @@ impl Database {
 
     /// Run schema migrations in version order. Idempotent: uses schema_version
     /// to skip already-applied migrations.
+    ///
+    /// Concurrency: serializes across processes/threads via `BEGIN IMMEDIATE`.
+    /// The version-gated migrations contain non-idempotent `ALTER TABLE … ADD
+    /// COLUMN` statements that fail with `duplicate column` if two openers
+    /// race the same migration step. Acquiring the SQLite write lock upfront
+    /// means a second migrator either (a) blocks until the first commits and
+    /// then re-reads `MAX(version)` to see the bumped value and skip the
+    /// already-applied steps, or (b) times out on `busy_timeout` and surfaces
+    /// a clean error rather than corrupting the schema. The base
+    /// `SCHEMA_SQL` (migration 001) is idempotent (`CREATE TABLE IF NOT
+    /// EXISTS`) and runs outside the lock so a fresh-DB first-open path
+    /// stays simple.
     pub fn migrate(&self) -> Result<(), MemoryError> {
         // v1: base schema (drawers, entities, triples, wal_log, schema_version)
         retry_on_busy(|| self.conn.execute_batch(SCHEMA_SQL))?;
 
-        // v2: FTS5 full-text search index for hybrid BM25+vector retrieval
+        // Acquire the SQLite write lock for the remaining version-gated
+        // migrations. `retry_on_busy` handles the contention path (a peer
+        // migrator holding the lock); once we own the lock, no other writer
+        // can interleave a non-idempotent `ALTER TABLE` with our reads.
+        retry_on_busy(|| self.conn.execute_batch("BEGIN IMMEDIATE"))?;
+
+        let result = self.run_version_gated_migrations();
+
+        match &result {
+            Ok(_) => {
+                self.conn.execute_batch("COMMIT")?;
+            }
+            Err(_) => {
+                // Best-effort rollback; even if it fails the caller already
+                // has the migration error and the connection will be dropped.
+                let _ = self.conn.execute_batch("ROLLBACK");
+            }
+        }
+        result
+    }
+
+    /// Inside-lock half of `migrate()`. Re-reads `MAX(version)` so a peer
+    /// migrator that just committed is observed before we run an `ALTER
+    /// TABLE`. Do not call outside `migrate()` — assumes the caller holds
+    /// `BEGIN IMMEDIATE`.
+    fn run_version_gated_migrations(&self) -> Result<(), MemoryError> {
         let current_version: i64 = self
             .conn
             .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
                 row.get(0)
             })
             .unwrap_or(1);
+
+        // v2: FTS5 full-text search index for hybrid BM25+vector retrieval
         if current_version < 2 {
-            retry_on_busy(|| self.conn.execute_batch(FTS_SQL))?;
+            self.conn.execute_batch(FTS_SQL)?;
         }
 
         // v3: collab protocol tables for bounded planning between Claude and Codex
         if current_version < 3 {
-            self.create_collab_tables()?;
+            self.conn.execute_batch(COLLAB_SQL)?;
         }
 
         // v4: planning protocol v1 final — task, review_round, ended_at columns
         // and PlanEscalated → PlanLocked data migration.
         if current_version < 4 {
-            retry_on_busy(|| self.conn.execute_batch(COLLAB_V1_SQL))?;
+            self.conn.execute_batch(COLLAB_V1_SQL)?;
         }
 
         // v5: collab v2 coding loop — task_list, per-task & global round
         // counters, base_sha / last_head_sha drift tracking, pr_url,
         // coding_failure.
         if current_version < 5 {
-            retry_on_busy(|| self.conn.execute_batch(COLLAB_V2_SQL))?;
+            self.conn.execute_batch(COLLAB_V2_SQL)?;
         }
 
         // v6: per-session `implementer` column (claude|codex) so
         // `/collab start --implementer=codex` can route the
         // `CodeImplementPending` phase to Codex.
         if current_version < 6 {
-            retry_on_busy(|| self.conn.execute_batch(COLLAB_IMPLEMENTER_SQL))?;
+            self.conn.execute_batch(COLLAB_IMPLEMENTER_SQL)?;
         }
 
         // v7: drop the now-zombified `current_task_index` column added by
         // migration 005. v3 batch mode replaced the per-task loop and the
         // column has been written as NULL and never read since.
         if current_version < 7 {
-            retry_on_busy(|| self.conn.execute_batch(DROP_CURRENT_TASK_INDEX_SQL))?;
+            self.conn.execute_batch(DROP_CURRENT_TASK_INDEX_SQL)?;
         }
 
         Ok(())
