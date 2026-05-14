@@ -109,6 +109,51 @@ struct StampedFactBody<'a> {
     labeler_git_sha: &'a str,
 }
 
+/// Per-commit diff artifact emitted by the `emit-diffs` subcommand
+/// (SPEC §6.1). Serialized as a single JSON object per file
+/// (`<commit_sha>.json`), with the variant discriminated by which fields
+/// are present (`unified_diff` vs. `excluded`) — i.e. `#[serde(untagged)]`.
+///
+/// Two shapes:
+/// - `Included { commit_sha, parent_sha, unified_diff }` — a normal commit
+///   with a parent whose diff is materialized at `-U999999` full file
+///   context.
+/// - `Excluded { commit_sha, excluded }` — a commit that has no parent
+///   (`excluded == "no_parent"`) or is T₀ itself (`excluded == "t0"`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DiffArtifact {
+    Included {
+        commit_sha: String,
+        parent_sha: String,
+        unified_diff: String,
+    },
+    Excluded {
+        commit_sha: String,
+        /// `"t0"` or `"no_parent"`.
+        excluded: String,
+    },
+}
+
+/// Write a single [`DiffArtifact`] to `<out_dir>/<commit_sha>.json`.
+///
+/// Creates `out_dir` if missing. Serialization is deterministic: the
+/// field order is fixed by the struct definition, there are no
+/// timestamps, and a single trailing newline is appended.
+pub fn write_diff_json(out_dir: &Path, artifact: &DiffArtifact) -> Result<()> {
+    let sha = match artifact {
+        DiffArtifact::Included { commit_sha, .. } => commit_sha,
+        DiffArtifact::Excluded { commit_sha, .. } => commit_sha,
+    };
+    std::fs::create_dir_all(out_dir)?;
+    let path = out_dir.join(format!("{sha}.json"));
+    let mut f = std::fs::File::create(path)?;
+    serde_json::to_writer(&mut f, artifact)?;
+    f.write_all(b"\n")?;
+    f.flush()?;
+    Ok(())
+}
+
 /// Write `rows` as JSONL, sorted by `fact_id` and stamped with
 /// `labeler_git_sha`. Byte-deterministic given the same inputs.
 pub fn write_facts_jsonl(path: &Path, rows: &[FactBodyRow], labeler_git_sha: &str) -> Result<()> {

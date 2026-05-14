@@ -55,6 +55,27 @@ enum Cmd {
         #[arg(long)]
         csv: std::path::PathBuf,
     },
+    /// Emit one `<commit_sha>.json` artifact per distinct `commit_sha`
+    /// referenced in the corpus. Each artifact contains either a
+    /// `unified_diff` (full file context per SPEC §6.1) or an
+    /// `excluded` reason (`"t0"` for the T₀ commit, `"no_parent"` for
+    /// root commits without a parent). Used by the Phase 0c baseline
+    /// runner to feed the LLM invalidator without re-invoking git.
+    EmitDiffs {
+        /// Path to the labeler corpus JSONL (`Run` output). Only the
+        /// `commit_sha` column is consulted.
+        #[arg(long)]
+        corpus: std::path::PathBuf,
+        /// Local path to the cloned pilot repo.
+        #[arg(long)]
+        repo: std::path::PathBuf,
+        /// T₀ commit SHA (40-char lowercase hex).
+        #[arg(long)]
+        t0: String,
+        /// Output directory (one `<commit_sha>.json` per distinct commit).
+        #[arg(long)]
+        out_dir: std::path::PathBuf,
+    },
     /// Emit one T₀ fact body row per unique `fact_id` referenced in
     /// the corpus, written as JSONL sorted by `fact_id`. Used by the
     /// Phase 0c baseline runner to load fact bodies for LLM
@@ -196,6 +217,51 @@ fn main() -> anyhow::Result<()> {
             let sha = provbench_labeler::labeler_stamp();
             provbench_labeler::output::write_facts_jsonl(&out, &rows, &sha)?;
             println!("wrote {} fact bodies to {}", rows.len(), out.display());
+            Ok(())
+        }
+        Some(Cmd::EmitDiffs {
+            corpus,
+            repo,
+            t0,
+            out_dir,
+        }) => {
+            use provbench_labeler::diff::{full_file_context_diff, parent_sha};
+            use provbench_labeler::output::{write_diff_json, DiffArtifact};
+            let corpus_rows = provbench_labeler::output::read_jsonl(&corpus)?;
+            // BTreeSet for deterministic iteration order (alphabetical
+            // by commit_sha), matching the deterministic-output
+            // contract of the sibling JSONL writers.
+            let mut unique: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for r in &corpus_rows {
+                unique.insert(r.commit_sha.clone());
+            }
+            let mut written = 0usize;
+            for commit in &unique {
+                let artifact = if commit == &t0 {
+                    DiffArtifact::Excluded {
+                        commit_sha: commit.clone(),
+                        excluded: "t0".to_string(),
+                    }
+                } else {
+                    match parent_sha(&repo, commit)? {
+                        None => DiffArtifact::Excluded {
+                            commit_sha: commit.clone(),
+                            excluded: "no_parent".to_string(),
+                        },
+                        Some(parent) => {
+                            let unified_diff = full_file_context_diff(&repo, &parent, commit)?;
+                            DiffArtifact::Included {
+                                commit_sha: commit.clone(),
+                                parent_sha: parent,
+                                unified_diff,
+                            }
+                        }
+                    }
+                };
+                write_diff_json(&out_dir, &artifact)?;
+                written += 1;
+            }
+            println!("wrote {} diff artifacts to {}", written, out_dir.display());
             Ok(())
         }
         Some(Cmd::Report { csv }) => {

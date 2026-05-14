@@ -5,6 +5,51 @@
 use std::collections::HashSet;
 use tree_sitter::{Node, Parser, Tree};
 
+/// Compute the unified diff between two commits with full file context
+/// (`-U999999`) restricted to files actually touched in the commit.
+///
+/// Used by the `emit-diffs` subcommand (SPEC §6.1) to produce per-commit
+/// diff artifacts for the Phase 0c baseline runner. Invokes the system
+/// `git` binary via `std::process::Command` with an explicit arg-vector
+/// (no shell interpolation), against the repo at `repo_path`.
+pub fn full_file_context_diff(
+    repo_path: &std::path::Path,
+    parent: &str,
+    commit: &str,
+) -> anyhow::Result<String> {
+    use anyhow::Context;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["diff", "-U999999", parent, commit])
+        .output()
+        .context("git diff invocation failed")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git diff returned non-zero: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+/// Return the first-parent SHA of `commit`, or `None` if `commit` is a
+/// root commit (i.e. `git rev-parse <commit>^` fails).
+///
+/// Used by the `emit-diffs` subcommand to discriminate the `no_parent`
+/// exclusion case from the diffable case.
+pub fn parent_sha(repo_path: &std::path::Path, commit: &str) -> anyhow::Result<Option<String>> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["rev-parse", &format!("{commit}^")])
+        .output()?;
+    if output.status.success() {
+        Ok(Some(String::from_utf8(output.stdout)?.trim().to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn is_whitespace_or_comment_only(before: &[u8], after: &[u8]) -> bool {
     let parse = |s: &[u8]| -> Option<Tree> {
         let mut p = Parser::new();
