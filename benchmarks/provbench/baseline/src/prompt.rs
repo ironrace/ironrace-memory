@@ -94,7 +94,7 @@ fn split_template() -> (String, String) {
         .expect("facts placeholder missing")
         + after_diff;
     let after_facts = i_facts + facts_marker_start.len();
-    let block5 = tpl[after_facts..].trim_start_matches('\n').to_string();
+    let block5 = tpl[after_facts..].to_string();
     debug_assert!(block5.contains("Respond with a JSON array"));
     (block1, block5)
 }

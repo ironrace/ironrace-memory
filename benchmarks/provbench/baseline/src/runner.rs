@@ -59,6 +59,16 @@ pub struct RunResult {
     pub rows_total: usize,
     pub rows_scored: usize,
     pub total_cost_usd: f64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub tokens_in_uncached: u64,
+    #[serde(default)]
+    pub tokens_in_cache_write: u64,
+    #[serde(default)]
+    pub tokens_in_cache_read: u64,
+    #[serde(default)]
+    pub tokens_out: u64,
     pub aborted: bool,
     pub abort_reason: Option<String>,
     pub manifest_content_hash: String,
@@ -258,6 +268,11 @@ pub async fn run(opts: RunnerOpts) -> Result<RunResult> {
         rows_total,
         rows_scored,
         total_cost_usd: meter.cost_usd,
+        total_tokens: meter.total_tokens(),
+        tokens_in_uncached: meter.tokens_in_uncached,
+        tokens_in_cache_write: meter.tokens_in_cache_write,
+        tokens_in_cache_read: meter.tokens_in_cache_read,
+        tokens_out: meter.tokens_out,
         aborted,
         abort_reason,
         manifest_content_hash: manifest.content_hash.clone(),
@@ -271,33 +286,38 @@ pub async fn run(opts: RunnerOpts) -> Result<RunResult> {
 /// sorted by `(commit_sha, batch_index)` for deterministic dispatch.
 ///
 /// Rows whose commit has no Included diff or whose fact body is absent
-/// are silently dropped here as a defense-in-depth — the manifest stage
-/// should already have filtered them. Both events are logged at WARN.
+/// fail closed. The manifest stage should already have filtered them;
+/// if artifacts drift between `sample` and `run`, silently dropping
+/// selected rows would make the reported coverage dishonest.
 pub fn build_batches(
     rows: &[SampledRow],
     facts: &HashMap<String, FactBody>,
     diffs: &HashMap<String, DiffArtifact>,
 ) -> Result<Vec<Batch>> {
     let mut by_commit: BTreeMap<String, Vec<&SampledRow>> = BTreeMap::new();
+    let mut missing_diffs: Vec<String> = Vec::new();
+    let mut missing_facts: Vec<String> = Vec::new();
     for r in rows {
         let included = matches!(
             diffs.get(&r.commit_sha),
             Some(DiffArtifact::Included { .. })
         );
         if !included {
-            tracing::warn!(
-                "skip row {} @ {}: commit has no Included diff",
-                r.fact_id,
-                r.commit_sha
-            );
+            missing_diffs.push(format!("{}@{}", r.fact_id, r.commit_sha));
             continue;
         }
         if !facts.contains_key(&r.fact_id) {
-            tracing::warn!("skip row {} @ {}: no fact body", r.fact_id, r.commit_sha);
+            missing_facts.push(format!("{}@{}", r.fact_id, r.commit_sha));
             continue;
         }
         by_commit.entry(r.commit_sha.clone()).or_default().push(r);
     }
+    anyhow::ensure!(
+        missing_diffs.is_empty() && missing_facts.is_empty(),
+        "manifest selected rows missing artifacts: missing_diffs={} missing_facts={}",
+        summarize_missing(&missing_diffs),
+        summarize_missing(&missing_facts)
+    );
 
     let mut out: Vec<Batch> = Vec::new();
     for (commit_sha, mut group) in by_commit {
@@ -325,6 +345,18 @@ pub fn build_batches(
         }
     }
     Ok(out)
+}
+
+fn summarize_missing(items: &[String]) -> String {
+    if items.is_empty() {
+        return "0".to_string();
+    }
+    let preview = items.iter().take(5).cloned().collect::<Vec<_>>().join(",");
+    if items.len() > 5 {
+        format!("{} [{}...]", items.len(), preview)
+    } else {
+        format!("{} [{}]", items.len(), preview)
+    }
 }
 
 /// Cheap per-batch estimate. Mirrors [`preflight_worst_case_cost`] but

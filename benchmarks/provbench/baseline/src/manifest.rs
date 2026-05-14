@@ -84,6 +84,10 @@ impl SampleManifest {
             };
             let fact_id = v["fact_id"].as_str().unwrap_or_default().to_string();
             let commit_sha = v["commit_sha"].as_str().unwrap_or_default().to_string();
+            if fact_id.is_empty() || commit_sha.is_empty() {
+                *excluded.entry("malformed_row".into()).or_insert(0) += 1;
+                continue;
+            }
             let label_tag = match &v["label"] {
                 serde_json::Value::String(s) => s.clone(),
                 // `StaleSymbolRenamed` lands here: the first (and only) key
@@ -94,6 +98,10 @@ impl SampleManifest {
                     continue;
                 }
             };
+            if !is_known_label_tag(&label_tag) {
+                *excluded.entry("unknown_label".into()).or_insert(0) += 1;
+                continue;
+            }
             if labeler_git_sha.is_empty() {
                 if let Some(s) = v["labeler_git_sha"].as_str() {
                     labeler_git_sha = s.to_string();
@@ -193,6 +201,17 @@ impl SampleManifest {
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
+}
+
+fn is_known_label_tag(label_tag: &str) -> bool {
+    matches!(
+        label_tag,
+        "Valid"
+            | "StaleSourceChanged"
+            | "StaleSourceDeleted"
+            | "StaleSymbolRenamed"
+            | "NeedsRevalidation"
+    )
 }
 
 fn compute_sha256_of_path(path: &Path) -> Result<String> {

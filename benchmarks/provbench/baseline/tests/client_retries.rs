@@ -61,6 +61,8 @@ async fn parse_error_triggers_one_retry_with_literal_addendum() {
     let client = AnthropicClient::with_base_url(mock.uri(), "k".into());
     let resp = client.score_batch(one_block_request()).await.unwrap();
     assert_eq!(resp.decisions[0].decision, "stale");
+    assert_eq!(resp.usage.input_tokens, 25);
+    assert_eq!(resp.usage.output_tokens, 12);
 
     let requests = mock.received_requests().await.unwrap();
     let second_body = std::str::from_utf8(&requests[1].body).unwrap();

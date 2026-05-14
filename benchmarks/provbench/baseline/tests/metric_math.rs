@@ -11,7 +11,7 @@
 //!   - 1 StaleSymbolRenamed: 0 → "stale", 1 → "valid"
 
 use provbench_baseline::metrics::{
-    coalesce, cost_per_correct_invalidation_from_total, latency, llm_validator_agreement,
+    coalesce, cost_per_correct_invalidation_from_totals, latency, llm_validator_agreement,
     three_way, wilson_lower_95,
 };
 use provbench_baseline::runner::PredictionRow;
@@ -263,9 +263,9 @@ fn latency_groups_by_commit_dedups_batches() {
 fn cost_per_correct_invalidation_divides_by_tp_stale() {
     let rows = fixture_20_rows();
     // TP-stale = 6 (4 changed + 2 deleted predicted stale).
-    let c = cost_per_correct_invalidation_from_total(&rows, 12.0);
+    let c = cost_per_correct_invalidation_from_totals(&rows, 600, 12.0);
     assert!((c.usd - 2.0).abs() < 1e-9, "usd per correct: got {}", c.usd);
-    assert_eq!(c.tokens, 0); // per-row tokens not yet persisted
+    assert_eq!(c.tokens, 100);
 }
 
 #[test]

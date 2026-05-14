@@ -14,69 +14,85 @@ use crate::constants::*;
 use crate::diffs::DiffArtifact;
 use crate::facts::FactBody;
 use crate::sample::SampledRow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub fn preflight_worst_case_cost(
     rows: &[SampledRow],
     diffs: &HashMap<String, DiffArtifact>,
     facts: &HashMap<String, FactBody>,
 ) -> f64 {
-    let mut commits: HashMap<&String, usize> = HashMap::new();
+    let mut commits: BTreeMap<&String, Vec<&SampledRow>> = BTreeMap::new();
     for r in rows {
-        *commits.entry(&r.commit_sha).or_default() += 1;
+        commits.entry(&r.commit_sha).or_default().push(r);
     }
 
-    let median_diff_tokens: f64 = if diffs.is_empty() {
-        2_000.0
-    } else {
-        let mut diff_lens: Vec<usize> = diffs
-            .values()
-            .filter_map(|d| match d {
-                DiffArtifact::Included { unified_diff, .. } => Some(unified_diff.len()),
-                _ => None,
-            })
-            .collect();
-        diff_lens.sort_unstable();
-        let median_chars = diff_lens.get(diff_lens.len() / 2).copied().unwrap_or(8_000);
-        median_chars as f64 / 4.0
-    };
-
-    let median_fact_tokens: f64 = if facts.is_empty() {
-        80.0
-    } else {
-        let mut lens: Vec<usize> = facts
-            .values()
-            .map(|f| f.body.len() + f.source_path.len() + 80)
-            .collect();
-        lens.sort_unstable();
-        lens.get(lens.len() / 2).copied().unwrap_or(320) as f64 / 4.0
-    };
-
-    let static_prefix_tokens = 250.0;
-    let worst_case_output_tokens = 1_800.0;
     let mut total_usd = 0.0;
 
-    for (_commit, batches_for_commit) in commits {
-        let n_batches = (batches_for_commit as f64 / MAX_FACTS_PER_BATCH as f64).ceil();
-        let cacheable_tokens = static_prefix_tokens + median_diff_tokens + 10.0;
-        let facts_block_tokens = MAX_FACTS_PER_BATCH as f64 * median_fact_tokens;
+    for (commit, group) in commits {
+        let n_batches = group.len().div_ceil(MAX_FACTS_PER_BATCH);
+        let diff_tokens = diff_token_estimate(diffs.get(commit));
+        for (batch_index, chunk) in group.chunks(MAX_FACTS_PER_BATCH).enumerate() {
+            let cacheable_tokens = STATIC_PREFIX_TOKENS + diff_tokens + FACTS_SEPARATOR_TOKENS;
+            let facts_block_tokens = chunk
+                .iter()
+                .map(|row| fact_token_estimate(facts.get(&row.fact_id)))
+                .sum::<f64>();
+            let cacheable_price = if n_batches > 1 {
+                if batch_index == 0 {
+                    PRICE_INPUT_CACHE_WRITE_USD_PER_MTOK
+                } else {
+                    PRICE_INPUT_CACHE_READ_USD_PER_MTOK
+                }
+            } else {
+                PRICE_INPUT_UNCACHED_USD_PER_MTOK
+            };
 
-        let first_in = (cacheable_tokens / 1_000_000.0) * PRICE_INPUT_CACHE_WRITE_USD_PER_MTOK
-            + (facts_block_tokens / 1_000_000.0) * PRICE_INPUT_UNCACHED_USD_PER_MTOK;
-        let later_in_per = (cacheable_tokens / 1_000_000.0) * PRICE_INPUT_CACHE_READ_USD_PER_MTOK
-            + (facts_block_tokens / 1_000_000.0) * PRICE_INPUT_UNCACHED_USD_PER_MTOK;
-        let output_per = (worst_case_output_tokens / 1_000_000.0) * PRICE_OUTPUT_USD_PER_MTOK;
-
-        total_usd +=
-            first_in + output_per + (n_batches - 1.0).max(0.0) * (later_in_per + output_per);
+            let input_usd = (cacheable_tokens / 1_000_000.0) * cacheable_price
+                + (facts_block_tokens / 1_000_000.0) * PRICE_INPUT_UNCACHED_USD_PER_MTOK;
+            let output_usd = (WORST_CASE_OUTPUT_TOKENS / 1_000_000.0) * PRICE_OUTPUT_USD_PER_MTOK;
+            total_usd += input_usd + output_usd;
+        }
     }
     total_usd
+}
+
+const STATIC_PREFIX_TOKENS: f64 = 250.0;
+const FACTS_SEPARATOR_TOKENS: f64 = 10.0;
+const WORST_CASE_OUTPUT_TOKENS: f64 = 1_800.0;
+const INPUT_SIZE_SAFETY_MULTIPLIER: f64 = 1.5;
+
+fn diff_token_estimate(diff: Option<&DiffArtifact>) -> f64 {
+    match diff {
+        Some(DiffArtifact::Included { unified_diff, .. }) => {
+            (unified_diff.len() as f64 / 4.0) * INPUT_SIZE_SAFETY_MULTIPLIER
+        }
+        _ => 2_000.0,
+    }
+}
+
+fn fact_token_estimate(fact: Option<&FactBody>) -> f64 {
+    match fact {
+        Some(f) => {
+            ((f.body.len()
+                + f.source_path.len()
+                + f.symbol_path.len()
+                + f.content_hash_at_observation.len()
+                + 80) as f64
+                / 4.0)
+                * INPUT_SIZE_SAFETY_MULTIPLIER
+        }
+        None => 80.0,
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct CostMeter {
     pub cap: f64,
     pub cost_usd: f64,
+    pub tokens_in_uncached: u64,
+    pub tokens_in_cache_write: u64,
+    pub tokens_in_cache_read: u64,
+    pub tokens_out: u64,
 }
 
 #[derive(Debug)]
@@ -92,7 +108,14 @@ pub enum BatchDecision {
 
 impl CostMeter {
     pub fn new(cap: f64) -> Self {
-        Self { cap, cost_usd: 0.0 }
+        Self {
+            cap,
+            cost_usd: 0.0,
+            tokens_in_uncached: 0,
+            tokens_in_cache_write: 0,
+            tokens_in_cache_read: 0,
+            tokens_out: 0,
+        }
     }
 
     /// Record a single API call's `Usage`, accumulating its USD cost.
@@ -104,6 +127,10 @@ impl CostMeter {
     /// (≤ ceiling) is enforced separately by
     /// [`CostMeter::before_next_batch`] as a pre-dispatch gate.
     pub fn record(&mut self, u: &Usage) -> anyhow::Result<()> {
+        self.tokens_in_uncached += u.input_tokens as u64;
+        self.tokens_in_cache_write += u.cache_creation_input_tokens as u64;
+        self.tokens_in_cache_read += u.cache_read_input_tokens as u64;
+        self.tokens_out += u.output_tokens as u64;
         self.cost_usd += (u.input_tokens as f64 / 1_000_000.0) * PRICE_INPUT_UNCACHED_USD_PER_MTOK
             + (u.cache_creation_input_tokens as f64 / 1_000_000.0)
                 * PRICE_INPUT_CACHE_WRITE_USD_PER_MTOK
@@ -117,6 +144,13 @@ impl CostMeter {
             self.cost_usd
         );
         Ok(())
+    }
+
+    pub fn total_tokens(&self) -> u64 {
+        self.tokens_in_uncached
+            + self.tokens_in_cache_write
+            + self.tokens_in_cache_read
+            + self.tokens_out
     }
 
     pub fn before_next_batch(&self, estimated_next: f64) -> BatchDecision {

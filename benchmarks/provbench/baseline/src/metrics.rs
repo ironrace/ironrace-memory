@@ -482,6 +482,16 @@ pub fn cost_per_correct_invalidation_from_total(
     predictions: &[PredictionRow],
     total_cost_usd: f64,
 ) -> CostReport {
+    cost_per_correct_invalidation_from_totals(predictions, 0, total_cost_usd)
+}
+
+/// Same as [`cost_per_correct_invalidation_from_total`] but accepts both
+/// aggregate token and USD totals from `run_meta.json`.
+pub fn cost_per_correct_invalidation_from_totals(
+    predictions: &[PredictionRow],
+    total_tokens: u64,
+    total_cost_usd: f64,
+) -> CostReport {
     let tp_stale: u64 = predictions
         .iter()
         .filter(|r| {
@@ -495,7 +505,7 @@ pub fn cost_per_correct_invalidation_from_total(
         };
     }
     CostReport {
-        tokens: 0,
+        tokens: total_tokens / tp_stale,
         usd: total_cost_usd / tp_stale as f64,
     }
 }

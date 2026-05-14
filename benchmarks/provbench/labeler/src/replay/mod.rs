@@ -28,7 +28,7 @@ use crate::resolve::SymbolResolver;
 use anyhow::{Context, Result};
 use commit_index::CommitSymbolIndex;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 // ── Public surface ────────────────────────────────────────────────────────────
@@ -160,11 +160,9 @@ impl Replay {
     /// final sort by `fact_id`.
     ///
     /// Facts whose `fact_id` is not in `wanted` are skipped. If
-    /// `wanted` references a `fact_id` that doesn't exist at T₀, that
-    /// id is simply absent from the output — silently — since a corpus
-    /// row's `fact_id` is the authoritative key for "this fact existed
-    /// at T₀". (Tracking missing ids would require a re-run with a
-    /// fresh corpus, which is a separate concern.)
+    /// `wanted` references a `fact_id` that doesn't exist at T₀, this
+    /// returns an error: the Phase 0c artifact contract is one emitted
+    /// fact body for every unique corpus fact id.
     pub fn emit_facts(
         cfg: &ReplayConfig,
         wanted: &std::collections::BTreeSet<String>,
@@ -244,6 +242,14 @@ impl Replay {
                 content_hash_at_observation: observed.fact.content_hash().to_string(),
             });
         }
+        let emitted: BTreeSet<String> = out.iter().map(|row| row.fact_id.clone()).collect();
+        let missing: Vec<String> = wanted.difference(&emitted).take(10).cloned().collect();
+        anyhow::ensure!(
+            emitted.len() == wanted.len(),
+            "emit-facts could not reconstruct {} requested fact_id(s); first missing: {}",
+            wanted.len().saturating_sub(emitted.len()),
+            missing.join(", ")
+        );
         Ok(out)
     }
 

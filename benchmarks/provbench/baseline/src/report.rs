@@ -102,7 +102,12 @@ pub fn score_run(run_dir: &Path) -> Result<()> {
     let agreement = metrics::llm_validator_agreement(&predictions, &pop_weights);
     let latency = metrics::latency(&predictions);
     let total_cost_usd = run_meta.as_ref().map(|r| r.total_cost_usd).unwrap_or(0.0);
-    let cost = metrics::cost_per_correct_invalidation_from_total(&predictions, total_cost_usd);
+    let total_tokens = run_meta.as_ref().map(|r| r.total_tokens).unwrap_or(0);
+    let cost = metrics::cost_per_correct_invalidation_from_totals(
+        &predictions,
+        total_tokens,
+        total_cost_usd,
+    );
 
     let json = serde_json::json!({
         "spec_freeze_hash": manifest.spec_freeze_hash,

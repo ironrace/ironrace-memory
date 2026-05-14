@@ -19,6 +19,19 @@ pub struct Usage {
     pub output_tokens: u32,
 }
 
+impl Usage {
+    pub fn add_assign(&mut self, other: &Usage) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.cache_creation_input_tokens = self
+            .cache_creation_input_tokens
+            .saturating_add(other.cache_creation_input_tokens);
+        self.cache_read_input_tokens = self
+            .cache_read_input_tokens
+            .saturating_add(other.cache_read_input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Decision {
     pub id: String,
@@ -72,6 +85,7 @@ impl AnthropicClient {
         let mut attempt_blocks = blocks;
         let mut transient_attempt: usize = 0;
         let mut parse_retried = false;
+        let mut cumulative_usage = Usage::default();
         const MAX_TRANSIENT_RETRIES: usize = 2;
 
         loop {
@@ -128,6 +142,7 @@ impl AnthropicClient {
             let payload: serde_json::Value = resp.json().await?;
 
             let usage: Usage = serde_json::from_value(payload["usage"].clone()).unwrap_or_default();
+            cumulative_usage.add_assign(&usage);
             let text = payload["content"][0]["text"]
                 .as_str()
                 .unwrap_or("")
@@ -136,7 +151,7 @@ impl AnthropicClient {
                 Ok(decisions) => {
                     return Ok(BatchResponse {
                         decisions,
-                        usage,
+                        usage: cumulative_usage,
                         request_id,
                         wall_ms: started.elapsed().as_millis() as u64,
                     });

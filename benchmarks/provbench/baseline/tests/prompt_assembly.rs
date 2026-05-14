@@ -22,4 +22,14 @@ fn five_blocks_in_order_with_correct_static_text() {
     assert!(blocks[3].text.starts_with('['), "block 4 is a JSON array");
     assert!(blocks[3].text.contains("FunctionSignature::foo"));
     assert!(blocks[4].text.contains("Respond with a JSON array"));
+    assert!(
+        blocks[4].text.starts_with("\n\nRespond"),
+        "block 5 must preserve the blank-line separator after FACTS JSON"
+    );
+
+    let rendered = blocks.iter().map(|b| b.text.as_str()).collect::<String>();
+    assert!(
+        rendered.contains("}]\n\nRespond with a JSON array"),
+        "FACTS JSON must be separated from the final instruction"
+    );
 }
