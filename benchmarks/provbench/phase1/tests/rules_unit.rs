@@ -193,32 +193,21 @@ fn r4_stale_when_post_span_lines_differ_from_t0() {
     assert_eq!(rid, "R4");
 }
 
+/// R7 fires when the source file is gone at the commit but a same-extension
+/// candidate in the commit tree has a basename whose token-Jaccard similarity
+/// against the qualified-symbol leaf clears the 0.6 threshold. With the
+/// new leaf-vs-stem proxy (replacing the previous body-vs-path proxy), the
+/// minimum-viable rename case is "stem == leaf" (similarity = 1.0).
 #[test]
-fn r7_tie_break_picks_alphabetically_smaller_path() {
-    // Equal-similarity tie-break: SPEC §5 step 2 → (similarity desc,
-    // qualified_name asc). Among candidates with identical similarity,
-    // the alphabetically smallest path wins.
-    //
-    // Construct two candidate "paths" that share identical Jaccard
-    // similarity with body. The similarity function is whitespace-token
-    // Jaccard, so we hand-build path strings whose token sets share
-    // equal overlap with the body's token set.
-    //
-    // body tokens = {"a","b","c"}.
-    // path "z {a b c}" → tokens = {"z","a","b","c"}; intersection=3, union=4 → 0.75
-    // path "y {a b c}" → tokens = {"y","a","b","c"}; intersection=3, union=4 → 0.75
-    // Both are above the 0.6 threshold and equal. Present in reverse
-    // order ("z…" first, "y…" second). Tie-break must pick the
-    // alphabetically smaller path: "y …".
-    //
-    // R7 isn't reachable through `RuleChain` because R1 fires first
-    // whenever post_blob is None. Test R7's classify() directly so the
-    // tie-break contract is locked independently of chain ordering.
+fn r7_fires_when_leaf_matches_renamed_file_stem() {
     let mut f = fact("FunctionSignature", "x");
-    f.symbol_path = "foo".into();
-    f.body = "a b c".into();
-    f.source_path = "src/other.rs".into();
-    let cf = vec!["z a b c".to_string(), "y a b c".to_string()];
+    f.symbol_path = "Walk::new".into();
+    f.source_path = "src/walker.rs".into();
+    let cf = vec![
+        "src/other.rs".to_string(),
+        "src/new.rs".to_string(),
+        "src/util.rs".to_string(),
+    ];
     let ctx = RowCtx {
         fact: &f,
         commit_sha: "0000",
@@ -229,13 +218,131 @@ fn r7_tie_break_picks_alphabetically_smaller_path() {
         commit_files: &cf,
     };
     let r7 = R7RenameCandidate;
+    let result = r7.classify(&ctx).expect("R7 should fire on stem == leaf");
+    assert_eq!(result.0, Decision::Stale);
+    assert!(
+        result.1.contains(r#""to":"src/new.rs""#),
+        "expected R7 to pick src/new.rs (stem 'new' == leaf 'new'); got: {}",
+        result.1
+    );
+    assert!(
+        result.1.contains(r#""leaf":"new""#),
+        "expected leaf evidence; got: {}",
+        result.1
+    );
+}
+
+/// R7 ignores same-extension paths whose stem doesn't share enough tokens
+/// with the leaf. Single-token Jaccard means anything other than an exact
+/// match scores 0, so this is the typical no-fire case.
+#[test]
+fn r7_does_not_fire_without_matching_stem() {
+    let mut f = fact("FunctionSignature", "x");
+    f.symbol_path = "Walk::new".into();
+    f.source_path = "src/walker.rs".into();
+    let cf = vec![
+        "src/something_else.rs".to_string(),
+        "src/util.rs".to_string(),
+    ];
+    let ctx = RowCtx {
+        fact: &f,
+        commit_sha: "0000",
+        diff: None,
+        post_blob: None,
+        t0_blob: Some(b"unused"),
+        post_tree: None,
+        commit_files: &cf,
+    };
+    let r7 = R7RenameCandidate;
+    assert!(
+        r7.classify(&ctx).is_none(),
+        "R7 fired on a tree with no leaf-match — heuristic should be conservative"
+    );
+}
+
+/// R7 requires same extension as the original source — a Python file
+/// matching the leaf does not count as a rename of a Rust symbol.
+#[test]
+fn r7_requires_extension_match() {
+    let mut f = fact("FunctionSignature", "x");
+    f.symbol_path = "Walk::new".into();
+    f.source_path = "src/walker.rs".into();
+    let cf = vec!["src/new.py".to_string(), "src/new".to_string()];
+    let ctx = RowCtx {
+        fact: &f,
+        commit_sha: "0000",
+        diff: None,
+        post_blob: None,
+        t0_blob: Some(b"unused"),
+        post_tree: None,
+        commit_files: &cf,
+    };
+    let r7 = R7RenameCandidate;
+    assert!(
+        r7.classify(&ctx).is_none(),
+        "R7 fired on extension-mismatched candidates: cross-language rename is not a v1 case"
+    );
+}
+
+/// Tie-break contract: when multiple same-extension paths have a stem
+/// equal to the leaf (similarity = 1.0 each), R7 picks the
+/// alphabetically smallest path. Presenting candidates in reverse
+/// alphabetical order locks the ordering: a bug that just picks the
+/// last-seen winner would let "src/z/new.rs" through.
+#[test]
+fn r7_tie_break_picks_alphabetically_smaller_path() {
+    let mut f = fact("FunctionSignature", "x");
+    f.symbol_path = "Walk::new".into();
+    f.source_path = "src/walker.rs".into();
+    // Two candidates whose stem is exactly "new" with the same extension.
+    // Both score similarity = 1.0 against leaf "new"; tie-break picks the
+    // alphabetically smallest path. Presented in reverse order to catch
+    // a naive last-wins bug.
+    let cf = vec!["src/z/new.rs".to_string(), "src/a/new.rs".to_string()];
+    let ctx = RowCtx {
+        fact: &f,
+        commit_sha: "0000",
+        diff: None,
+        post_blob: None,
+        t0_blob: Some(b"unused"),
+        post_tree: None,
+        commit_files: &cf,
+    };
+    let r7 = R7RenameCandidate;
     let result = r7.classify(&ctx).expect("R7 should fire");
     assert_eq!(result.0, Decision::Stale);
-    // Alphabetically smaller path wins: "y …" < "z …".
     assert!(
-        result.1.contains(r#""to":"y a b c""#),
-        "tie-break inversion: expected alphabetically smaller 'y' path, got evidence: {}",
+        result.1.contains(r#""to":"src/a/new.rs""#),
+        "tie-break inversion: expected alphabetically smaller 'src/a/new.rs', got: {}",
         result.1
+    );
+}
+
+/// R7 now sits ahead of R1 in `RuleChain::default()`. When the chain
+/// runs against a deleted file and the commit tree contains a clear
+/// rename candidate, R7 wins (Stale + R7); when no candidate matches,
+/// R1 still fires (Stale + R1). The two paths are mutually exclusive.
+#[test]
+fn r7_pre_empts_r1_when_rename_candidate_present() {
+    let chain = RuleChain::default();
+    let mut f = fact("FunctionSignature", "x");
+    f.symbol_path = "Walk::new".into();
+    f.source_path = "src/walker.rs".into();
+    let cf = vec!["src/new.rs".to_string()];
+    let ctx = RowCtx {
+        fact: &f,
+        commit_sha: "0000",
+        diff: None,
+        post_blob: None,
+        t0_blob: Some(b"unused"),
+        post_tree: None,
+        commit_files: &cf,
+    };
+    let (d, rid, _, _) = chain.classify_first_match(&ctx);
+    assert_eq!(d, Decision::Stale);
+    assert_eq!(
+        rid, "R7",
+        "R7 should pre-empt R1 when a rename candidate exists; chain order may have regressed"
     );
 }
 

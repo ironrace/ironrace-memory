@@ -68,16 +68,18 @@ impl Default for RuleChain {
         Self {
             rules: vec![
                 Box::new(r0_diff_excluded::R0DiffExcluded),
+                // R7 runs ahead of R1: both target `post_blob.is_none()` rows
+                // (file absent at the commit). R7 gets first chance to claim
+                // the row as a rename — leaf-symbol/basename similarity ≥0.6
+                // against any same-extension path in the commit tree — and
+                // falls through if no candidate matches, in which case R1
+                // marks the row `stale_source_deleted`. Before this swap R1
+                // pre-empted R7 unconditionally, making R7 dead code.
+                Box::new(r7_rename_candidate::R7RenameCandidate),
                 Box::new(r1_source_file_missing::R1SourceFileMissing),
                 Box::new(r2_blob_identical::R2BlobIdentical),
                 Box::new(r5_whitespace_or_comment_only::R5WhitespaceOrCommentOnly),
                 Box::new(r6_doc_claim::R6DocClaim),
-                // R7 fires only when post_blob is None; R1 fires first in that
-                // case, so R7 is currently unreachable via RuleChain::default()
-                // and is exercised via a direct R7RenameCandidate::classify()
-                // unit test in tests/rules_unit.rs. Kept in the chain for
-                // future tuning that may relax R1 or split R3/R7 ordering.
-                Box::new(r7_rename_candidate::R7RenameCandidate),
                 Box::new(r3_symbol_missing::R3SymbolMissing),
                 Box::new(r4_span_hash_changed::R4SpanHashChanged),
                 Box::new(r8_ambiguous::R8Ambiguous),
