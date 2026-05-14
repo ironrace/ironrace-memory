@@ -16,7 +16,7 @@ enum Cmd {
         #[arg(long)]
         run: PathBuf,
     },
-    /// Side-by-side comparison (LLM baseline + candidate). Filled in Task 4.
+    /// Side-by-side comparison (LLM baseline + candidate).
     Compare {
         #[arg(long = "baseline-run")]
         baseline_run: PathBuf,
@@ -33,6 +33,20 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Baseline { run } => provbench_scoring::report::score_llm_baseline_run(&run),
-        Cmd::Compare { .. } => anyhow::bail!("compare: implemented in Task 4"),
+        Cmd::Compare {
+            baseline_run,
+            candidate_run,
+            candidate_name,
+            out,
+        } => {
+            let report =
+                provbench_scoring::compare::run(&baseline_run, &candidate_run, &candidate_name)?;
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            let bytes = serde_json::to_vec_pretty(&report)?;
+            std::fs::write(&out, bytes)?;
+            Ok(())
+        }
     }
 }

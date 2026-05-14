@@ -89,6 +89,45 @@ fn r3_symbol_missing_when_file_present_but_symbol_gone() {
     assert_eq!(rid, "R3");
 }
 
+/// SPEC §10 pilot tuning: R3's substring search uses the **leaf**
+/// symbol name (last `::`-separated component) — not the fully qualified
+/// path. Rust source never literally contains `Type::field` because the
+/// field is declared inside its parent struct on a separate line.
+/// Falling through here lets R4 (line-blob compare) make the call.
+#[test]
+fn r3_uses_leaf_symbol_name_for_substring_search() {
+    let chain = RuleChain::default();
+    let mut f = fact("Field", "x");
+    // Qualified path: leaf is `dir`.
+    f.symbol_path = "IgnoreInner::dir".into();
+    f.line_span = [1, 1];
+    // post_blob contains the leaf `dir` but not the qualified form.
+    let post = b"    dir: PathBuf,\n";
+    let t0 = b"    dir: PathBuf,\n";
+    let (d, rid, _, _) = chain.classify_first_match(&ctx(&f, Some(post), Some(t0)));
+    // R2 fires because blobs are byte-identical here. The contract under
+    // test is that R3 does NOT fire (would be `Stale` with rid="R3").
+    assert_ne!(
+        rid, "R3",
+        "R3 should fall through when leaf symbol is present"
+    );
+    assert_eq!(d, Decision::Valid);
+}
+
+/// R3 still fires when even the leaf is gone from the post blob.
+#[test]
+fn r3_fires_when_leaf_symbol_is_absent() {
+    let chain = RuleChain::default();
+    let mut f = fact("FunctionSignature", "x");
+    f.symbol_path = "Type::locations_mut".into();
+    // post_blob has the type but not the leaf.
+    let post = b"struct Type;\nimpl Type { fn other(&self) {} }\n";
+    let t0 = b"struct Type;\nimpl Type { fn locations_mut(&self) {} }\n";
+    let (d, rid, _, _) = chain.classify_first_match(&ctx(&f, Some(post), Some(t0)));
+    assert_eq!(d, Decision::Stale);
+    assert_eq!(rid, "R3");
+}
+
 #[test]
 fn r4_fires_when_span_hash_changes_no_whitespace_only_escape() {
     let chain = RuleChain::default();
@@ -103,6 +142,55 @@ fn r4_fires_when_span_hash_changes_no_whitespace_only_escape() {
         chain.classify_first_match(&ctx(&f, Some(post), Some(b"fn foo() -> u32 { 1 }\n")));
     assert_eq!(d, Decision::Stale);
     assert!(rid == "R4" || rid == "R3" || rid == "R7");
+}
+
+/// SPEC §10 pilot tuning: R4 cannot reproduce the labeler's
+/// `content_hash_at_observation` (the labeler hashes a sub-line
+/// byte_range; phase1 only has line_span). New R4 contract:
+/// extract T0 lines[start..=end] and search for that byte sequence in
+/// post. The probe must (a) contain the symbol's leaf identifier and
+/// (b) have ≥ MIN_PROBE_NONWS_LEN non-whitespace bytes — otherwise
+/// trivial lines like `}` or `#[test]` collapse every fact onto the
+/// same probe.
+///   - probe present in post → Valid (lines may have shifted but the
+///     code is byte-stable).
+///   - probe absent (or too noisy) → Stale.
+///
+/// R5/R6 still get first crack at whitespace-only and doc cases.
+#[test]
+fn r4_valid_when_t0_span_appears_unchanged_in_post() {
+    let chain = RuleChain::default();
+    let mut f = fact("Field", "irrelevant_hash");
+    f.symbol_path = "dir_field".into();
+    f.line_span = [4, 4];
+    // The fact's line at T0 is "    dir_field: PathBuf," — that line
+    // contains the leaf "dir_field" and is ≥ 8 non-ws bytes. In post,
+    // a new field has been inserted above so the fact's line now
+    // lives at line 5; the byte sequence is still present.
+    let t0 =
+        b"struct S {\n    a: u8,\n    b: u8,\n    dir_field: PathBuf,\n    c: u8,\n    d: u8,\n}\n";
+    let post = b"struct S {\n    new_field: bool,\n    a: u8,\n    b: u8,\n    dir_field: PathBuf,\n    c: u8,\n    d: u8,\n}\n";
+    let (d, rid, _, _) = chain.classify_first_match(&ctx(&f, Some(post), Some(t0)));
+    assert_eq!(d, Decision::Valid);
+    assert_eq!(rid, "R4");
+}
+
+#[test]
+fn r4_stale_when_post_span_lines_differ_from_t0() {
+    let chain = RuleChain::default();
+    let mut f = fact("Field", "irrelevant_hash");
+    f.symbol_path = "dir_field".into();
+    f.line_span = [4, 4];
+    // Leaf "dir_field" present in T0 line and probe is long enough; in
+    // post the dir_field line was modified so the byte sequence is
+    // not present.
+    let t0 =
+        b"struct S {\n    a: u8,\n    b: u8,\n    dir_field: PathBuf,\n    c: u8,\n    d: u8,\n}\n";
+    let post =
+        b"struct S {\n    a: u8,\n    b: u8,\n    dir_field: String,\n    c: u8,\n    d: u8,\n}\n";
+    let (d, rid, _, _) = chain.classify_first_match(&ctx(&f, Some(post), Some(t0)));
+    assert_eq!(d, Decision::Stale);
+    assert_eq!(rid, "R4");
 }
 
 #[test]

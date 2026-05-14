@@ -23,10 +23,16 @@ impl Rule for R3SymbolMissing {
         let (Some(post), _t0) = (ctx.post_blob, ctx.t0_blob) else {
             return None;
         };
-        let needle = ctx.fact.symbol_path.as_bytes();
-        if needle.is_empty() {
-            return None; // empty symbol_path: cannot do substring search, defer to later rules
+        // SPEC §10 pilot tuning: search for the **leaf** symbol name
+        // (last `::`-separated component) rather than the qualified path.
+        // Rust source never literally contains `Type::field`; the field is
+        // declared inside its parent struct on a separate line.
+        let qualified = ctx.fact.symbol_path.as_str();
+        let leaf = leaf_symbol(qualified);
+        if leaf.is_empty() {
+            return None; // defensive: empty/unparseable symbol_path
         }
+        let needle = leaf.as_bytes();
         let haystack = post;
         // Naive substring search — symbol no longer literally appears.
         let resolves = haystack.windows(needle.len()).any(|w| w == needle);
@@ -34,11 +40,18 @@ impl Rule for R3SymbolMissing {
             return Some((
                 Decision::Stale,
                 format!(
-                    r#"{{"rule":"R3","reason":"stale_source_deleted","symbol":"{}"}}"#,
-                    ctx.fact.symbol_path
+                    r#"{{"rule":"R3","reason":"stale_source_deleted","symbol":"{}","leaf":"{}"}}"#,
+                    qualified, leaf
                 ),
             ));
         }
         None
     }
+}
+
+/// Extract the leaf segment of a `::`-qualified symbol path (e.g.
+/// `Type::method` → `method`, `module::Type::method` → `method`).
+/// Returns the input unchanged when no `::` is present.
+fn leaf_symbol(qualified: &str) -> &str {
+    qualified.rsplit("::").next().unwrap_or(qualified)
 }
