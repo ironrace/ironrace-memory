@@ -48,8 +48,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
 
+      # Use `rustup run stable cargo` rather than bare `cargo` because the
+      # macos-latest runner image keeps a Homebrew `rustup-init` shim on
+      # PATH ahead of `~/.cargo/bin/cargo`. The shim intercepts `cargo` and
+      # rejects `test` with "unexpected argument 'test' found", even after
+      # `rustup default stable` has installed the real toolchain. Routing
+      # through `rustup run` bypasses the PATH-precedence problem entirely.
       - name: cargo test
-        run: cargo test --workspace
+        run: rustup run stable cargo test --workspace
 
   build:
     name: Build Binary (${{ matrix.os }})
@@ -77,8 +83,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
 
+      # See the cargo test step in the `test` job for why we route through
+      # `rustup run stable` instead of calling `cargo` directly on macOS.
       - name: cargo build
-        run: cargo build -p ironmem --bin ironmem
+        run: rustup run stable cargo build -p ironmem --bin ironmem
 
       - name: Upload binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
