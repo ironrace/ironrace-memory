@@ -8,6 +8,7 @@
 //! tasks (`sample` — Task 5, `run` — Task 8, `score` — Task 9).
 
 pub mod budget;
+pub mod client;
 pub mod constants;
 pub mod diffs;
 pub mod facts;
