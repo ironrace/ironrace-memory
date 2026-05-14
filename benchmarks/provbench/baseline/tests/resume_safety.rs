@@ -43,6 +43,7 @@ async fn resume_skips_already_scored_rows_and_verifies_hash() {
         fixture_mode: None,
         max_batches: None,
         max_concurrency: 1,
+        client_override: None,
     })
     .await
     .expect("first run");
@@ -75,6 +76,7 @@ async fn resume_skips_already_scored_rows_and_verifies_hash() {
         fixture_mode: None,
         max_batches: None,
         max_concurrency: 1,
+        client_override: None,
     })
     .await
     .expect("second run");
@@ -106,6 +108,7 @@ async fn resume_skips_already_scored_rows_and_verifies_hash() {
         fixture_mode: None,
         max_batches: None,
         max_concurrency: 1,
+        client_override: None,
     })
     .await;
     assert!(result.is_err(), "resume must reject hash mismatch");

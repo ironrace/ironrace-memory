@@ -25,7 +25,7 @@
 //! can introduce a bounded `JoinSet` without a breaking change.
 
 use crate::budget::{preflight_worst_case_cost, BatchDecision as BudgetDecision, CostMeter};
-use crate::client::{AnthropicClient, BatchResponse, Decision, Usage};
+use crate::client::{AnthropicClient, BatchResponse, Decision, ParseFailureError, Usage};
 use crate::constants::*;
 use crate::diffs::{load_diffs_dir, DiffArtifact};
 use crate::facts::{load_facts, FactBody};
@@ -48,6 +48,10 @@ pub struct RunnerOpts {
     pub max_batches: Option<usize>,
     /// Forward-compat knob; ignored in v1 (sequential dispatch).
     pub max_concurrency: usize,
+    /// Optional pre-built client (test-only seam: lets the integration
+    /// suite point the runner at a wiremock server without touching
+    /// global env vars). `None` in the CLI path — `from_env()` is used.
+    pub client_override: Option<AnthropicClient>,
 }
 
 /// Summary returned by [`run`] and persisted as `run_meta.json`.
@@ -56,6 +60,11 @@ pub struct RunResult {
     pub batches_total: usize,
     pub batches_completed: usize,
     pub batches_skipped_resume: usize,
+    /// Batches whose live response failed both parse attempts. The
+    /// affected batches contribute zero rows to `predictions.jsonl`;
+    /// each failure writes a diagnostic line to `parse_failures.jsonl`.
+    #[serde(default)]
+    pub batches_parse_failed: usize,
     pub rows_total: usize,
     pub rows_scored: usize,
     pub total_cost_usd: f64,
@@ -134,6 +143,7 @@ pub async fn run(opts: RunnerOpts) -> Result<RunResult> {
         fixture_mode,
         max_batches,
         max_concurrency: _max_concurrency, // v1: sequential
+        client_override,
     } = opts;
 
     if resume {
@@ -160,12 +170,17 @@ pub async fn run(opts: RunnerOpts) -> Result<RunResult> {
     let mut meter = CostMeter::new(budget_usd);
     let mut batches_completed = 0usize;
     let mut batches_skipped_resume = 0usize;
+    let mut batches_parse_failed = 0usize;
     let mut rows_scored = 0usize;
     let mut aborted = false;
     let mut abort_reason: Option<String> = None;
 
-    // Built only when we actually need to hit the live API.
-    let client: Option<AnthropicClient> = if !dry_run && fixture_mode.is_none() {
+    // Built only when we actually need to hit the live API. Tests inject
+    // a pre-built client via `client_override` to point at a mock server
+    // without mutating global env state.
+    let client: Option<AnthropicClient> = if let Some(c) = client_override {
+        Some(c)
+    } else if !dry_run && fixture_mode.is_none() {
         Some(AnthropicClient::from_env()?)
     } else {
         None
@@ -222,7 +237,34 @@ pub async fn run(opts: RunnerOpts) -> Result<RunResult> {
         } else {
             // Live path. `client` is Some by construction in this branch.
             let c = client.as_ref().expect("live client present");
-            c.score_batch(blocks).await?
+            match c.score_batch(blocks).await {
+                Ok(r) => r,
+                Err(e) => {
+                    // Downcast: the addendum-retry path surfaces a typed
+                    // ParseFailureError when the model returns non-JSON
+                    // twice in a row. Skip the batch, log a sidecar
+                    // entry for offline review, continue. All other
+                    // errors (network, 4xx, 5xx-after-retries) still
+                    // abort the run because they indicate a systemic
+                    // problem we don't want to silently sweep past.
+                    if let Some(pf) = e.downcast_ref::<ParseFailureError>() {
+                        tracing::warn!(
+                            "parse failure on batch {}: request_id={} err={}",
+                            batch.batch_id,
+                            pf.request_id,
+                            pf.err_msg,
+                        );
+                        append_parse_failure(
+                            &run_dir.join("parse_failures.jsonl"),
+                            &batch.batch_id,
+                            pf,
+                        )?;
+                        batches_parse_failed += 1;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
         };
 
         meter.record(&response.usage)?;
@@ -265,6 +307,7 @@ pub async fn run(opts: RunnerOpts) -> Result<RunResult> {
         batches_total,
         batches_completed,
         batches_skipped_resume,
+        batches_parse_failed,
         rows_total,
         rows_scored,
         total_cost_usd: meter.cost_usd,
@@ -411,6 +454,39 @@ fn append_predictions(path: &Path, new_rows: &[PredictionRow]) -> Result<()> {
         existing.push(b'\n');
     }
     let tmp = parent.join(format!(".predictions.tmp.{}", std::process::id()));
+    std::fs::write(&tmp, &existing).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+/// Append one diagnostic line to `parse_failures.jsonl`. Uses the same
+/// read-existing → append → tmp-write → rename pattern as
+/// [`append_predictions`] so a crash can never leave the sidecar in a
+/// half-written state.
+fn append_parse_failure(path: &Path, batch_id: &str, pf: &ParseFailureError) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("parse_failures path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent)?;
+    let entry = serde_json::json!({
+        "batch_id": batch_id,
+        "request_id": pf.request_id,
+        "raw_text": pf.raw_text,
+        "err_msg": pf.err_msg,
+    });
+    let line = serde_json::to_string(&entry)?;
+    let mut existing = if path.exists() {
+        std::fs::read(path).with_context(|| format!("read {}", path.display()))?
+    } else {
+        Vec::new()
+    };
+    if !existing.is_empty() && !existing.ends_with(b"\n") {
+        existing.push(b'\n');
+    }
+    existing.extend_from_slice(line.as_bytes());
+    existing.push(b'\n');
+    let tmp = parent.join(format!(".parse_failures.tmp.{}", std::process::id()));
     std::fs::write(&tmp, &existing).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
