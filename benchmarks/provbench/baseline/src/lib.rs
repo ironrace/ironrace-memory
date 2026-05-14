@@ -14,4 +14,5 @@ pub mod diffs;
 pub mod facts;
 pub mod manifest;
 pub mod prompt;
+pub mod runner;
 pub mod sample;

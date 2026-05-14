@@ -55,7 +55,30 @@ struct SampleArgs {
 }
 
 #[derive(Debug, clap::Args)]
-struct RunArgs {}
+struct RunArgs {
+    /// Path to the `manifest.json` minted by `sample`.
+    #[arg(long)]
+    manifest: PathBuf,
+    /// Forward-compat knob; v1 dispatches sequentially.
+    #[arg(long, default_value_t = 1)]
+    max_concurrency: usize,
+    /// Resume from `<run_dir>/predictions.jsonl`. Verifies the on-disk
+    /// manifest's `content_hash` matches the in-memory manifest first.
+    #[arg(long, default_value_t = false)]
+    resume: bool,
+    /// Skip the live Anthropic call — fabricate a "valid" decision per
+    /// row. Intended for CI and the resume-safety test.
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+    /// Replay batch responses from `<dir>/<batch_id>.json` instead of
+    /// calling the API. Useful for offline development.
+    #[arg(long)]
+    fixture_mode: Option<PathBuf>,
+    /// Bound the number of batches dispatched this invocation. Off by
+    /// default; primarily for smoke runs.
+    #[arg(long)]
+    max_batches: Option<usize>,
+}
 
 #[derive(Debug, clap::Args)]
 struct ScoreArgs {}
@@ -88,8 +111,37 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Run(_) => {
-            anyhow::bail!("`run` not yet implemented (Task 8)")
+        Command::Run(args) => {
+            let manifest: provbench_baseline::manifest::SampleManifest =
+                serde_json::from_slice(&std::fs::read(&args.manifest)?)?;
+            let run_dir = args
+                .manifest
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("manifest path has no parent"))?
+                .to_path_buf();
+            let result = tokio::runtime::Runtime::new()?.block_on(
+                provbench_baseline::runner::run(provbench_baseline::runner::RunnerOpts {
+                    run_dir,
+                    manifest,
+                    budget_usd: provbench_baseline::constants::DEFAULT_OPERATIONAL_BUDGET_USD,
+                    resume: args.resume,
+                    dry_run: args.dry_run,
+                    fixture_mode: args.fixture_mode,
+                    max_batches: args.max_batches,
+                    max_concurrency: args.max_concurrency,
+                }),
+            )?;
+            println!(
+                "batches: {}/{}  cost: ${:.2}  aborted: {}",
+                result.batches_completed,
+                result.batches_total,
+                result.total_cost_usd,
+                result.aborted
+            );
+            if result.aborted {
+                std::process::exit(2);
+            }
+            Ok(())
         }
         Command::Score(_) => {
             anyhow::bail!("`score` not yet implemented (Task 9)")
