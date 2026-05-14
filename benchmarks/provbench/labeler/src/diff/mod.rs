@@ -5,6 +5,13 @@
 use std::collections::HashSet;
 use tree_sitter::{Node, Parser, Tree};
 
+/// Context-lines argument to `git diff -U<N>`. SPEC §6.1 requires
+/// "full file context for affected hunks" — we use a value far larger
+/// than any conceivable source file so the unified diff effectively
+/// includes the entire touched file. Increase only if a real file
+/// exceeds this length (extremely unlikely).
+const FULL_FILE_CONTEXT_LINES: &str = "-U999999";
+
 /// Compute the unified diff between two commits with full file context
 /// (`-U999999`) restricted to files actually touched in the commit.
 ///
@@ -21,7 +28,7 @@ pub fn full_file_context_diff(
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)
-        .args(["diff", "-U999999", parent, commit])
+        .args(["diff", FULL_FILE_CONTEXT_LINES, parent, commit])
         .output()
         .context("git diff invocation failed")?;
     anyhow::ensure!(

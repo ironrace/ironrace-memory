@@ -177,3 +177,45 @@ pub fn write_facts_jsonl(path: &Path, rows: &[FactBodyRow], labeler_git_sha: &st
     f.flush()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod diff_artifact_roundtrip {
+    use super::*;
+
+    #[test]
+    fn included_round_trips() {
+        let a = DiffArtifact::Included {
+            commit_sha: "abc123".into(),
+            parent_sha: "def456".into(),
+            unified_diff: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n".into(),
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        let back: DiffArtifact = serde_json::from_str(&json).unwrap();
+        assert_eq!(a, back);
+    }
+
+    #[test]
+    fn excluded_round_trips() {
+        for reason in ["t0", "no_parent"] {
+            let a = DiffArtifact::Excluded {
+                commit_sha: "abc123".into(),
+                excluded: reason.into(),
+            };
+            let json = serde_json::to_string(&a).unwrap();
+            let back: DiffArtifact = serde_json::from_str(&json).unwrap();
+            assert_eq!(a, back);
+        }
+    }
+
+    #[test]
+    fn included_and_excluded_are_distinguishable() {
+        // Field-set disjointness: Included has `parent_sha`+`unified_diff`;
+        // Excluded has `excluded`. serde(untagged) must pick the right variant.
+        let inc_json = r#"{"commit_sha":"a","parent_sha":"b","unified_diff":"x"}"#;
+        let exc_json = r#"{"commit_sha":"a","excluded":"t0"}"#;
+        let inc: DiffArtifact = serde_json::from_str(inc_json).unwrap();
+        let exc: DiffArtifact = serde_json::from_str(exc_json).unwrap();
+        matches!(inc, DiffArtifact::Included { .. });
+        matches!(exc, DiffArtifact::Excluded { .. });
+    }
+}
