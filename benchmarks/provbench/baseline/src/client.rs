@@ -46,6 +46,19 @@ pub struct BatchResponse {
     pub wall_ms: u64,
 }
 
+/// Returned by [`AnthropicClient::score_batch`] when the model's response
+/// text fails to parse as `Vec<Decision>` on both the original attempt
+/// and the addendum-retry attempt. Carries the raw second-attempt text
+/// and request id so the runner can persist a diagnostic sidecar entry
+/// and skip the batch instead of aborting the whole run.
+#[derive(Debug, thiserror::Error)]
+#[error("response parse failed after addendum retry: {err_msg}")]
+pub struct ParseFailureError {
+    pub raw_text: String,
+    pub request_id: String,
+    pub err_msg: String,
+}
+
 pub struct AnthropicClient {
     client: reqwest::Client,
     base_url: String,
@@ -164,7 +177,13 @@ impl AnthropicClient {
                     });
                     continue;
                 }
-                Err(e) => anyhow::bail!("response parse failed after addendum retry: {e}"),
+                Err(e) => {
+                    return Err(anyhow::Error::from(ParseFailureError {
+                        raw_text: text,
+                        request_id,
+                        err_msg: e.to_string(),
+                    }));
+                }
             }
         }
     }

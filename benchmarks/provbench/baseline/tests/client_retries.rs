@@ -68,3 +68,48 @@ async fn parse_error_triggers_one_retry_with_literal_addendum() {
     let second_body = std::str::from_utf8(&requests[1].body).unwrap();
     assert!(second_body.contains(PARSE_RETRY_ADDENDUM));
 }
+
+#[tokio::test]
+async fn parse_error_after_retry_returns_structured_parse_failure_error() {
+    use provbench_baseline::client::ParseFailureError;
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .append_header("request-id", "req_first")
+                .set_body_string(
+                    r#"{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"I cannot do this."}],"usage":{"input_tokens":10,"output_tokens":5}}"#,
+                ),
+        )
+        .up_to_n_times(1)
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .append_header("request-id", "req_second")
+                .set_body_string(
+                    r#"{"id":"msg_2","type":"message","role":"assistant","content":[{"type":"text","text":"still not JSON."}],"usage":{"input_tokens":15,"output_tokens":7}}"#,
+                ),
+        )
+        .mount(&mock)
+        .await;
+
+    let client = AnthropicClient::with_base_url(mock.uri(), "k".into());
+    let err = client
+        .score_batch(one_block_request())
+        .await
+        .expect_err("expected parse failure after addendum retry");
+    let pf: &ParseFailureError = err
+        .downcast_ref::<ParseFailureError>()
+        .expect("error should downcast to ParseFailureError");
+    assert_eq!(pf.raw_text, "still not JSON.");
+    assert_eq!(pf.request_id, "req_second");
+    assert!(
+        !pf.err_msg.is_empty(),
+        "err_msg should describe parse failure"
+    );
+}

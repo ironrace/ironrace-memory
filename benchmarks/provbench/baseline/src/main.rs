@@ -139,6 +139,7 @@ fn main() -> Result<()> {
                     fixture_mode: args.fixture_mode,
                     max_batches: args.max_batches,
                     max_concurrency: args.max_concurrency,
+                    client_override: None,
                 }),
             )?;
             println!(

@@ -1,0 +1,17 @@
+{
+  "batches_total": 605,
+  "batches_completed": 270,
+  "batches_skipped_resume": 21,
+  "batches_parse_failed": 5,
+  "rows_total": 9232,
+  "rows_scored": 4050,
+  "total_cost_usd": 28.472936850000014,
+  "total_tokens": 8828395,
+  "tokens_in_uncached": 8386288,
+  "tokens_in_cache_write": 124833,
+  "tokens_in_cache_read": 130147,
+  "tokens_out": 187127,
+  "aborted": true,
+  "abort_reason": "operational_budget: current=$28.4729 would_be=$28.5185 cap_95=$28.5000",
+  "manifest_content_hash": "cf2ceb95d3e60ce0312436c9a33f3216b96aad80966753c3af1eb1bb3c5ac22e"
+}
