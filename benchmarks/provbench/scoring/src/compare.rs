@@ -8,11 +8,11 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 
-use crate::PredictionRow;
+use crate::{metrics, PredictionRow};
 
 /// Side-by-side metrics rollup produced by `compare::run`.
 ///
@@ -70,6 +70,54 @@ pub fn run(baseline_run: &Path, candidate_run: &Path, candidate_name: &str) -> R
         .unwrap_or(u64::MAX);
 
     let mut deltas: BTreeMap<String, f64> = BTreeMap::new();
+    deltas.insert(
+        "stale_recall_point_delta".into(),
+        metric_f64(
+            &candidate_metrics,
+            &["section_7_1", "stale_detection", "recall"],
+        ) - metric_f64(
+            &baseline_metrics,
+            &["section_7_1", "stale_detection", "recall"],
+        ),
+    );
+    deltas.insert(
+        "stale_precision_point_delta".into(),
+        metric_f64(
+            &candidate_metrics,
+            &["section_7_1", "stale_detection", "precision"],
+        ) - metric_f64(
+            &baseline_metrics,
+            &["section_7_1", "stale_detection", "precision"],
+        ),
+    );
+    deltas.insert(
+        "valid_retention_wilson_lower_95_delta".into(),
+        metric_f64(
+            &candidate_metrics,
+            &["section_7_1", "valid_retention_accuracy", "wilson_lower_95"],
+        ) - metric_f64(
+            &baseline_metrics,
+            &["section_7_1", "valid_retention_accuracy", "wilson_lower_95"],
+        ),
+    );
+    deltas.insert(
+        "needs_revalidation_routing_wilson_lower_95_delta".into(),
+        metric_f64(
+            &candidate_metrics,
+            &[
+                "section_7_1",
+                "needs_revalidation_routing_accuracy",
+                "wilson_lower_95",
+            ],
+        ) - metric_f64(
+            &baseline_metrics,
+            &[
+                "section_7_1",
+                "needs_revalidation_routing_accuracy",
+                "wilson_lower_95",
+            ],
+        ),
+    );
     // NOTE: numerator and denominator are NOT in the same units — baseline is a
     // per-commit median, candidate is a per-row median. See `score_candidate`
     // for the full LATENCY METHODOLOGY block. The verbose key forces anyone
@@ -77,6 +125,42 @@ pub fn run(baseline_run: &Path, candidate_run: &Path, candidate_name: &str) -> R
     deltas.insert(
         "latency_p50_ratio_baseline_per_commit_to_candidate_per_row".into(),
         (baseline_p50 as f64) / (p50.max(1) as f64),
+    );
+    deltas.insert(
+        "cost_per_correct_invalidation_usd_delta".into(),
+        metric_f64(
+            &candidate_metrics,
+            &[
+                "section_7_2_applicable",
+                "cost_per_correct_invalidation",
+                "usd",
+            ],
+        ) - metric_f64(
+            &baseline_metrics,
+            &[
+                "section_7_2_applicable",
+                "cost_per_correct_invalidation",
+                "usd",
+            ],
+        ),
+    );
+    deltas.insert(
+        "cost_per_correct_invalidation_tokens_delta".into(),
+        metric_f64(
+            &candidate_metrics,
+            &[
+                "section_7_2_applicable",
+                "cost_per_correct_invalidation",
+                "tokens",
+            ],
+        ) - metric_f64(
+            &baseline_metrics,
+            &[
+                "section_7_2_applicable",
+                "cost_per_correct_invalidation",
+                "tokens",
+            ],
+        ),
     );
     let mut thresholds: BTreeMap<String, bool> = BTreeMap::new();
     thresholds.insert(
@@ -114,38 +198,9 @@ fn score_candidate(candidate_run: &Path) -> Result<Value> {
     }
 
     let total = rows.len() as u64;
-    let mut stale_tp = 0u64;
-    let mut stale_fn_ = 0u64;
-    let mut valid_correct = 0u64;
-    let mut valid_total = 0u64;
-    for r in &rows {
-        let gt = r.ground_truth.to_lowercase();
-        let pr = r.prediction.to_lowercase();
-        if gt.starts_with("stale") {
-            if pr == "stale" {
-                stale_tp += 1
-            } else {
-                stale_fn_ += 1
-            }
-        } else if gt == "valid" {
-            valid_total += 1;
-            if pr == "valid" {
-                valid_correct += 1
-            }
-        }
-    }
-    let stale_recall = if (stale_tp + stale_fn_) == 0 {
-        0.0
-    } else {
-        stale_tp as f64 / (stale_tp + stale_fn_) as f64
-    };
-    let valid_acc = if valid_total == 0 {
-        0.0
-    } else {
-        valid_correct as f64 / valid_total as f64
-    };
-    let stale_wlb = crate::metrics::wilson_lower_95(stale_tp, stale_tp + stale_fn_);
-    let valid_wlb = crate::metrics::wilson_lower_95(valid_correct, valid_total);
+    let pop_weights: HashMap<String, f64> = HashMap::new();
+    let three = metrics::three_way(&rows, &pop_weights);
+    let cost = metrics::cost_per_correct_invalidation_from_totals(&rows, 0, 0.0);
 
     // LATENCY METHODOLOGY (read before quoting numbers).
     //
@@ -174,26 +229,56 @@ fn score_candidate(candidate_run: &Path) -> Result<Value> {
     // 2026-05-14-findings.md for the audience-facing version.
     let mut walls: Vec<u64> = rows.iter().map(|r| r.wall_ms).collect();
     walls.sort();
-    let p50 = if walls.is_empty() {
-        0
-    } else {
-        walls[walls.len() / 2]
-    };
+    let p50 = percentile_u64(&walls, 0.50);
+    let p95 = percentile_u64(&walls, 0.95);
 
     Ok(json!({
         "row_count": total,
         "section_7_1": {
             "stale_detection": {
-                "recall": stale_recall,
-                "wilson_lower_95": stale_wlb,
+                "precision": three.stale_detection.precision,
+                "recall": three.stale_detection.recall,
+                "f1": three.stale_detection.f1,
+                "wilson_lower_95": three.stale_detection.wilson_lower_95,
             },
             "valid_retention_accuracy": {
-                "point": valid_acc,
-                "wilson_lower_95": valid_wlb,
+                "point": three.valid_retention_accuracy.point,
+                "wilson_lower_95": three.valid_retention_accuracy.wilson_lower_95,
+            },
+            "needs_revalidation_routing_accuracy": {
+                "point": three.needs_revalidation_routing_accuracy.point,
+                "wilson_lower_95": three.needs_revalidation_routing_accuracy.wilson_lower_95,
             },
         },
-        "section_7_2_applicable": { "latency_p50_ms": p50 },
+        "section_7_2_applicable": {
+            "latency_p50_ms": p50,
+            "latency_p95_ms": p95,
+            "cost_per_correct_invalidation": {
+                "tokens": cost.tokens,
+                "usd": cost.usd,
+            },
+        },
     }))
+}
+
+fn metric_f64(root: &Value, path: &[&str]) -> f64 {
+    let mut current = root;
+    for key in path {
+        current = &current[*key];
+    }
+    current
+        .as_f64()
+        .or_else(|| current.as_u64().map(|v| v as f64))
+        .unwrap_or(0.0)
+}
+
+fn percentile_u64(sorted: &[u64], q: f64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = (q * sorted.len() as f64).ceil() as usize;
+    let idx = rank.saturating_sub(1).min(sorted.len() - 1);
+    sorted[idx]
 }
 
 fn load_per_rule_confusion(
