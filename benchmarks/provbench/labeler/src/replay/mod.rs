@@ -231,8 +231,8 @@ impl Replay {
                 continue;
             }
             let source_path_norm =
-                crate::repo::normalize_path_for_fact_id(Self::fact_source_path(&observed.fact));
-            let blob = t0_blobs.get(Self::fact_source_path(&observed.fact));
+                crate::repo::normalize_path_for_fact_id(observed.fact.source_path());
+            let blob = t0_blobs.get(observed.fact.source_path());
             let body = render_fact_body(&observed.fact, blob.map(|v| v.as_slice()));
             out.push(crate::output::FactBodyRow {
                 fact_id: id,
@@ -245,14 +245,6 @@ impl Replay {
             });
         }
         Ok(out)
-    }
-
-    /// Path returned by [`crate::facts::Fact::source_path`], routed
-    /// through this helper so [`Self::emit_facts`] can stay short. The
-    /// borrowed return makes the call site a one-liner without
-    /// allocating a new `PathBuf`.
-    fn fact_source_path(fact: &Fact) -> &Path {
-        fact.source_path()
     }
 
     /// Shared implementation used by both [`Self::run`] and
@@ -550,7 +542,7 @@ fn group_facts_by_source_path(facts: &[ObservedFact]) -> BTreeMap<PathBuf, Vec<&
     let mut grouped: BTreeMap<PathBuf, Vec<&ObservedFact>> = BTreeMap::new();
     for observed in facts {
         grouped
-            .entry(source_path_for(&observed.fact).to_path_buf())
+            .entry(observed.fact.source_path().to_path_buf())
             .or_default()
             .push(observed);
     }
@@ -567,7 +559,7 @@ fn build_t0_names_by_path(facts: &[ObservedFact]) -> BTreeMap<PathBuf, HashSet<S
     for observed in facts {
         let key = qualified_key_for(&observed.fact).to_string();
         by_path
-            .entry(source_path_for(&observed.fact).to_path_buf())
+            .entry(observed.fact.source_path().to_path_buf())
             .or_default()
             .insert(key);
     }
@@ -669,7 +661,7 @@ pub fn validate_sha_hex(sha: &str) -> Result<()> {
 /// string transform) so that no absolute filesystem path can ever leak
 /// into a `fact_id`, regardless of the user's `pwd` or where the repo
 /// lives on disk.
-pub fn fact_id(fact: &Fact) -> String {
+pub(crate) fn fact_id(fact: &Fact) -> String {
     match fact {
         Fact::FunctionSignature {
             qualified_name,
@@ -811,7 +803,7 @@ fn classify_against_commit(
         None => CommitState::deleted(),
 
         Some(post_bytes) => {
-            let observed_hash = observed_hash_for(fact);
+            let observed_hash = fact.content_hash();
 
             // Search the post-commit file for the same fact kind/key.
             let post_fact = match_post::matching_post_fact(
@@ -1056,6 +1048,14 @@ fn parse_fn_signature_parts(blob: &[u8], fact: &Fact) -> (String, String) {
     found.unwrap_or((String::new(), "()".to_string()))
 }
 
+/// Maximum number of source lines that a function's leading attributes
+/// and doc comments may push the recorded fact span above the actual
+/// `fn` keyword line. Functions with deeper attribute stacks will fall
+/// through to the empty-params / `()` default in `parse_fn_signature_parts`.
+/// Set conservatively from the pilot corpus (ripgrep at af6b6c54);
+/// raise if a downstream test surfaces a missed match.
+const FN_ATTR_LINE_WINDOW: i64 = 8;
+
 fn walk_function_items(
     node: tree_sitter::Node<'_>,
     src: &[u8],
@@ -1079,7 +1079,7 @@ fn walk_function_items(
                     // attributes and doc comments push the fact span
                     // upwards but never downwards.
                     let item_row = (node.start_position().row + 1) as i64;
-                    if (item_row - line_start as i64).abs() <= 8 {
+                    if (item_row - line_start as i64).abs() <= FN_ATTR_LINE_WINDOW {
                         let params = node
                             .child_by_field_name("parameters")
                             .and_then(|n| n.utf8_text(src).ok())
@@ -1127,26 +1127,6 @@ fn span_for(fact: &Fact) -> &Span {
         Fact::PublicSymbol { span, .. } => span,
         Fact::DocClaim { mention_span, .. } => mention_span,
         Fact::TestAssertion { span, .. } => span,
-    }
-}
-
-fn source_path_for(fact: &Fact) -> &Path {
-    match fact {
-        Fact::FunctionSignature { source_path, .. } => source_path,
-        Fact::Field { source_path, .. } => source_path,
-        Fact::PublicSymbol { source_path, .. } => source_path,
-        Fact::DocClaim { doc_path, .. } => doc_path,
-        Fact::TestAssertion { source_path, .. } => source_path,
-    }
-}
-
-fn observed_hash_for(fact: &Fact) -> &str {
-    match fact {
-        Fact::FunctionSignature { content_hash, .. } => content_hash,
-        Fact::Field { content_hash, .. } => content_hash,
-        Fact::PublicSymbol { content_hash, .. } => content_hash,
-        Fact::DocClaim { mention_hash, .. } => mention_hash,
-        Fact::TestAssertion { content_hash, .. } => content_hash,
     }
 }
 
