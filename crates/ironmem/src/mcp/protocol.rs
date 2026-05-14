@@ -60,7 +60,7 @@ pub fn capabilities_response() -> serde_json::Value {
         },
         "serverInfo": {
             "name": "ironmem",
-            "version": env!("CARGO_PKG_VERSION")
+            "version": env!("IRONMEM_VERSION")
         }
     })
 }
