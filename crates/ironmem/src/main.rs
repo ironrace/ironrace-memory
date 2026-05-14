@@ -7,7 +7,7 @@ use ironmem::{bootstrap, config, ingest, mcp, migrate, reembed};
 #[derive(Parser)]
 #[command(
     name = "ironmem",
-    version = env!("CARGO_PKG_VERSION"),
+    version = env!("IRONMEM_VERSION"),
     about = "AI memory — semantic search + knowledge graph"
 )]
 struct Cli {
