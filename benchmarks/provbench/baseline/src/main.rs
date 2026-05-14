@@ -81,7 +81,12 @@ struct RunArgs {
 }
 
 #[derive(Debug, clap::Args)]
-struct ScoreArgs {}
+struct ScoreArgs {
+    /// Run directory containing `manifest.json` + `predictions.jsonl`
+    /// (and optionally `run_meta.json`). `metrics.json` is written here.
+    #[arg(long)]
+    run: PathBuf,
+}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -143,8 +148,11 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Score(_) => {
-            anyhow::bail!("`score` not yet implemented (Task 9)")
+        Command::Score(args) => {
+            provbench_baseline::report::score_run(&args.run)?;
+            let out = args.run.join("metrics.json");
+            println!("wrote metrics to {}", out.display());
+            Ok(())
         }
     }
 }

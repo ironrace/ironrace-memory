@@ -13,6 +13,8 @@ pub mod constants;
 pub mod diffs;
 pub mod facts;
 pub mod manifest;
+pub mod metrics;
 pub mod prompt;
+pub mod report;
 pub mod runner;
 pub mod sample;
