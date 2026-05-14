@@ -7,5 +7,10 @@
 //! This is a skeleton crate. CLI subcommand implementations land in later
 //! tasks (`sample` — Task 5, `run` — Task 8, `score` — Task 9).
 
+pub mod budget;
 pub mod constants;
+pub mod diffs;
+pub mod facts;
+pub mod manifest;
 pub mod prompt;
+pub mod sample;

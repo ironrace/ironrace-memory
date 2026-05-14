@@ -1,0 +1,1 @@
+{"commit_sha":"eeee555555555555555555555555555555555555","parent_sha":"dddd444444444444444444444444444444444444","unified_diff":"diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -35,3 +35,3 @@\n-fn sqrt(x: f64) -> f64 { x.sqrt() }\n+fn square_root(x: f64) -> f64 { x.sqrt() }\n"}

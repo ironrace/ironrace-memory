@@ -1,0 +1,1 @@
+{"commit_sha":"dddd444444444444444444444444444444444444","parent_sha":"cccc333333333333333333333333333333333333","unified_diff":"diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -5,2 +5,0 @@\n-fn sub(a: i32, b: i32) -> i32 { a - b }\n"}

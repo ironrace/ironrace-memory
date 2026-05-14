@@ -1,0 +1,1 @@
+{"commit_sha":"bbbb222222222222222222222222222222222222","parent_sha":"aaaa111111111111111111111111111111111111","unified_diff":"diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -10,3 +10,3 @@\n-fn mul(a: i32, b: i32) -> i32 { a * b }\n+fn mul(a: i32, b: i32) -> i32 { a.wrapping_mul(b) }\n"}

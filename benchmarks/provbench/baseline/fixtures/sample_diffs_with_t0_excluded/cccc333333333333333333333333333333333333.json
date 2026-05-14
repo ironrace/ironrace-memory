@@ -1,0 +1,1 @@
+{"commit_sha":"cccc333333333333333333333333333333333333","parent_sha":"bbbb222222222222222222222222222222222222","unified_diff":"diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -15,3 +15,3 @@\n-fn mul(a: i32, b: i32) -> i32 { a * b }\n+fn multiply(a: i32, b: i32) -> i32 { a * b }\n"}
