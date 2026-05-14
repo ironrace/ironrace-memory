@@ -10,6 +10,7 @@ exclude = [
     "benchmarks/provbench/labeler",
     "benchmarks/provbench/baseline",
     "benchmarks/provbench/scoring",
+    "benchmarks/provbench/phase1",
 ]
 resolver = "2"
 

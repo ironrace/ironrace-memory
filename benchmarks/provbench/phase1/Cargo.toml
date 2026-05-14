@@ -1,0 +1,36 @@
+[package]
+name = "provbench-phase1"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.91"
+description = "Phase 1 rules-based structural invalidator for ProvBench (SPEC §8 candidate)"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "provbench-phase1"
+path = "src/main.rs"
+
+[lib]
+name = "provbench_phase1"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+gix = { version = "0.66", default-features = false, features = ["max-performance-safe"] }
+tree-sitter = "0.22"
+tree-sitter-rust = "0.21"
+tree-sitter-md = "0.2"
+provbench-scoring = { path = "../scoring" }
+
+[dev-dependencies]
+tempfile = "3"

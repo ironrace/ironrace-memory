@@ -21,3 +21,4 @@ benchmarks/provbench/work/
 benchmarks/provbench/labeler/target/
 benchmarks/provbench/baseline/target/
 benchmarks/provbench/scoring/target/
+benchmarks/provbench/phase1/target/
