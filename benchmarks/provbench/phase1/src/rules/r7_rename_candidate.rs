@@ -37,7 +37,7 @@ impl Rule for R7RenameCandidate {
             let s = similarity(body, path); // proxy: file path likeness; rule_unit fixtures override
             if s >= RENAME_THRESHOLD {
                 best = match best {
-                    Some((bs, bp)) if (bs, bp) >= (s, path.as_str()) => Some((bs, bp)),
+                    Some((bs, bp)) if bs > s || (bs == s && bp <= path.as_str()) => Some((bs, bp)),
                     _ => Some((s, path.as_str())),
                 };
             }

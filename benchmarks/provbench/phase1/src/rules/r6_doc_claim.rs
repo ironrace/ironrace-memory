@@ -20,6 +20,9 @@ impl Rule for R6DocClaim {
         }
         let post = ctx.post_blob?;
         let needle = ctx.fact.symbol_path.as_bytes();
+        if needle.is_empty() {
+            return None; // empty symbol_path: cannot do substring search, defer to later rules
+        }
         let mentions = post.windows(needle.len()).any(|w| w == needle);
         if mentions {
             return Some((

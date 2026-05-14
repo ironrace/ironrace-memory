@@ -11,6 +11,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
 
+use crate::diffs::CommitDiff;
 use crate::facts::FactBody;
 use crate::repo::Repo;
 use crate::rules::{Decision, RowCtx, RuleChain};
@@ -56,6 +57,8 @@ pub fn run(opts: RunnerOpts<'_>) -> Result<RunStats> {
     let mut t0_blobs: HashMap<String, Option<Vec<u8>>> = HashMap::new();
     // Per-commit tree-listing cache (populated for R7 rename search).
     let mut commit_files_cache: HashMap<String, Vec<String>> = HashMap::new();
+    // Per-commit diff-artifact cache (populated for R0 diff_excluded check).
+    let mut diff_cache: HashMap<String, Option<CommitDiff>> = HashMap::new();
 
     // Stream eval_rows ordered for stable output.
     let mut stmt = opts.db.prepare(
@@ -88,26 +91,51 @@ pub fn run(opts: RunnerOpts<'_>) -> Result<RunStats> {
             .get(&fact_id)
             .with_context(|| format!("fact_id {} not in facts table", fact_id))?;
 
-        let t0_blob = t0_blobs
-            .entry(fact.source_path.clone())
-            .or_insert_with(|| {
-                opts.repo
-                    .blob_at(opts.t0, &fact.source_path)
-                    .unwrap_or(None)
-            })
-            .clone();
+        // Cache miss → call gix; propagate errors with context so a corrupt T0 SHA
+        // or unreadable repo surfaces immediately rather than silently inflating
+        // needs_revalidation counts downstream.
+        let t0_blob = if let Some(v) = t0_blobs.get(&fact.source_path) {
+            v.clone()
+        } else {
+            let v = opts
+                .repo
+                .blob_at(opts.t0, &fact.source_path)
+                .with_context(|| {
+                    format!(
+                        "reading T0 blob at commit {} path {}",
+                        opts.t0, fact.source_path
+                    )
+                })?;
+            t0_blobs.insert(fact.source_path.clone(), v.clone());
+            v
+        };
         let post_blob = opts.repo.blob_at(&commit_sha, &fact.source_path)?;
 
-        let commit_files = commit_files_cache
-            .entry(commit_sha.clone())
-            .or_insert_with(|| opts.repo.list_tree(&commit_sha).unwrap_or_default())
-            .clone();
+        let commit_files = if let Some(v) = commit_files_cache.get(&commit_sha) {
+            v.clone()
+        } else {
+            let v = opts
+                .repo
+                .list_tree(&commit_sha)
+                .with_context(|| format!("listing tree at commit {}", commit_sha))?;
+            commit_files_cache.insert(commit_sha.clone(), v.clone());
+            v
+        };
+
+        let diff = if let Some(v) = diff_cache.get(&commit_sha) {
+            v.clone()
+        } else {
+            let v = load_commit_diff(opts.db, &commit_sha)
+                .with_context(|| format!("loading diff_artifact for commit {}", commit_sha))?;
+            diff_cache.insert(commit_sha.clone(), v.clone());
+            v
+        };
 
         let started = Instant::now();
         let ctx = RowCtx {
             fact,
             commit_sha: &commit_sha,
-            diff: None,
+            diff: diff.as_ref(),
             post_blob: post_blob.as_deref(),
             t0_blob: t0_blob.as_deref(),
             post_tree: None,
@@ -168,4 +196,26 @@ pub struct RunStats {
     pub valid: u64,
     pub stale: u64,
     pub needs_reval: u64,
+}
+
+/// Load the diff_artifact row for a single commit, if present.
+fn load_commit_diff(db: &Connection, commit_sha: &str) -> Result<Option<CommitDiff>> {
+    let row = db.query_row(
+        "SELECT commit_sha, parent_sha, excluded_reason, unified_diff \
+         FROM diff_artifacts WHERE commit_sha = ?1",
+        params![commit_sha],
+        |r| {
+            Ok(CommitDiff {
+                commit_sha: r.get(0)?,
+                parent_sha: r.get(1)?,
+                excluded_reason: r.get(2)?,
+                unified_diff: r.get(3)?,
+            })
+        },
+    );
+    match row {
+        Ok(cd) => Ok(Some(cd)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }

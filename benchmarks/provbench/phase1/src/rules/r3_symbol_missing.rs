@@ -24,6 +24,9 @@ impl Rule for R3SymbolMissing {
             return None;
         };
         let needle = ctx.fact.symbol_path.as_bytes();
+        if needle.is_empty() {
+            return None; // empty symbol_path: cannot do substring search, defer to later rules
+        }
         let haystack = post;
         // Naive substring search — symbol no longer literally appears.
         let resolves = haystack.windows(needle.len()).any(|w| w == needle);

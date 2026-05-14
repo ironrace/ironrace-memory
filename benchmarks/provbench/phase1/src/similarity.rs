@@ -1,5 +1,5 @@
 //! Rename-candidate similarity (SPEC §5 step 2, frozen threshold 0.6).
-//! Myers-style line-similarity over symbol-bearing lines.
+//! Jaccard token similarity over whitespace-split tokens.
 
 /// Token-based Jaccard similarity. Symmetric, deterministic, in [0,1].
 /// SPEC §5 step 2 frozen threshold: 0.6.

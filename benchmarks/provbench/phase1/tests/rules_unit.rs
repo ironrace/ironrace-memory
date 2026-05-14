@@ -1,5 +1,7 @@
+use provbench_phase1::diffs::CommitDiff;
 use provbench_phase1::facts::FactBody;
-use provbench_phase1::rules::{Decision, RowCtx, RuleChain};
+use provbench_phase1::rules::r7_rename_candidate::R7RenameCandidate;
+use provbench_phase1::rules::{Decision, RowCtx, Rule, RuleChain};
 
 fn ctx<'a>(
     fact: &'a FactBody,
@@ -62,7 +64,7 @@ fn r9_fallback_fires_last() {
     let f = fact("Other", empty_span_hash);
     let (d, rid, _, _) = chain.classify_first_match(&ctx(&f, Some(b"changed"), Some(b"original")));
     assert_eq!(d, Decision::NeedsRevalidation);
-    assert!(rid == "R4" || rid == "R9");
+    assert_eq!(rid, "R9");
 }
 
 #[test]
@@ -101,6 +103,81 @@ fn r4_fires_when_span_hash_changes_no_whitespace_only_escape() {
         chain.classify_first_match(&ctx(&f, Some(post), Some(b"fn foo() -> u32 { 1 }\n")));
     assert_eq!(d, Decision::Stale);
     assert!(rid == "R4" || rid == "R3" || rid == "R7");
+}
+
+#[test]
+fn r7_tie_break_picks_alphabetically_smaller_path() {
+    // Equal-similarity tie-break: SPEC §5 step 2 → (similarity desc,
+    // qualified_name asc). Among candidates with identical similarity,
+    // the alphabetically smallest path wins.
+    //
+    // Construct two candidate "paths" that share identical Jaccard
+    // similarity with body. The similarity function is whitespace-token
+    // Jaccard, so we hand-build path strings whose token sets share
+    // equal overlap with the body's token set.
+    //
+    // body tokens = {"a","b","c"}.
+    // path "z {a b c}" → tokens = {"z","a","b","c"}; intersection=3, union=4 → 0.75
+    // path "y {a b c}" → tokens = {"y","a","b","c"}; intersection=3, union=4 → 0.75
+    // Both are above the 0.6 threshold and equal. Present in reverse
+    // order ("z…" first, "y…" second). Tie-break must pick the
+    // alphabetically smaller path: "y …".
+    //
+    // R7 isn't reachable through `RuleChain` because R1 fires first
+    // whenever post_blob is None. Test R7's classify() directly so the
+    // tie-break contract is locked independently of chain ordering.
+    let mut f = fact("FunctionSignature", "x");
+    f.symbol_path = "foo".into();
+    f.body = "a b c".into();
+    f.source_path = "src/other.rs".into();
+    let cf = vec!["z a b c".to_string(), "y a b c".to_string()];
+    let ctx = RowCtx {
+        fact: &f,
+        commit_sha: "0000",
+        diff: None,
+        post_blob: None, // R7 requires post_blob.is_none()
+        t0_blob: Some(b"unused"),
+        post_tree: None,
+        commit_files: &cf,
+    };
+    let r7 = R7RenameCandidate;
+    let result = r7.classify(&ctx).expect("R7 should fire");
+    assert_eq!(result.0, Decision::Stale);
+    // Alphabetically smaller path wins: "y …" < "z …".
+    assert!(
+        result.1.contains(r#""to":"y a b c""#),
+        "tie-break inversion: expected alphabetically smaller 'y' path, got evidence: {}",
+        result.1
+    );
+}
+
+#[test]
+fn r0_diff_excluded_fires_for_orphan_diff() {
+    // R0 guard: excluded_reason.is_some() && post_blob.is_none() && !commit_files.is_empty()
+    // Use kind "Other" so neither R3 nor R7 fires (both require FunctionSignature/Field/PublicSymbol).
+    // R1 requires t0_blob.is_some() && post_blob.is_none(); to keep R0 ahead of R1, R0 is
+    // already declared before R1 in the chain, so as long as the guard holds, R0 wins.
+    let chain = RuleChain::default();
+    let cd = CommitDiff {
+        commit_sha: "abc123".into(),
+        parent_sha: None,
+        excluded_reason: Some("orphan".into()),
+        unified_diff: None,
+    };
+    let f = fact("Other", "x");
+    let cf = vec!["some/path.rs".to_string()];
+    let ctx = RowCtx {
+        fact: &f,
+        commit_sha: "abc123",
+        diff: Some(&cd),
+        post_blob: None,
+        t0_blob: Some(b"original"),
+        post_tree: None,
+        commit_files: &cf,
+    };
+    let (d, rid, _, _) = chain.classify_first_match(&ctx);
+    assert_eq!(d, Decision::NeedsRevalidation);
+    assert_eq!(rid, "R0");
 }
 
 #[test]
