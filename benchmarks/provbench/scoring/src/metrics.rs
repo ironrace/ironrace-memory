@@ -22,7 +22,7 @@ use rand::seq::SliceRandom;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// z-score for a two-sided 95% Wilson interval.
 const Z_95: f64 = 1.959964;
@@ -86,10 +86,18 @@ pub struct KappaReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct AgreementReport {
     pub overall: PointAndSe,
-    pub per_class: HashMap<String, f64>,
+    // BTreeMap (not HashMap) for the two `per_*` fields below: serde_json
+    // serializes maps in their iteration order, and the byte-stable
+    // canary test (`scoring/tests/byte_stable_canary.rs`) asserts the
+    // tracked `metrics.json` round-trips byte-for-byte. HashMap iteration
+    // order is unspecified — the canary currently passes only because
+    // the runtime hash seed happens to land alphabetically; a stdlib
+    // bump or rebuild on a different platform could silently flip it.
+    // BTreeMap guarantees sorted-key emission and removes that risk.
+    pub per_class: BTreeMap<String, f64>,
     pub confusion_matrix_3x3: [[u64; 3]; 3],
     pub cohen_kappa: KappaReport,
-    pub per_stale_subtype: HashMap<String, f64>,
+    pub per_stale_subtype: BTreeMap<String, f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -286,7 +294,7 @@ pub fn llm_validator_agreement(
         }
     }
 
-    let mut per_class: HashMap<String, f64> = HashMap::new();
+    let mut per_class: BTreeMap<String, f64> = BTreeMap::new();
     for c in classes {
         let t = *class_total.get(c).unwrap_or(&0);
         let m = *class_match.get(c).unwrap_or(&0);
@@ -336,7 +344,7 @@ pub fn llm_validator_agreement(
     };
 
     // Per-stale subtype: agreement within each Stale* raw class.
-    let mut per_stale_subtype: HashMap<String, f64> = HashMap::new();
+    let mut per_stale_subtype: BTreeMap<String, f64> = BTreeMap::new();
     for (k, t) in &subtype_total {
         let m = subtype_match.get(k).copied().unwrap_or(0);
         per_stale_subtype.insert(k.clone(), if *t > 0 { m as f64 / *t as f64 } else { 0.0 });
