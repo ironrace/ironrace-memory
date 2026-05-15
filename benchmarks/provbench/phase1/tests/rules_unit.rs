@@ -193,6 +193,46 @@ fn r4_stale_when_post_span_lines_differ_from_t0() {
     assert_eq!(rid, "R4");
 }
 
+/// v1.2 Field-guard fix: a single-character struct field at T0 like
+/// `    c: C,\n` has nonws_len = 4, which the v1.1 R4 length floor
+/// (MIN_PROBE_NONWS_LEN = 8) rejects — routing the row to Stale even
+/// though the byte sequence is still present in post. v1.2 drops the
+/// length floor for kind = "Field" (keeping `probe_has_leaf` as a
+/// sanity floor); R4 must now classify this as Valid.
+#[test]
+fn r4_valid_when_short_field_probe_appears_unchanged_in_post() {
+    let chain = RuleChain::default();
+    let mut f = fact("Field", "irrelevant_hash");
+    f.symbol_path = "S::c".into();
+    f.line_span = [3, 3];
+    let t0 = b"struct S {\n    a: A,\n    c: C,\n    d: D,\n}\n";
+    // post inserts a new field above `c` so the line shifts but the
+    // byte sequence `    c: C,\n` is still present verbatim.
+    let post = b"struct S {\n    a: A,\n    b: B,\n    c: C,\n    d: D,\n}\n";
+    let (d, rid, _, _) = chain.classify_first_match(&ctx(&f, Some(post), Some(t0)));
+    assert_eq!(d, Decision::Valid);
+    assert_eq!(rid, "R4");
+}
+
+/// v1.2 safety check for the dropped Field length floor: a short Field
+/// probe whose byte sequence is NOT present in post must still route
+/// to Stale, not silently fall through. Without this guarantee, the
+/// `Field` arm would null-match degenerate post blobs.
+#[test]
+fn r4_stale_when_short_field_probe_absent_from_post() {
+    let chain = RuleChain::default();
+    let mut f = fact("Field", "irrelevant_hash");
+    f.symbol_path = "S::c".into();
+    f.line_span = [3, 3];
+    let t0 = b"struct S {\n    a: A,\n    c: C,\n    d: D,\n}\n";
+    // post replaces field `c: C,` with `c: NewType,` — the original
+    // byte sequence `    c: C,\n` is gone.
+    let post = b"struct S {\n    a: A,\n    c: NewType,\n    d: D,\n}\n";
+    let (d, rid, _, _) = chain.classify_first_match(&ctx(&f, Some(post), Some(t0)));
+    assert_eq!(d, Decision::Stale);
+    assert_eq!(rid, "R4");
+}
+
 /// R7 fires when the source file is gone at the commit but a same-extension
 /// candidate in the commit tree has a basename whose token-Jaccard similarity
 /// against the qualified-symbol leaf clears the 0.6 threshold. With the

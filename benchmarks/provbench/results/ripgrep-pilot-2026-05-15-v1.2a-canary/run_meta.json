@@ -1,0 +1,22 @@
+{
+  "runner": "provbench-phase1",
+  "rule_set_version": "v1.2",
+  "spec_freeze_hash": "683d023934c181a8714b9d24c53d011caed31f511becf82ed9e5def92e0ff37c",
+  "labeler_git_sha_corpus": "c2d3b7b03a51a9047ff2d50077200bb52f149448",
+  "labeler_git_sha_facts_and_diffs": "ababb376f7cf3f92c36dde6035d90932e083517a",
+  "phase1_git_sha": "97cef97ba347aa7adca0a8367712ab11490f26fe",
+  "repo": "BurntSushi/ripgrep",
+  "t0": "af6b6c543b224d348a8876f0c06245d9ea7929c5",
+  "head": "4519153e5e461527f4bca45b042fff45c4ec6fb9",
+  "sample_seed": "0xC0DEBABEDEADBEEF",
+  "per_stratum_targets": {
+    "valid": 2000,
+    "stale_changed": 2000,
+    "stale_deleted": 2000,
+    "stale_renamed": "usize::MAX",
+    "needs_revalidation": 2000
+  },
+  "operational_budget_usd": 25,
+  "phase1_wall_time_sec": 23,
+  "note": "Pilot v1.2a; identical inputs to v1.1 pilot except --rule-set-version v1.2 and phase1 source with the v1.2a R4 Field guard change. The current git SHA also includes an ignored-test Gate 2 baseline loading fix; no labeler, corpus, facts, diffs, baseline, scoring, or non-R4 rule behavior changes are included."
+}
