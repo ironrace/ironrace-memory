@@ -89,7 +89,7 @@
       "latency_p50_ms": 0,
       "latency_p95_ms": 0
     },
-    "spec_freeze_hash": "f97fcb79b6633b03f258f832d76121fdd890eaeb28b802d15b0f115d96351966"
+    "spec_freeze_hash": "683d023934c181a8714b9d24c53d011caed31f511becf82ed9e5def92e0ff37c"
   },
   "per_rule_confusion": {
     "R1": {

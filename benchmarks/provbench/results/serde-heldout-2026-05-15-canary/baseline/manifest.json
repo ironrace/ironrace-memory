@@ -4,7 +4,7 @@
   "facts_path": "benchmarks/provbench/facts/serde-65e1a507-c2d3b7b.facts.jsonl",
   "diffs_dir": "benchmarks/provbench/facts/serde-65e1a507-c2d3b7b.diffs",
   "labeler_git_sha": "c2d3b7b03a51a9047ff2d50077200bb52f149448",
-  "spec_freeze_hash": "f97fcb79b6633b03f258f832d76121fdd890eaeb28b802d15b0f115d96351966",
+  "spec_freeze_hash": "683d023934c181a8714b9d24c53d011caed31f511becf82ed9e5def92e0ff37c",
   "baseline_crate_head_sha": "27f63c5b506d0d1e968f97dbd17278d843317346",
   "per_stratum_targets": {
     "valid": 2000,
@@ -76941,5 +76941,5 @@
     }
   ],
   "created_at": "unix-seconds-1778864513Z",
-  "content_hash": "92e8f0650cdd466a618fcdf97048363e07a1eb865c59a9321ef7087f69d72202"
+  "content_hash": "f888f715c15bb481bb6c624684b1d109ee90bed954ebe312756c1168cdd4b374"
 }

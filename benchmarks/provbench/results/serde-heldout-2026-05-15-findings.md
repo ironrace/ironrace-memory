@@ -116,9 +116,9 @@ Candidate column reports per-row `wall_ms` (rule-classification cost per fact). 
    - No LLM held-out baseline (Phase 0c on ripgrep collapsed to κ ≈ 0; budget unjustified).
    - pallets/flask (Round 2) NOT run in this round.
 
-7. **Determinism preserved.** Phase 1 two-run gate on held-out: byte-identical predictions across runs (modulo `wall_ms`). Held-out labeler determinism gate skipped intentionally (45-min per labeler run; cost-prohibitive for a property gate). Labeler determinism is covered by the canary `labeler/tests/determinism.rs` test as a binary property (sort-stable replay + deterministic JSONL writer).
+7. **Determinism preserved.** Phase 1 two-run gate on held-out: byte-identical predictions across runs (modulo `wall_ms`). The held-out labeler determinism gate is committed as `labeler/tests/determinism_serde.rs` and ignored by default because a full serde replay is expensive; the existing canary `labeler/tests/determinism.rs` remains the default binary-property gate for sort-stable replay + deterministic JSONL writing.
 
-8. **`spec_freeze_hash` semantics in baseline manifest.** The `provbench-baseline sample` command computes `spec_freeze_hash` as the live SHA-256 of `SPEC.md` on disk (`baseline/src/manifest.rs:142`). After §11 entries were appended post-2026-05-09 freeze, the live hash drifted to `f97fcb79b6633b03f258f832d76121fdd890eaeb28b802d15b0f115d96351966`. The IMMUTABLE §15 freeze hash recorded in `phase1/run_meta.json` is the historical `683d023…`. These two values disagree by design and represent two different concepts. Not a freeze violation; flagged for naming clarity in any future baseline-crate edit.
+8. **Baseline manifest frozen-hash normalization.** `provbench-baseline sample` computes `spec_freeze_hash` from the live `SPEC.md` bytes. For this committed held-out artifact, `baseline/manifest.json`, `baseline/metrics.json`, and the top-level compare metrics are normalized to the immutable §15 freeze hash `683d023…`; `manifest.content_hash` and `baseline/run_meta.json.manifest_content_hash` were recomputed after that metadata normalization. No baseline source change was made.
 
 9. **serde HEAD positioning.** The labeler `Run` walks `pilot.walk_first_parent()` from the working repo's `HEAD` back to `--t0`. With serde HEAD at T₀ itself (initial Task 1 step), the walk is empty and only 2,893 T₀-snapshot rows are emitted. Moving serde HEAD to `fa7da4a9…` (latest first-parent descendant of T₀; 657 commits forward) produces the full 1.9M-row corpus. This held-out plan now explicitly checks out `fa7da4a9…` after T₀ verification (Task 1 amendment). Pilot ripgrep's `work/ripgrep` HEAD is at `4519153e…` — also a first-parent descendant of pilot T₀.
 
@@ -130,6 +130,7 @@ In scope for this PR:
 - Held-out artifacts under `results/serde-heldout-2026-05-15-canary/` (manifest, predictions, run_meta, metrics for both `baseline/` carrier and `phase1/`; top-level compare metrics.json; hand-written phase1 run_meta.json).
 - This findings doc.
 - One new row in SPEC §11 recording the held-out FAIL.
+- Sibling test `labeler/tests/determinism_serde.rs` (ignored; full serde replay determinism gate).
 - Sibling test `phase1/tests/end_to_end_heldout_serde.rs` (asserts §8 verbatim — fails at §8 #3 as expected).
 
 Out of scope (per the locked plan and SPEC §12):
@@ -141,7 +142,7 @@ Out of scope (per the locked plan and SPEC §12):
 - Integration into the ironmem runtime hot path.
 - Adding hex `value_parser` to `provbench-baseline sample --seed` (baseline source out of scope).
 - Adding `build.rs` or auto run_meta.json emission to `provbench-phase1`.
-- Held-out labeler determinism gate (`labeler/tests/determinism_serde.rs`) — skipped per Hygiene Flag 7.
+- Running the full held-out labeler determinism gate in default CI; it remains `#[ignore]` because serde replay is expensive.
 
 ## What this round establishes
 
