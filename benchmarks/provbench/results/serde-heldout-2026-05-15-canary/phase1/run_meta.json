@@ -1,0 +1,14 @@
+{
+  "runner": "phase1",
+  "phase1_git_sha": "ccfc901be17124d08c19a6de50294ff79ded6fc3",
+  "spec_freeze_hash": "683d023934c181a8714b9d24c53d011caed31f511becf82ed9e5def92e0ff37c",
+  "labeler_git_sha": "c2d3b7b03a51a9047ff2d50077200bb52f149448",
+  "facts_labeler_git_sha": "ababb376f7cf3f92c36dde6035d90932e083517a",
+  "rule_set_version": "v1.1",
+  "wall_seconds": 170,
+  "row_count": 12820,
+  "repo": "serde-rs/serde",
+  "t0": "65e1a50749938612cfbdb69b57fc4cf249f87149",
+  "baseline_run_dir": "results/serde-heldout-2026-05-15-canary/baseline",
+  "baseline_run_kind": "dry_run_subset_carrier_not_evidence"
+}

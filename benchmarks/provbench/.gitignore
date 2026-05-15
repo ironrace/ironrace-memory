@@ -3,12 +3,15 @@
 # - Facts JSONL and per-commit diffs are regeneratable from the labeler's
 #   `emit-facts` / `emit-diffs` subcommands over the corpus + ripgrep clone
 # - Spot-check working-copy files (.bak, .PARKED) are local-only
+# - phase1.sqlite is a working store rebuildable from the same inputs as
+#   predictions.jsonl / rule_traces.jsonl; pilot precedent does not commit it
 corpus/*.jsonl
 facts/*.facts.jsonl
 facts/*.diffs/
 spotcheck/*.bak
 spotcheck/*.PARKED
 work/
+results/**/phase1/phase1.sqlite
 
 # Keep the directory itself tracked via .gitkeep
 !.gitkeep
