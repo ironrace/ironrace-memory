@@ -19,6 +19,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   §9.2 LLM-validator agreement with Wilson intervals + Cohen κ bootstrap.
 - **provbench-labeler**: two new subcommands `emit-facts` and `emit-diffs`
   to produce the JSON artifacts consumed by the baseline runner.
+- **provbench-phase1** (Phase 1): new workspace-excluded crate implementing
+  the rules-based structural invalidator (`rule_set_version v1.0` →
+  `v1.1`, frozen at phase1 git SHA `ccfc901be171`). 7-rule chain
+  (`source_file_missing`, `blob_identical`, `symbol_missing`,
+  `span_hash_changed`, `whitespace_or_comment_only`, `doc_claim`,
+  `rename_candidate`), deterministic single-repo HEAD-only replay,
+  per-rule confusion + audit trail in `rule_traces.jsonl`. Pilot v1.1
+  clears SPEC §8 #3 / #4 / #5 on the ripgrep Phase 0c canary
+  (n=4,387; WLB valid 0.9716, p50 2 ms, WLB stale 0.9537).
+- **provbench-scoring**: shared SPEC §7 math crate (Wilson intervals,
+  three-way confusion, F1, Cohen κ bootstrap) split out of baseline
+  so phase1 and baseline both consume the same scorer. `compare`
+  subcommand produces side-by-side `metrics.json` with deltas.
+- **ProvBench §9.4 held-out evaluation — Round 1 (serde-rs/serde @
+  T₀ `65e1a507`, v1.0.130).** First held-out evaluation of phase1
+  v1.1 against a repo the rules were never tuned on (SPEC §13.2
+  pre-registered, leakage-clean). Result: **FAIL §8 #3** — valid
+  retention WLB 0.9062 < 0.95 required; pilot was 0.9716 (−6.5pp
+  drop). §8 #4 latency p50 = 14 ms (PASS) and §8 #5 stale recall
+  WLB = 0.9391 (PASS) generalize cleanly. Per-rule confusion
+  attributes the §8 #3 miss to R4 (`span_hash_changed` line-presence
+  probe): held-out false-Stale on GT=Valid is 162 vs pilot 17 (10×
+  pilot rate). Per SPEC §10 no in-round retuning; SPEC §11 row
+  records the FAIL. A future v1.2 with retuned R4 would re-run the
+  leakage clock against pallets/flask (Round 2; pre-registered).
+  Findings:
+  `benchmarks/provbench/results/serde-heldout-2026-05-15-findings.md`.
 
 ### Fixed
 

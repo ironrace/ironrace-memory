@@ -13,13 +13,33 @@
 //! On §8 miss this test fails honestly. Per SPEC §10 the round
 //! does NOT retune in response — the failure is recorded as the
 //! held-out result in `results/serde-heldout-2026-05-15-findings.md`
-//! and SPEC §11.
+//! and SPEC §11. **A FAIL here is the recorded experimental result,
+//! NOT a regression to fix.**
+//!
+//! ## Running
+//!
+//! Preconditions:
+//! - `benchmarks/provbench/work/serde` checked out at SERDE_T0's
+//!   latest first-parent descendant (`fa7da4a9…`).
+//! - `benchmarks/provbench/results/serde-heldout-2026-05-15-canary/baseline/`
+//!   populated by `provbench-baseline sample` + `run --dry-run` + `score`
+//!   per the plan at
+//!   `docs/superpowers/plans/2026-05-15-provbench-phase1-heldout-serde.md`.
+//!
+//! Invocation (the `#[ignore]` attribute requires `--ignored`):
+//! ```text
+//! cargo test --release --manifest-path benchmarks/provbench/phase1/Cargo.toml \
+//!     --test end_to_end_heldout_serde -- --ignored --nocapture
+//! ```
 
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
 
 const SERDE_T0: &str = "65e1a50749938612cfbdb69b57fc4cf249f87149";
+const HELDOUT_RUN_DIR: &str = "results/serde-heldout-2026-05-15-canary";
+const HELDOUT_FACTS: &str = "facts/serde-65e1a507-c2d3b7b.facts.jsonl";
+const HELDOUT_DIFFS_DIR: &str = "facts/serde-65e1a507-c2d3b7b.diffs";
 
 fn provbench_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
@@ -60,7 +80,7 @@ fn spec_section_8_thresholds_on_serde_heldout_subset() {
     let workrepo = provbench.join("work/serde");
     assert!(workrepo.exists(), "needs work/serde checkout for held-out e2e");
 
-    let baseline_run = provbench.join("results/serde-heldout-2026-05-15-canary/baseline");
+    let baseline_run = provbench.join(HELDOUT_RUN_DIR).join("baseline");
     assert!(
         baseline_run.join("metrics.json").exists(),
         "needs prepared <RUNDIR>/baseline/metrics.json (see plan steps 5+6)"
@@ -81,15 +101,9 @@ fn spec_section_8_thresholds_on_serde_heldout_subset() {
             "--t0",
             SERDE_T0,
             "--facts",
-            provbench
-                .join("facts/serde-65e1a507-c2d3b7b.facts.jsonl")
-                .to_str()
-                .unwrap(),
+            provbench.join(HELDOUT_FACTS).to_str().unwrap(),
             "--diffs-dir",
-            provbench
-                .join("facts/serde-65e1a507-c2d3b7b.diffs")
-                .to_str()
-                .unwrap(),
+            provbench.join(HELDOUT_DIFFS_DIR).to_str().unwrap(),
             "--baseline-run",
             baseline_run.to_str().unwrap(),
             "--out",
