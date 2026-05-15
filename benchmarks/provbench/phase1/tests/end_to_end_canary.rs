@@ -1,6 +1,22 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
+
+// v1.1 pilot baseline values from
+// benchmarks/provbench/results/phase1/2026-05-15-canary/metrics.json.
+// These act as no-regression floors for v1.2a (Gate 2 of the v1.2a
+// design protocol; see
+// docs/superpowers/specs/2026-05-15-provbench-v1.2a-r4-guard-design.md).
+const V1_1_STALE_RECALL_WLB: f64 = 0.9536949768772905;
+const V1_1_VALID_RETENTION_WLB: f64 = 0.9716185270727337;
+const V1_1_LATENCY_P50_MS: u64 = 2;
+
+// Gate 3 (false-Valid safety bound from the dropped Field length guard):
+// v1.2a must not increase the count of `stalesourcechanged__valid` for
+// kind=Field by more than +20 vs the v1.1 pilot. The actual v1.1 Field
+// count is loaded at test runtime from the v1.1 predictions to keep this
+// resilient to changes in the v1.1 artifact (single source of truth).
+const V1_2A_FIELD_FALSE_VALID_SLACK: usize = 20;
 
 /// SPEC §8 gate:
 ///   §8 #3 valid_retention_accuracy.wilson_lower_95 >= 0.95
@@ -49,6 +65,8 @@ fn spec_section_8_thresholds_clear_on_canary() {
                 .unwrap(),
             "--out",
             out_p.to_str().unwrap(),
+            "--rule-set-version",
+            "v1.2",
         ])
         .status()
         .unwrap();
@@ -118,6 +136,55 @@ fn spec_section_8_thresholds_clear_on_canary() {
         p95,
         p50
     );
+
+    // Gate 2 (no regression vs v1.1 pilot).
+    assert!(
+        stale_recall_wlb >= V1_1_STALE_RECALL_WLB,
+        "Gate 2 regression: stale recall WLB {:.4} < v1.1 pilot {:.4}",
+        stale_recall_wlb,
+        V1_1_STALE_RECALL_WLB
+    );
+    assert!(
+        valid_acc_wlb >= V1_1_VALID_RETENTION_WLB,
+        "Gate 2 regression: valid retention WLB {:.4} < v1.1 pilot {:.4}",
+        valid_acc_wlb,
+        V1_1_VALID_RETENTION_WLB
+    );
+    assert!(
+        p50 <= V1_1_LATENCY_P50_MS + 5,
+        "Gate 2 regression: latency p50 {} ms > v1.1 pilot {} ms + 5 ms slack",
+        p50,
+        V1_1_LATENCY_P50_MS
+    );
+
+    // Gate 3 (false-Valid safety bound from the dropped Field length
+    // guard): v1.2a count of stalesourcechanged__valid for kind=Field
+    // must not exceed the v1.1 pilot count by more than the slack.
+    let v1_1_predictions = provbench.join("results/phase1/2026-05-15-canary/predictions.jsonl");
+    let v1_2_predictions = out_p.join("predictions.jsonl");
+    let facts_path = provbench.join("facts/ripgrep-af6b6c54-c2d3b7b.facts.jsonl");
+    assert!(
+        v1_1_predictions.exists(),
+        "v1.1 pilot predictions.jsonl not found at {} — Gate 3 cannot compute baseline",
+        v1_1_predictions.display()
+    );
+    assert!(
+        v1_2_predictions.exists(),
+        "v1.2 candidate predictions.jsonl not found at {} — phase1 score did not emit it",
+        v1_2_predictions.display()
+    );
+    let n_v1_1_field = count_stalesourcechanged_valid_field(&v1_1_predictions, &facts_path)
+        .expect("count v1.1 Field false-Valid");
+    let n_v1_2_field = count_stalesourcechanged_valid_field(&v1_2_predictions, &facts_path)
+        .expect("count v1.2 Field false-Valid");
+    assert!(
+        n_v1_2_field <= n_v1_1_field + V1_2A_FIELD_FALSE_VALID_SLACK,
+        "Gate 3 violation: v1.2a Field false-Valid count {} > v1.1 pilot {} + slack {}",
+        n_v1_2_field,
+        n_v1_1_field,
+        V1_2A_FIELD_FALSE_VALID_SLACK
+    );
+
     assert!(
         stale_precision > 0.0 && stale_f1 > 0.0,
         "candidate column must include full stale-detection precision/F1"
@@ -140,6 +207,45 @@ fn spec_section_8_thresholds_clear_on_canary() {
             "missing compare delta {key}"
         );
     }
+}
+
+/// Count `stalesourcechanged__valid` rows whose corresponding fact has
+/// `kind = "Field"`. Joins a phase1 predictions.jsonl artifact with the
+/// facts file used for the run.
+fn count_stalesourcechanged_valid_field(
+    predictions_path: &Path,
+    facts_path: &Path,
+) -> std::io::Result<usize> {
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader};
+
+    let mut kind_by_fact: HashMap<String, String> = HashMap::new();
+    let facts_f = std::fs::File::open(facts_path)?;
+    for line in BufReader::new(facts_f).lines() {
+        let line = line?;
+        let v: serde_json::Value =
+            serde_json::from_str(&line).expect("facts.jsonl row must be JSON");
+        let fid = v["fact_id"].as_str().expect("fact_id");
+        let kind = v["kind"].as_str().expect("kind");
+        kind_by_fact.insert(fid.to_string(), kind.to_string());
+    }
+
+    let mut count = 0usize;
+    let preds_f = std::fs::File::open(predictions_path)?;
+    for line in BufReader::new(preds_f).lines() {
+        let line = line?;
+        let v: serde_json::Value =
+            serde_json::from_str(&line).expect("predictions.jsonl row must be JSON");
+        let gt = v["ground_truth"].as_str().unwrap_or("");
+        let pred = v["prediction"].as_str().unwrap_or("");
+        if gt == "StaleSourceChanged" && pred == "valid" {
+            let fid = v["fact_id"].as_str().unwrap_or("");
+            if kind_by_fact.get(fid).map(|s| s.as_str()) == Some("Field") {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
 }
 
 fn ensure_scoring_binary_built() -> PathBuf {
