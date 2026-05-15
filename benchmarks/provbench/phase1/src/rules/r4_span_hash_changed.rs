@@ -24,6 +24,18 @@
 //! of canary GT=Valid rows) are caught by the substring match. The
 //! leaf-symbol guard prevents trivial single-token lines from masking
 //! genuine staleness.
+//!
+//! ## v1.2 Field carve-out
+//!
+//! The `MIN_PROBE_NONWS_LEN = 8` floor is skipped for `kind = "Field"`;
+//! `probe_has_leaf` alone is the sanity gate. Empirical justification:
+//! 132 of 162 R4 false-Stale rows on the serde §9.4 held-out canary
+//! were `Field` facts like `'    c: C,\n'` (nonws_len = 4) whose
+//! `t0_span` was byte-identical in `post_blob` — the comparator
+//! was correct, the length floor rejected it. Other kinds are
+//! unchanged: `TestAssertion` keeps its `MIN_PROBE_NONWS_LEN_ASSERTION`
+//! floor, and all other kinds keep the v1.1 `probe_has_leaf &&
+//! nonws_len >= 8` gate.
 
 use super::{Decision, RowCtx, Rule};
 
@@ -79,6 +91,13 @@ impl Rule for R4SpanHashChanged {
 
         let guard_passed = match ctx.fact.kind.as_str() {
             "TestAssertion" => nonws_len >= MIN_PROBE_NONWS_LEN_ASSERTION,
+            // v1.2: drop length floor for `Field` — the leaf-symbol
+            // presence check is the sanity floor. The v1.1 floor of 8
+            // rejected exact-byte matches on short single-letter
+            // fields (`c: C,`, `t: T,`) that drove 132 of 162 R4
+            // false-Stale rows on the serde §9.4 held-out canary.
+            // See docs/superpowers/specs/2026-05-15-provbench-v1.2a-r4-guard-design.md.
+            "Field" => probe_has_leaf,
             _ => probe_has_leaf && nonws_len >= MIN_PROBE_NONWS_LEN,
         };
 
