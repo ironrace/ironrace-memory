@@ -2,15 +2,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
-// v1.1 pilot baseline values from
-// benchmarks/provbench/results/phase1/2026-05-15-canary/metrics.json.
-// These act as no-regression floors for v1.2a (Gate 2 of the v1.2a
-// design protocol; see
-// docs/superpowers/specs/2026-05-15-provbench-v1.2a-r4-guard-design.md).
-const V1_1_STALE_RECALL_WLB: f64 = 0.9536949768772905;
-const V1_1_VALID_RETENTION_WLB: f64 = 0.9716185270727337;
-const V1_1_LATENCY_P50_MS: u64 = 2;
-
 // Gate 3 (false-Valid safety bound from the dropped Field length guard):
 // v1.2a must not increase the count of `stalesourcechanged__valid` for
 // kind=Field by more than +20 vs the v1.1 pilot. The actual v1.1 Field
@@ -138,23 +129,26 @@ fn spec_section_8_thresholds_clear_on_canary() {
     );
 
     // Gate 2 (no regression vs v1.1 pilot).
+    let v1_1_metrics = provbench.join("results/phase1/2026-05-15-canary/metrics.json");
+    let v1_1_baseline =
+        load_v1_1_gate2_baseline(&v1_1_metrics).expect("load v1.1 pilot Gate 2 baseline");
     assert!(
-        stale_recall_wlb >= V1_1_STALE_RECALL_WLB,
+        stale_recall_wlb >= v1_1_baseline.stale_recall_wlb,
         "Gate 2 regression: stale recall WLB {:.4} < v1.1 pilot {:.4}",
         stale_recall_wlb,
-        V1_1_STALE_RECALL_WLB
+        v1_1_baseline.stale_recall_wlb
     );
     assert!(
-        valid_acc_wlb >= V1_1_VALID_RETENTION_WLB,
+        valid_acc_wlb >= v1_1_baseline.valid_retention_wlb,
         "Gate 2 regression: valid retention WLB {:.4} < v1.1 pilot {:.4}",
         valid_acc_wlb,
-        V1_1_VALID_RETENTION_WLB
+        v1_1_baseline.valid_retention_wlb
     );
     assert!(
-        p50 <= V1_1_LATENCY_P50_MS + 5,
+        p50 <= v1_1_baseline.latency_p50_ms + 5,
         "Gate 2 regression: latency p50 {} ms > v1.1 pilot {} ms + 5 ms slack",
         p50,
-        V1_1_LATENCY_P50_MS
+        v1_1_baseline.latency_p50_ms
     );
 
     // Gate 3 (false-Valid safety bound from the dropped Field length
@@ -207,6 +201,36 @@ fn spec_section_8_thresholds_clear_on_canary() {
             "missing compare delta {key}"
         );
     }
+}
+
+struct Gate2Baseline {
+    stale_recall_wlb: f64,
+    valid_retention_wlb: f64,
+    latency_p50_ms: u64,
+}
+
+/// Load v1.1 pilot no-regression floors from the committed metrics
+/// artifact. Using the JSON artifact as the source of truth avoids
+/// f64 literal roundoff mismatches when a v1.2a metric equals v1.1.
+fn load_v1_1_gate2_baseline(metrics_path: &Path) -> std::io::Result<Gate2Baseline> {
+    let metrics: serde_json::Value = serde_json::from_slice(&std::fs::read(metrics_path)?)
+        .expect("v1.1 metrics.json must be JSON");
+    let col = metrics
+        .get("phase1_rules_v11")
+        .or_else(|| metrics.get("phase1_rules"))
+        .expect("v1.1 phase1 rules column");
+
+    Ok(Gate2Baseline {
+        stale_recall_wlb: col["section_7_1"]["stale_detection"]["wilson_lower_95"]
+            .as_f64()
+            .expect("v1.1 stale recall WLB"),
+        valid_retention_wlb: col["section_7_1"]["valid_retention_accuracy"]["wilson_lower_95"]
+            .as_f64()
+            .expect("v1.1 valid retention WLB"),
+        latency_p50_ms: col["section_7_2_applicable"]["latency_p50_ms"]
+            .as_u64()
+            .expect("v1.1 latency p50"),
+    })
 }
 
 /// Count `stalesourcechanged__valid` rows whose corresponding fact has
