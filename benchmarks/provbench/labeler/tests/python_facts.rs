@@ -2,10 +2,12 @@ use provbench_labeler::ast::python::PythonAst;
 use provbench_labeler::facts::python::field;
 use provbench_labeler::facts::python::function_signature;
 use provbench_labeler::facts::python::symbol_existence;
+use provbench_labeler::facts::python::test_assertion;
 use provbench_labeler::facts::Fact;
 use std::path::Path;
 
 const SRC: &str = include_str!("data/python/repo/src/example.py");
+const TEST_SRC: &str = include_str!("data/python/repo/tests/test_example.py");
 
 fn qualified_names(facts: &[Fact]) -> Vec<String> {
     let mut names: Vec<String> = facts
@@ -183,4 +185,64 @@ fn symbol_existence_lists_all_module_bindings() {
             "src.example.async_op".to_string(),
         ]
     );
+}
+
+#[test]
+fn test_assertion_emits_one_per_assert_in_test_fn() {
+    let ast = PythonAst::parse(TEST_SRC.as_bytes()).unwrap();
+    let facts: Vec<Fact> =
+        test_assertion::extract(&ast, Path::new("tests/test_example.py")).collect();
+    let mut tests: Vec<String> = facts
+        .iter()
+        .filter_map(|f| match f {
+            Fact::TestAssertion { test_fn, .. } => Some(test_fn.clone()),
+            _ => None,
+        })
+        .collect();
+    tests.sort();
+    assert_eq!(
+        tests,
+        vec![
+            "TestGreeter.test_default_greeting".to_string(),
+            "test_greet_returns_hello".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn test_assertion_content_hash_changes_when_assertion_body_changes() {
+    let ast_before = PythonAst::parse(TEST_SRC.as_bytes()).unwrap();
+    let facts_before: Vec<Fact> =
+        test_assertion::extract(&ast_before, Path::new("tests/test_example.py")).collect();
+    let hash_before = facts_before
+        .iter()
+        .find_map(|f| match f {
+            Fact::TestAssertion {
+                test_fn,
+                content_hash,
+                ..
+            } if test_fn == "test_greet_returns_hello" => Some(content_hash.clone()),
+            _ => None,
+        })
+        .expect("test_greet_returns_hello assertion must exist");
+
+    let mutated = TEST_SRC.replace(
+        "assert Greeter().greet(\"world\") == \"hello, world!\"",
+        "assert Greeter().greet(\"world\") == \"hi, world!\"",
+    );
+    let ast_after = PythonAst::parse(mutated.as_bytes()).unwrap();
+    let facts_after: Vec<Fact> =
+        test_assertion::extract(&ast_after, Path::new("tests/test_example.py")).collect();
+    let hash_after = facts_after
+        .iter()
+        .find_map(|f| match f {
+            Fact::TestAssertion {
+                test_fn,
+                content_hash,
+                ..
+            } if test_fn == "test_greet_returns_hello" => Some(content_hash.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_ne!(hash_before, hash_after);
 }
