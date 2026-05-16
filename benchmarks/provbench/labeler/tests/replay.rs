@@ -189,6 +189,7 @@ fn rust_paths_filter_matches_legacy_on_rust_only_tree() {
         PathBuf::from("README.md"),
         PathBuf::from("Cargo.toml"),
         PathBuf::from("docs/x.rs"),
+        PathBuf::from("src/app.py"),
     ];
 
     // Legacy filter expression — keep verbatim, this is the contract we're preserving.
