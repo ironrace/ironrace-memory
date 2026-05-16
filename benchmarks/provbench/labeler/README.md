@@ -389,3 +389,50 @@ hash from a secondary source.
 
 Phase 0b tooling verification remains valid only on a supported
 platform. `resolve_from_env()` hard-fails on any other host.
+
+## Python support (v1.2b)
+
+The labeler accepts Python repos in addition to Rust. Python parsing
+uses `tree-sitter-python 0.25` (SPEC §13.1 pin); symbol resolution is a
+tree-sitter scope walker + lexical import graph — no Python runtime
+required. Same fact schema as the Rust path: `FunctionSignature`,
+`Field`, `PublicSymbol`, `TestAssertion` (`DocClaim` is currently a
+stub for Python; see `src/facts/python/doc_claim.rs`).
+
+Usage:
+```
+provbench-labeler run         --repo path/to/python/repo --t0 <sha> --out corpus.jsonl
+provbench-labeler emit-facts  --repo path/to/python/repo --t0 <sha> --out facts.jsonl
+provbench-labeler emit-diffs  --repo path/to/python/repo --t0 <sha> --out-dir diffs/
+provbench-labeler spotcheck   --lang python --corpus corpus.jsonl --out spotcheck.csv \
+                              --n 200 --seed 0xC0DEBABEDEADBEEF
+```
+
+Path dispatch is by file extension via the `Language` enum
+(`src/lang.rs`): `.rs` → Rust path, `.py` → Python path, anything else
+is ignored as a source file (`.md` is still handled by the doc-claim
+path independently).
+
+Known coverage limitations (recorded in commit messages + held-out
+findings docs):
+
+- `__init__.py` collapse not implemented. A package's `__init__` is
+  treated as the module `package.__init__`. Real Python packages with
+  sparse `__init__.py` re-exports (e.g. flask's `from .app import Flask`)
+  will under-resolve through `PythonResolver`.
+- Multi-hop import chains capped at one hop in the resolver.
+- Relative imports (`from . import X`) are punted.
+- Star imports (`from X import *`) are skipped unless `__all__` is
+  defined (and the resolver does not currently parse `__all__`).
+- `TYPE_CHECKING`-conditional imports, dynamic dispatch, and metaclass
+  attribute generation are not modeled.
+
+Determinism is enforced by:
+
+- `tests/determinism_python.rs` — fixture-level (default-run, ~0.3s)
+- `tests/determinism_flask.rs` — full flask (`#[ignore]`; opt-in via
+  `cargo test -- --ignored`). Pallets/flask @ T₀ `2f0c62f5`.
+
+Spot-check material for the v1.2b held-out round lives at
+`../results/python-labeler-2026-05-15-spotcheck.csv` and the
+companion findings template `python-labeler-2026-05-15-spotcheck-findings.md`.
