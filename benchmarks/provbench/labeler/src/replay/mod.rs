@@ -204,6 +204,43 @@ impl Replay {
                 t0_blobs.insert(path.clone(), blob);
             }
         }
+        // Python branch — parallel to the Rust loop above. Python facts are
+        // wrapped in `ObservedFact` with `cfg_attribute_set`/`impl_receiver_type`
+        // disambiguators left empty (Rust-specific, no Python analog).
+        // `doc_claim` is intentionally skipped — the Python stub returns an
+        // empty iter today; calling it would just churn.
+        let python_paths = python_paths_at(&pilot, &cfg.t0_sha)?;
+        for path in &python_paths {
+            if let Some(blob) = pilot.read_blob_at(&cfg.t0_sha, path)? {
+                let ast = crate::ast::python::PythonAst::parse(&blob)
+                    .with_context(|| format!("parse {} @ T0 (python)", path.display()))?;
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::function_signature::extract(&ast, path),
+                );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::field::extract(&ast, path),
+                );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::symbol_existence::extract(&ast, path),
+                );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::test_assertion::extract(&ast, path),
+                );
+                t0_blobs.insert(path.clone(), blob);
+            }
+        }
         let rust_dirs = rust_paths
             .iter()
             .filter_map(|p| p.parent().map(Path::to_path_buf))
@@ -308,6 +345,45 @@ impl Replay {
                 let test_facts: Vec<Fact> =
                     test_assertion::extract(&ast, path, &facts_so_far).collect();
                 push_test_assertion_facts(&mut facts, &mut facts_so_far, &blob, path, test_facts);
+                t0_blobs.insert(path.clone(), blob);
+            }
+        }
+        // Python branch — parallel to the Rust loop above. See `emit_facts`
+        // for rationale on the empty disambiguators / skipped `doc_claim`.
+        // Limitation: Python rows are not added to the per-commit
+        // `CommitSymbolIndex` (it is Rust-only via tree-sitter). Python
+        // facts are classified by row-level rules R1-R5 at replay time
+        // without cross-symbol resolution; R7 (rename detection) over
+        // Python is out of scope for v1.2b.
+        let python_paths = python_paths_at(&pilot, &cfg.t0_sha)?;
+        for path in &python_paths {
+            if let Some(blob) = pilot.read_blob_at(&cfg.t0_sha, path)? {
+                let ast = crate::ast::python::PythonAst::parse(&blob)
+                    .with_context(|| format!("parse {} @ T0 (python)", path.display()))?;
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::function_signature::extract(&ast, path),
+                );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::field::extract(&ast, path),
+                );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::symbol_existence::extract(&ast, path),
+                );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::test_assertion::extract(&ast, path),
+                );
                 t0_blobs.insert(path.clone(), blob);
             }
         }
@@ -612,6 +688,18 @@ fn rust_paths_at(pilot: &Pilot, sha: &str) -> Result<Vec<PathBuf>> {
     Ok(tree_paths_at(pilot, sha)?
         .into_iter()
         .filter(|p| Language::for_path(p) == Some(Language::Rust))
+        .collect())
+}
+
+/// Return all `.py` file paths present in the git tree at `sha`. Filter
+/// is expressed via [`crate::lang::Language`] dispatch so the Rust and
+/// Python branches in `emit_facts` / `run_inner` share the same path-
+/// classification policy.
+fn python_paths_at(pilot: &Pilot, sha: &str) -> Result<Vec<PathBuf>> {
+    use crate::lang::Language;
+    Ok(tree_paths_at(pilot, sha)?
+        .into_iter()
+        .filter(|p| Language::for_path(p) == Some(Language::Python))
         .collect())
 }
 
