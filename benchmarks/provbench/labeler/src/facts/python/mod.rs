@@ -10,3 +10,19 @@ pub mod field;
 pub mod function_signature;
 pub mod symbol_existence;
 pub mod test_assertion;
+
+use std::path::Path;
+
+/// Compute a module path for a Python source file. Strips the trailing
+/// `.py` extension and replaces path separators with `.`.
+///
+/// **Note:** the path is preserved verbatim — a file at
+/// `src/example.py` becomes `src.example`. Task 11 (PythonResolver) may
+/// refine this when stripping repo-root prefixes / collapsing
+/// `__init__.py`; until then the fixture's expected qualified names
+/// (e.g. `src.example.Greeter.greet`) drive the policy here.
+pub(super) fn module_path_for(source_path: &Path) -> String {
+    let s = source_path.to_string_lossy();
+    let stripped = s.strip_suffix(".py").unwrap_or(&s);
+    stripped.replace('/', ".")
+}

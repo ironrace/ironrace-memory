@@ -1,4 +1,5 @@
 use provbench_labeler::ast::python::PythonAst;
+use provbench_labeler::facts::python::field;
 use provbench_labeler::facts::python::function_signature;
 use provbench_labeler::facts::Fact;
 use std::path::Path;
@@ -93,5 +94,69 @@ fn function_signature_content_hash_is_signature_only() {
     assert_ne!(
         greet_hash, greet_sig_hash,
         "signature change did not affect content_hash"
+    );
+}
+
+#[test]
+fn field_emits_one_per_class_attribute() {
+    let ast = PythonAst::parse(SRC.as_bytes()).unwrap();
+    let facts: Vec<Fact> = field::extract(&ast, Path::new("src/example.py")).collect();
+    let fields: Vec<&Fact> = facts
+        .iter()
+        .filter(|f| matches!(f, Fact::Field { .. }))
+        .collect();
+    assert_eq!(
+        fields.len(),
+        1,
+        "expected exactly one class field, got {fields:?}"
+    );
+    match fields[0] {
+        Fact::Field {
+            qualified_path,
+            type_text,
+            ..
+        } => {
+            assert_eq!(qualified_path, "src.example.Greeter.greeting");
+            assert_eq!(type_text, "str");
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn field_content_hash_covers_type_annotation() {
+    let ast_before = PythonAst::parse(SRC.as_bytes()).unwrap();
+    let facts_before: Vec<Fact> =
+        field::extract(&ast_before, Path::new("src/example.py")).collect();
+    let hash_before = facts_before
+        .iter()
+        .find_map(|f| match f {
+            Fact::Field {
+                qualified_path,
+                content_hash,
+                ..
+            } if qualified_path == "src.example.Greeter.greeting" => Some(content_hash.clone()),
+            _ => None,
+        })
+        .expect("greeting field must exist before");
+
+    let mutated = SRC.replace("greeting: str = \"hello\"", "greeting: bytes = b\"hello\"");
+    let ast_after = PythonAst::parse(mutated.as_bytes()).unwrap();
+    let facts_after: Vec<Fact> = field::extract(&ast_after, Path::new("src/example.py")).collect();
+    let hash_after = facts_after
+        .iter()
+        .find_map(|f| match f {
+            Fact::Field {
+                qualified_path,
+                content_hash,
+                ..
+            } if qualified_path == "src.example.Greeter.greeting" => Some(content_hash.clone()),
+            _ => None,
+        })
+        .expect("greeting field must exist after");
+
+    assert_ne!(
+        hash_before, hash_after,
+        "type annotation change did not affect content_hash"
     );
 }

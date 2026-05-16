@@ -46,7 +46,7 @@ fn walk(node: Node<'_>, src: &[u8], out: &mut Vec<(String, Span)>) {
 /// emitted — they are addressed by `symbol_existence` (Task 8).
 pub fn extract<'a>(ast: &'a PythonAst, source_path: &'a Path) -> impl Iterator<Item = Fact> + 'a {
     let mut out = Vec::new();
-    let module_path = module_path_for(source_path);
+    let module_path = super::module_path_for(source_path);
     walk_qualified(
         ast.root(),
         ast.source(),
@@ -122,20 +122,6 @@ fn build_function_fact(
         span,
         content_hash: hash,
     })
-}
-
-/// Compute a module path for a Python source file. Strips the trailing
-/// `.py` extension and replaces path separators with `.`.
-///
-/// **Note:** for Task 6 the path is preserved verbatim — a file at
-/// `src/example.py` becomes `src.example`. Task 11 (PythonResolver) may
-/// refine this when stripping repo-root prefixes / collapsing
-/// `__init__.py`; until then the fixture's expected qualified names
-/// (e.g. `src.example.Greeter.greet`) drive the policy here.
-fn module_path_for(source_path: &Path) -> String {
-    let s = source_path.to_string_lossy();
-    let stripped = s.strip_suffix(".py").unwrap_or(&s);
-    stripped.replace('/', ".")
 }
 
 fn extract_one(node: Node<'_>, src: &[u8]) -> Option<(String, Span)> {
