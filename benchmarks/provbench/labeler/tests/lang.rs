@@ -30,3 +30,25 @@ fn source_extensions_is_stable_sorted() {
     owned.sort();
     assert_eq!(owned, exts);
 }
+
+#[test]
+fn extension_roundtrips_with_for_path() {
+    use std::path::PathBuf;
+    for lang in [Language::Rust, Language::Python] {
+        let path = PathBuf::from(format!("x.{}", lang.extension()));
+        assert_eq!(Language::for_path(&path), Some(lang));
+    }
+}
+
+#[test]
+fn source_extensions_covers_all_variants() {
+    use std::collections::HashSet;
+    let exts: HashSet<&str> = Language::source_extensions().iter().copied().collect();
+    for lang in [Language::Rust, Language::Python] {
+        assert!(
+            exts.contains(lang.extension()),
+            "source_extensions() missing entry for {:?}",
+            lang
+        );
+    }
+}

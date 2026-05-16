@@ -26,6 +26,8 @@ impl Language {
         &["py", "rs"]
     }
 
+    /// The canonical file extension for this language (without the leading dot).
+    /// Round-trips with [`for_path`]: `Language::for_path(Path::new(&format!("x.{}", self.extension()))) == Some(self)`.
     pub fn extension(self) -> &'static str {
         match self {
             Language::Rust => "rs",
