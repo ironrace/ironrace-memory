@@ -12,7 +12,14 @@
 //! `tests/common/mod.rs` files.
 #![allow(dead_code)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Returns the path to the canonical in-repo Python fixture
+/// (`benchmarks/provbench/labeler/tests/data/python/repo/`). Read-only.
+/// Tests that need a writable copy must clone it themselves via tempfile.
+pub fn python_fixture_repo() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/python/repo")
+}
 
 /// Run `git <args>` with `repo` as the working directory and assert
 /// success. The labeler test suite uses the system `git` binary so

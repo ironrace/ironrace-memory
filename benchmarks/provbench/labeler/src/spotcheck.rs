@@ -4,10 +4,63 @@
 //! multiple sessions. A different seed may be supplied (e.g., post-merge
 //! validation against a regenerated corpus) for anti-tuning hygiene.
 
+use crate::lang::Language;
 use crate::output::OutputRow;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+/// Language filter for the `spotcheck` subcommand. `Both` is the
+/// historical default — no filtering — and must remain byte-identical
+/// to a pre-flag run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum Lang {
+    Rust,
+    Python,
+    #[default]
+    Both,
+}
+
+/// Extract the source file path embedded in a `fact_id`.
+///
+/// `fact_id` format is `Kind::<qualifiers...>::path::line` where the
+/// number of qualifier segments varies by kind (e.g., `DocClaim::auto`
+/// has one, `Field::ArgsImp::matcher` has two). The path is always the
+/// second-to-last `::`-delimited segment; the line is the last.
+/// Returns `None` for fact_ids with fewer than 4 segments — these are
+/// malformed and treated as "unknown language" so the `Both` filter
+/// still admits them (back-compat) while `Rust`/`Python` filters drop
+/// them.
+fn fact_id_path(fact_id: &str) -> Option<&str> {
+    let parts: Vec<&str> = fact_id.split("::").collect();
+    if parts.len() < 4 {
+        return None;
+    }
+    Some(parts[parts.len() - 2])
+}
+
+/// Filter `rows` by `lang`. `Lang::Both` is a pass-through clone (no
+/// filtering, no reordering) so the downstream sampler sees byte-
+/// identical input to a pre-flag invocation.
+pub fn filter_by_lang(rows: &[OutputRow], lang: Lang) -> Vec<OutputRow> {
+    if lang == Lang::Both {
+        return rows.to_vec();
+    }
+    let want = match lang {
+        Lang::Rust => Language::Rust,
+        Lang::Python => Language::Python,
+        Lang::Both => unreachable!(),
+    };
+    rows.iter()
+        .filter(|r| {
+            fact_id_path(&r.fact_id)
+                .and_then(|p| Language::for_path(Path::new(p)))
+                .is_some_and(|l| l == want)
+        })
+        .cloned()
+        .collect()
+}
 
 /// One row of the spot-check CSV.
 ///
@@ -402,5 +455,101 @@ mod tests {
         let (agree, total) = read_report_counts_from(Cursor::new(csv_text)).unwrap();
         assert_eq!(total, 1);
         assert_eq!(agree, 1);
+    }
+
+    /// `fact_id_path` accepts both the short-qualifier shape
+    /// (`DocClaim::auto::path::line`, 4 segments) and the long-qualifier
+    /// shape (`Field::Foo::Bar::matcher::path::line`, 6 segments). The
+    /// path is always the second-to-last `::` segment.
+    #[test]
+    fn fact_id_path_extracts_second_to_last_segment() {
+        assert_eq!(
+            fact_id_path("DocClaim::auto::CHANGELOG.md::229"),
+            Some("CHANGELOG.md")
+        );
+        assert_eq!(
+            fact_id_path("Field::ArgsImp::matcher::crates/core/args.rs::109"),
+            Some("crates/core/args.rs")
+        );
+        assert_eq!(
+            fact_id_path("Field::ConfigError::MismatchedLineTerminators::matcher::crates/searcher/src/searcher/mod.rs::241"),
+            Some("crates/searcher/src/searcher/mod.rs")
+        );
+    }
+
+    /// Malformed fact_ids with fewer than 4 segments yield `None`
+    /// (treated as "unknown language"). The `Both` filter still admits
+    /// them; `Rust`/`Python` filters drop them.
+    #[test]
+    fn fact_id_path_rejects_too_few_segments() {
+        assert_eq!(fact_id_path(""), None);
+        assert_eq!(fact_id_path("a"), None);
+        assert_eq!(fact_id_path("a::b"), None);
+        assert_eq!(fact_id_path("a::b::c"), None);
+    }
+
+    /// `Lang::Both` is a byte-identical pass-through: the filtered Vec
+    /// equals the input element-for-element in order. This is the
+    /// load-bearing back-compat invariant for pre-flag invocations.
+    #[test]
+    fn filter_by_lang_both_is_identity() {
+        use crate::label::Label;
+        let rows: Vec<OutputRow> = vec![
+            OutputRow {
+                fact_id: "DocClaim::auto::foo.rs::1".into(),
+                commit_sha: "sha-a".into(),
+                label: Label::Valid,
+            },
+            OutputRow {
+                fact_id: "DocClaim::auto::bar.py::2".into(),
+                commit_sha: "sha-b".into(),
+                label: Label::Valid,
+            },
+            // Malformed — only Both keeps it.
+            OutputRow {
+                fact_id: "garbage".into(),
+                commit_sha: "sha-c".into(),
+                label: Label::Valid,
+            },
+        ];
+        let out = filter_by_lang(&rows, Lang::Both);
+        assert_eq!(out, rows);
+    }
+
+    /// `Lang::Rust` keeps only `.rs` paths; `Lang::Python` keeps only
+    /// `.py` paths; non-source extensions and malformed rows are
+    /// dropped under both single-language filters.
+    #[test]
+    fn filter_by_lang_rust_and_python_partition_by_extension() {
+        use crate::label::Label;
+        let mk = |fact_id: &str| OutputRow {
+            fact_id: fact_id.into(),
+            commit_sha: "sha".into(),
+            label: Label::Valid,
+        };
+        let rows = vec![
+            mk("DocClaim::auto::foo.rs::1"),
+            mk("DocClaim::auto::bar.py::2"),
+            mk("Field::X::Y::matcher::a/b/c.rs::99"),
+            mk("Field::X::Y::matcher::a/b/c.py::99"),
+            mk("DocClaim::auto::README.md::1"),
+            mk("malformed"),
+        ];
+
+        let rust = filter_by_lang(&rows, Lang::Rust);
+        assert_eq!(rust.len(), 2);
+        for r in &rust {
+            assert!(
+                r.fact_id.contains(".rs::"),
+                "got non-rust row: {}",
+                r.fact_id
+            );
+        }
+
+        let python = filter_by_lang(&rows, Lang::Python);
+        assert_eq!(python.len(), 2);
+        for r in &python {
+            assert!(r.fact_id.contains(".py::"), "got non-py row: {}", r.fact_id);
+        }
     }
 }

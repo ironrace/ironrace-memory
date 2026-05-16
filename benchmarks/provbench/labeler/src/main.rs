@@ -48,6 +48,9 @@ enum Cmd {
         /// value only for post-merge / anti-tuning validation runs.
         #[arg(long, value_parser = parse_seed_arg)]
         seed: Option<u64>,
+        /// Filter sampling to a single language ({rust|python|both})
+        #[arg(long, value_enum, default_value_t = provbench_labeler::spotcheck::Lang::Both)]
+        lang: provbench_labeler::spotcheck::Lang,
     },
     /// Read a filled spot-check CSV, compute the agreement rate, print
     /// the Wilson 95% report.
@@ -165,6 +168,7 @@ fn main() -> anyhow::Result<()> {
             out,
             n,
             seed,
+            lang,
         }) => {
             let content = std::fs::read_to_string(&corpus)?;
             let rows: Vec<provbench_labeler::output::OutputRow> = content
@@ -175,6 +179,7 @@ fn main() -> anyhow::Result<()> {
                         .map_err(|e| anyhow::anyhow!("failed to parse JSONL line: {e}"))
                 })
                 .collect::<anyhow::Result<_>>()?;
+            let rows = provbench_labeler::spotcheck::filter_by_lang(&rows, lang);
             let resolved_seed = seed.unwrap_or(provbench_labeler::spotcheck::DEFAULT_SEED);
             let samples = provbench_labeler::spotcheck::sample(&rows, n, resolved_seed);
             provbench_labeler::spotcheck::write_csv(&out, &samples)?;

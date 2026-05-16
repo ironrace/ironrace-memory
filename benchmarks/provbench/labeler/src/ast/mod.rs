@@ -2,6 +2,7 @@
 //! offers high-level iterators per fact kind. Python support will be
 //! added in a sibling module — keep this Rust-only.
 
+pub mod python;
 pub mod spans;
 
 use anyhow::{Context, Result};

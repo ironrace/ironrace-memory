@@ -3,6 +3,7 @@
 //! semantic-resolution work. Python (held-out) will get a tree-sitter +
 //! import-graph implementation later — keep the trait language-agnostic.
 
+pub mod python;
 pub mod rust_analyzer;
 
 use std::path::PathBuf;

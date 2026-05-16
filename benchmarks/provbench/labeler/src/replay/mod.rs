@@ -204,6 +204,43 @@ impl Replay {
                 t0_blobs.insert(path.clone(), blob);
             }
         }
+        // Python branch — parallel to the Rust loop above. Python facts are
+        // wrapped in `ObservedFact` with `cfg_attribute_set`/`impl_receiver_type`
+        // disambiguators left empty (Rust-specific, no Python analog).
+        // `doc_claim` is intentionally skipped — the Python stub returns an
+        // empty iter today; calling it would just churn.
+        let python_paths = python_paths_at(&pilot, &cfg.t0_sha)?;
+        for path in &python_paths {
+            if let Some(blob) = pilot.read_blob_at(&cfg.t0_sha, path)? {
+                let ast = crate::ast::python::PythonAst::parse(&blob)
+                    .with_context(|| format!("parse {} @ T0 (python)", path.display()))?;
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::function_signature::extract(&ast, path),
+                );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::field::extract(&ast, path),
+                );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::symbol_existence::extract(&ast, path),
+                );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::test_assertion::extract(&ast, path),
+                );
+                t0_blobs.insert(path.clone(), blob);
+            }
+        }
         let rust_dirs = rust_paths
             .iter()
             .filter_map(|p| p.parent().map(Path::to_path_buf))
@@ -308,6 +345,45 @@ impl Replay {
                 let test_facts: Vec<Fact> =
                     test_assertion::extract(&ast, path, &facts_so_far).collect();
                 push_test_assertion_facts(&mut facts, &mut facts_so_far, &blob, path, test_facts);
+                t0_blobs.insert(path.clone(), blob);
+            }
+        }
+        // Python branch — parallel to the Rust loop above. See `emit_facts`
+        // for rationale on the empty disambiguators / skipped `doc_claim`.
+        // Limitation: Python rows are not added to the per-commit
+        // `CommitSymbolIndex` (it is Rust-only via tree-sitter). Python
+        // facts are classified by row-level rules R1-R5 at replay time
+        // without cross-symbol resolution; R7 (rename detection) over
+        // Python is out of scope for v1.2b.
+        let python_paths = python_paths_at(&pilot, &cfg.t0_sha)?;
+        for path in &python_paths {
+            if let Some(blob) = pilot.read_blob_at(&cfg.t0_sha, path)? {
+                let ast = crate::ast::python::PythonAst::parse(&blob)
+                    .with_context(|| format!("parse {} @ T0 (python)", path.display()))?;
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::function_signature::extract(&ast, path),
+                );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::field::extract(&ast, path),
+                );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::symbol_existence::extract(&ast, path),
+                );
+                push_observed_facts(
+                    &mut facts,
+                    &mut facts_so_far,
+                    &blob,
+                    crate::facts::python::test_assertion::extract(&ast, path),
+                );
                 t0_blobs.insert(path.clone(), blob);
             }
         }
@@ -603,11 +679,27 @@ impl PilotRepoSpec for AdHocSpec {
     }
 }
 
-/// Return all `.rs` file paths present in the git tree at `sha`.
+/// Return all `.rs` file paths present in the git tree at `sha`. Filter
+/// is expressed via [`crate::lang::Language`] dispatch so future
+/// languages (Python) can extend with sibling helpers without touching
+/// this function.
 fn rust_paths_at(pilot: &Pilot, sha: &str) -> Result<Vec<PathBuf>> {
+    use crate::lang::Language;
     Ok(tree_paths_at(pilot, sha)?
         .into_iter()
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"))
+        .filter(|p| Language::for_path(p) == Some(Language::Rust))
+        .collect())
+}
+
+/// Return all `.py` file paths present in the git tree at `sha`. Filter
+/// is expressed via [`crate::lang::Language`] dispatch so the Rust and
+/// Python branches in `emit_facts` / `run_inner` share the same path-
+/// classification policy.
+fn python_paths_at(pilot: &Pilot, sha: &str) -> Result<Vec<PathBuf>> {
+    use crate::lang::Language;
+    Ok(tree_paths_at(pilot, sha)?
+        .into_iter()
+        .filter(|p| Language::for_path(p) == Some(Language::Python))
         .collect())
 }
 
@@ -826,7 +918,13 @@ fn classify_against_commit(
                 Some((post_span, post_hash)) => {
                     // Symbol found at its original path — compute deltas.
                     let after_bytes = &post_bytes[post_span.byte_range.clone()];
-                    let ws_only = is_whitespace_or_comment_only(t0_span_bytes, after_bytes);
+                    // Per-path language dispatch: Rust paths use the Rust grammar
+                    // (byte-identical to the pre-Task-13 behavior); Python paths
+                    // use the Python grammar. Paths without a recognized
+                    // extension default to Rust to preserve historical behavior.
+                    let lang = crate::lang::Language::for_path(path)
+                        .unwrap_or(crate::lang::Language::Rust);
+                    let ws_only = is_whitespace_or_comment_only(t0_span_bytes, after_bytes, lang);
                     // Any signature-level hash difference is structurally classifiable.
                     let structural = post_hash != observed_hash;
                     CommitState {

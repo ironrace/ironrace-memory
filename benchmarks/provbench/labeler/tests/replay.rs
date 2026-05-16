@@ -177,3 +177,98 @@ fn replay_extracts_field_and_test_assertion_facts_at_t0() {
         "expected at least one DocClaim row, got {rows:?}"
     );
 }
+
+#[test]
+fn rust_paths_filter_matches_legacy_on_rust_only_tree() {
+    use provbench_labeler::lang::Language;
+    use std::path::PathBuf;
+
+    let inputs: Vec<PathBuf> = vec![
+        PathBuf::from("src/lib.rs"),
+        PathBuf::from("src/main.rs"),
+        PathBuf::from("README.md"),
+        PathBuf::from("Cargo.toml"),
+        PathBuf::from("docs/x.rs"),
+        PathBuf::from("src/app.py"),
+    ];
+
+    // Legacy filter expression — keep verbatim, this is the contract we're preserving.
+    let legacy: Vec<&PathBuf> = inputs
+        .iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"))
+        .collect();
+
+    // New filter — must be byte-equal.
+    let new: Vec<&PathBuf> = inputs
+        .iter()
+        .filter(|p| Language::for_path(p) == Some(Language::Rust))
+        .collect();
+
+    assert_eq!(legacy, new);
+}
+
+#[test]
+fn replay_python_fixture_emits_facts() {
+    // Build a single-commit git repo from the in-tree fixture at
+    // tests/data/python/repo/ and assert that Python facts flow through
+    // `Replay::run` (i.e. the parallel Python loop added in Task 12 is
+    // reachable from the production entry point).
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path();
+    let fixture_root =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/python/repo");
+    for rel in &["src/example.py", "tests/test_example.py"] {
+        let dst = repo_root.join(rel);
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::copy(fixture_root.join(rel), &dst).unwrap();
+    }
+
+    let g = |args: &[&str]| {
+        let s = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .status()
+            .unwrap();
+        assert!(s.success(), "git {args:?} failed");
+    };
+    g(&["init", "--initial-branch=main"]);
+    g(&["add", "-A"]);
+    g(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-m",
+        "init",
+    ]);
+    let t0 = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo_root)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+
+    let cfg = ReplayConfig {
+        repo_path: repo_root.to_path_buf(),
+        t0_sha: t0,
+        // No cross-file resolution needed — the fixture is single-commit and
+        // we're asserting only that Python rows reach the corpus output.
+        skip_symbol_resolution: true,
+    };
+    let rows = Replay::run(&cfg).unwrap();
+
+    // The Python loop should yield at least one FunctionSignature row whose
+    // normalized path mentions the Python module (src.example or similar).
+    assert!(
+        rows.iter()
+            .any(|r| r.fact_id.starts_with("FunctionSignature::")
+                && r.fact_id.contains("src/example.py")),
+        "expected a FunctionSignature row from the Python fixture; got {rows:?}"
+    );
+}

@@ -2,24 +2,96 @@ use provbench_labeler::diff::{
     is_whitespace_or_comment_only, rename_candidate, rename_candidate_typed, RenameCandidate,
     RenameOrigin,
 };
+use provbench_labeler::lang::Language;
 use std::collections::HashSet;
 
 #[test]
 fn pure_whitespace_diff_is_ignored() {
-    assert!(is_whitespace_or_comment_only(b"fn x()  {}", b"fn x() {}"));
+    assert!(is_whitespace_or_comment_only(
+        b"fn x()  {}",
+        b"fn x() {}",
+        Language::Rust
+    ));
 }
 
 #[test]
 fn comment_only_diff_is_ignored() {
     assert!(is_whitespace_or_comment_only(
         b"fn x() {} // a",
-        b"fn x() {} // b"
+        b"fn x() {} // b",
+        Language::Rust
     ));
 }
 
 #[test]
 fn rename_is_not_whitespace_only() {
-    assert!(!is_whitespace_or_comment_only(b"fn x() {}", b"fn y() {}"));
+    assert!(!is_whitespace_or_comment_only(
+        b"fn x() {}",
+        b"fn y() {}",
+        Language::Rust
+    ));
+}
+
+// ── Task 13: Python-aware whitespace/comment detection ──────────────────────
+
+#[test]
+fn python_whitespace_only_detected() {
+    let before = b"def f():\n    return 1\n";
+    let after = b"def f():\n    return 1\n\n"; // trailing newline only
+    assert!(is_whitespace_or_comment_only(
+        before,
+        after,
+        Language::Python
+    ));
+}
+
+#[test]
+fn python_comment_only_detected() {
+    let before = b"def f():\n    return 1  # ok\n";
+    let after = b"def f():\n    return 1  # OK!\n";
+    assert!(is_whitespace_or_comment_only(
+        before,
+        after,
+        Language::Python
+    ));
+}
+
+#[test]
+fn python_body_change_not_trivial() {
+    let before = b"def f():\n    return 1\n";
+    let after = b"def f():\n    return 2\n";
+    assert!(!is_whitespace_or_comment_only(
+        before,
+        after,
+        Language::Python
+    ));
+}
+
+#[test]
+fn python_docstring_change_not_trivial() {
+    // Python docstrings parse as `string` expressions — significant tokens,
+    // NOT skipped like comments. Changing one is a real diff.
+    let before = b"def f():\n    \"\"\"old doc\"\"\"\n    return 1\n";
+    let after = b"def f():\n    \"\"\"new doc\"\"\"\n    return 1\n";
+    assert!(!is_whitespace_or_comment_only(
+        before,
+        after,
+        Language::Python
+    ));
+}
+
+#[test]
+fn rust_whitespace_only_still_works() {
+    let before = b"fn f() -> u32 { 1 }\n";
+    let after = b"fn  f()  ->  u32  {  1  }\n";
+    assert!(is_whitespace_or_comment_only(before, after, Language::Rust));
+}
+
+#[test]
+fn rust_comment_only_still_works() {
+    let before = b"fn f() { /* old */ }\n";
+    let after = b"fn f() { /* new */ }\n";
+    assert!(is_whitespace_or_comment_only(before, after, Language::Rust));
 }
 
 #[test]
