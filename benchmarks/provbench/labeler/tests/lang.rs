@@ -3,12 +3,18 @@ use std::path::Path;
 
 #[test]
 fn for_path_rust() {
-    assert_eq!(Language::for_path(Path::new("src/lib.rs")), Some(Language::Rust));
+    assert_eq!(
+        Language::for_path(Path::new("src/lib.rs")),
+        Some(Language::Rust)
+    );
 }
 
 #[test]
 fn for_path_python() {
-    assert_eq!(Language::for_path(Path::new("src/app.py")), Some(Language::Python));
+    assert_eq!(
+        Language::for_path(Path::new("src/app.py")),
+        Some(Language::Python)
+    );
 }
 
 #[test]

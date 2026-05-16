@@ -11,6 +11,7 @@
 pub mod doc_claim;
 pub mod field;
 pub mod function_signature;
+pub mod python;
 pub mod symbol_existence;
 pub mod test_assertion;
 
