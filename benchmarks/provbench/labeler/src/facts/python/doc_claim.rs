@@ -22,9 +22,6 @@ use crate::ast::python::PythonAst;
 use crate::facts::Fact;
 use std::path::Path;
 
-pub fn extract<'a>(
-    _ast: &'a PythonAst,
-    _source_path: &'a Path,
-) -> impl Iterator<Item = Fact> + 'a {
+pub fn extract<'a>(_ast: &'a PythonAst, _source_path: &'a Path) -> impl Iterator<Item = Fact> + 'a {
     std::iter::empty()
 }
