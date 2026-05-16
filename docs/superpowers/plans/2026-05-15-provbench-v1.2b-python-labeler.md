@@ -317,23 +317,9 @@ cargo test -p provbench-labeler --release
 
 Expected: PASS. If any existing test fails, the new walker is reordering Rust-only trees — fix before committing.
 
-- [ ] **Step 6: Re-run the pre-baseline canary and confirm byte-identical SHA**
+- [ ] **Step 6: Commit**
 
-```bash
-cd benchmarks/provbench/labeler && cargo build --release && cd -
-mkdir -p /tmp/canary-post-task3
-benchmarks/provbench/labeler/target/release/provbench-labeler run \
-  --repo benchmarks/provbench/work/ripgrep \
-  --t0   af6b6c543b224d348a8876f0c06245d9ea7929c5 \
-  --out  /tmp/canary-post-task3/corpus.jsonl
-POST=$(jq -c 'del(.labeler_git_sha)' /tmp/canary-post-task3/corpus.jsonl | sha256sum | cut -d' ' -f1)
-PRE=$(cat docs/superpowers/plans/work/2026-05-15-python-labeler-canary-pre.txt)
-test "$POST" = "$PRE" && echo "canary stable: $POST" || { echo "DRIFT: pre=$PRE post=$POST"; exit 1; }
-```
-
-Expected: `canary stable: <sha>`. If the script exits non-zero, the refactor altered Rust-path behavior — STOP and bisect.
-
-- [ ] **Step 7: Commit**
+(Per the in-execution pacing decision recorded in commit `d4a38db`'s follow-up, the intermediate ripgrep canary check between Task 3 and Task 12 is dropped. The final Task 18 canary catches any cumulative Rust-path drift, which is sufficient for a no-op refactor of this scale. If Task 18 fails, `git bisect` between Tasks 3-18 is cheap.)
 
 ```bash
 git add benchmarks/provbench/labeler/src/replay/mod.rs \
@@ -1102,23 +1088,9 @@ cargo test -p provbench-labeler --test replay --release
 
 Expected: PASS. The pre-existing Rust replay tests must remain byte-identical; the new Python replay test must pass.
 
-- [ ] **Step 4: Re-run pre-baseline canary SHA check**
+- [ ] **Step 4: Commit**
 
-```bash
-cd benchmarks/provbench/labeler && cargo build --release && cd -
-mkdir -p /tmp/canary-post-task12
-benchmarks/provbench/labeler/target/release/provbench-labeler run \
-  --repo benchmarks/provbench/work/ripgrep \
-  --t0   af6b6c543b224d348a8876f0c06245d9ea7929c5 \
-  --out  /tmp/canary-post-task12/corpus.jsonl
-POST=$(jq -c 'del(.labeler_git_sha)' /tmp/canary-post-task12/corpus.jsonl | sha256sum | cut -d' ' -f1)
-PRE=$(cat docs/superpowers/plans/work/2026-05-15-python-labeler-canary-pre.txt)
-test "$POST" = "$PRE" && echo "canary stable: $POST" || { echo "DRIFT: pre=$PRE post=$POST"; exit 1; }
-```
-
-Expected: `canary stable: <sha>`. If it diverges, the Python-branch wiring leaked into the Rust path — STOP and bisect.
-
-- [ ] **Step 5: Commit**
+(Intermediate ripgrep canary at this point is dropped per the same pacing decision as Task 3 Step 6. Task 18 catches cumulative drift. If Task 18 fails, bisect.)
 
 ```bash
 git add benchmarks/provbench/labeler/src/replay/ \
