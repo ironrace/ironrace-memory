@@ -2,6 +2,7 @@
 //! a fact even when content hashes differ. Implementation tokenizes both
 //! sides with tree-sitter, drops trivia, and compares the residual.
 
+use crate::lang::Language;
 use std::collections::HashSet;
 use tree_sitter::{Node, Parser, Tree};
 
@@ -76,10 +77,26 @@ pub fn parent_sha(repo_path: &std::path::Path, commit: &str) -> anyhow::Result<O
     }
 }
 
-pub fn is_whitespace_or_comment_only(before: &[u8], after: &[u8]) -> bool {
+/// Per SPEC §5 rule 3: whitespace-only or comment-only diffs do not invalidate
+/// a fact even when content hashes differ.
+///
+/// Tokenizes both `before` and `after` with the tree-sitter grammar for
+/// `language`, drops comment nodes and pure-whitespace leaf tokens, and
+/// compares the residual token byte sequences for byte-equality.
+///
+/// Comment node kinds by language:
+/// - Rust: `line_comment`, `block_comment`
+/// - Python: `comment` (Python has no block-comment grammar; triple-quoted
+///   docstrings parse as `string` expressions and are significant tokens
+///   that are NOT dropped).
+pub fn is_whitespace_or_comment_only(before: &[u8], after: &[u8], language: Language) -> bool {
     let parse = |s: &[u8]| -> Option<Tree> {
         let mut p = Parser::new();
-        p.set_language(&tree_sitter_rust::LANGUAGE.into()).ok()?;
+        let lang_grammar = match language {
+            Language::Rust => tree_sitter_rust::LANGUAGE.into(),
+            Language::Python => tree_sitter_python::LANGUAGE.into(),
+        };
+        p.set_language(&lang_grammar).ok()?;
         p.parse(s, None)
     };
     let Some(b_tree) = parse(before) else {
@@ -90,14 +107,23 @@ pub fn is_whitespace_or_comment_only(before: &[u8], after: &[u8]) -> bool {
     };
     let mut b_toks: Vec<&[u8]> = Vec::new();
     let mut a_toks: Vec<&[u8]> = Vec::new();
-    collect_significant_tokens(b_tree.root_node(), before, &mut b_toks);
-    collect_significant_tokens(a_tree.root_node(), after, &mut a_toks);
+    collect_significant_tokens(b_tree.root_node(), before, language, &mut b_toks);
+    collect_significant_tokens(a_tree.root_node(), after, language, &mut a_toks);
     b_toks == a_toks
 }
 
-fn collect_significant_tokens<'a>(node: Node<'_>, src: &'a [u8], out: &mut Vec<&'a [u8]>) {
+fn collect_significant_tokens<'a>(
+    node: Node<'_>,
+    src: &'a [u8],
+    language: Language,
+    out: &mut Vec<&'a [u8]>,
+) {
     let kind = node.kind();
-    if kind == "line_comment" || kind == "block_comment" {
+    let is_comment = match language {
+        Language::Rust => kind == "line_comment" || kind == "block_comment",
+        Language::Python => kind == "comment",
+    };
+    if is_comment {
         return;
     }
     if node.child_count() == 0 {
@@ -109,7 +135,7 @@ fn collect_significant_tokens<'a>(node: Node<'_>, src: &'a [u8], out: &mut Vec<&
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_significant_tokens(child, src, out);
+        collect_significant_tokens(child, src, language, out);
     }
 }
 

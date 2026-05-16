@@ -918,7 +918,13 @@ fn classify_against_commit(
                 Some((post_span, post_hash)) => {
                     // Symbol found at its original path — compute deltas.
                     let after_bytes = &post_bytes[post_span.byte_range.clone()];
-                    let ws_only = is_whitespace_or_comment_only(t0_span_bytes, after_bytes);
+                    // Per-path language dispatch: Rust paths use the Rust grammar
+                    // (byte-identical to the pre-Task-13 behavior); Python paths
+                    // use the Python grammar. Paths without a recognized
+                    // extension default to Rust to preserve historical behavior.
+                    let lang = crate::lang::Language::for_path(path)
+                        .unwrap_or(crate::lang::Language::Rust);
+                    let ws_only = is_whitespace_or_comment_only(t0_span_bytes, after_bytes, lang);
                     // Any signature-level hash difference is structurally classifiable.
                     let structural = post_hash != observed_hash;
                     CommitState {
