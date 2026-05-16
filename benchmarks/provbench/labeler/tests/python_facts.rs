@@ -1,6 +1,7 @@
 use provbench_labeler::ast::python::PythonAst;
 use provbench_labeler::facts::python::field;
 use provbench_labeler::facts::python::function_signature;
+use provbench_labeler::facts::python::symbol_existence;
 use provbench_labeler::facts::Fact;
 use std::path::Path;
 
@@ -158,5 +159,28 @@ fn field_content_hash_covers_type_annotation() {
     assert_ne!(
         hash_before, hash_after,
         "type annotation change did not affect content_hash"
+    );
+}
+
+#[test]
+fn symbol_existence_lists_all_module_bindings() {
+    let ast = PythonAst::parse(SRC.as_bytes()).unwrap();
+    let facts: Vec<Fact> = symbol_existence::extract(&ast, Path::new("src/example.py")).collect();
+    let mut names: Vec<String> = facts
+        .iter()
+        .filter_map(|f| match f {
+            Fact::PublicSymbol { qualified_name, .. } => Some(qualified_name.clone()),
+            _ => None,
+        })
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "src.example.CONSTANT_X".to_string(),
+            "src.example.Greeter".to_string(),
+            "src.example._private".to_string(),
+            "src.example.async_op".to_string(),
+        ]
     );
 }
