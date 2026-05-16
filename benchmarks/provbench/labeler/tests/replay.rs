@@ -177,3 +177,31 @@ fn replay_extracts_field_and_test_assertion_facts_at_t0() {
         "expected at least one DocClaim row, got {rows:?}"
     );
 }
+
+#[test]
+fn rust_paths_filter_matches_legacy_on_rust_only_tree() {
+    use provbench_labeler::lang::Language;
+    use std::path::PathBuf;
+
+    let inputs: Vec<PathBuf> = vec![
+        PathBuf::from("src/lib.rs"),
+        PathBuf::from("src/main.rs"),
+        PathBuf::from("README.md"),
+        PathBuf::from("Cargo.toml"),
+        PathBuf::from("docs/x.rs"),
+    ];
+
+    // Legacy filter expression — keep verbatim, this is the contract we're preserving.
+    let legacy: Vec<&PathBuf> = inputs
+        .iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"))
+        .collect();
+
+    // New filter — must be byte-equal.
+    let new: Vec<&PathBuf> = inputs
+        .iter()
+        .filter(|p| Language::for_path(p) == Some(Language::Rust))
+        .collect();
+
+    assert_eq!(legacy, new);
+}

@@ -603,11 +603,15 @@ impl PilotRepoSpec for AdHocSpec {
     }
 }
 
-/// Return all `.rs` file paths present in the git tree at `sha`.
+/// Return all `.rs` file paths present in the git tree at `sha`. Filter
+/// is expressed via [`crate::lang::Language`] dispatch so future
+/// languages (Python) can extend with sibling helpers without touching
+/// this function.
 fn rust_paths_at(pilot: &Pilot, sha: &str) -> Result<Vec<PathBuf>> {
+    use crate::lang::Language;
     Ok(tree_paths_at(pilot, sha)?
         .into_iter()
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"))
+        .filter(|p| Language::for_path(p) == Some(Language::Rust))
         .collect())
 }
 
