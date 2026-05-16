@@ -18,6 +18,7 @@
 //!   the rule engine to discriminate trivia from real source changes.
 //! - [`facts`]: per-kind extractors that produce the T₀ fact set.
 //! - [`label`]: the SPEC §5 first-match-wins rule engine.
+//! - [`lang`]: language enum + per-path dispatch for source files.
 //! - [`output`]: deterministic JSONL writer with labeler-SHA stamping.
 //! - [`replay`]: per-commit replay driver — reads blobs at each commit,
 //!   classifies, and emits `FactAtCommit` rows.
@@ -33,6 +34,7 @@ pub mod ast;
 pub mod diff;
 pub mod facts;
 pub mod label;
+pub mod lang;
 pub mod output;
 pub mod replay;
 pub mod repo;
