@@ -25,7 +25,7 @@
 **Acceptance gates (all required):**
 1. Existing Rust labeler canary on ripgrep: byte-stable corpus + facts + diffs across `c2d3b7b0` and this plan's HEAD (no Rust-path regression).
 2. New `tests/determinism_python.rs`: two consecutive runs on a small in-repo Python fixture (`labeler/tests/data/python/`) produce byte-identical corpus + facts + diffs.
-3. New `tests/determinism_flask.rs` (`#[ignore]`, opt-in via `cargo test -- --ignored`): two consecutive runs of `emit-corpus` + `emit-facts` + `emit-diffs` on `work/flask` produce byte-identical artifacts.
+3. New `tests/determinism_flask.rs` (`#[ignore]`, opt-in via `cargo test -- --ignored`): two consecutive runs of `run` + `emit-facts` + `emit-diffs` on `work/flask` produce byte-identical artifacts.
 4. SPEC §9.1 spot-check on flask: 200-sample CSV scored by hand, Wilson 95% lower bound ≥ 0.95. Sampler reuses the existing `provbench-labeler spotcheck` subcommand with `--lang=python`.
 5. `cargo fmt --all --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` clean.
 6. Existing Rust spot-check + hardening passes 2-5 retest: re-run the existing `cli_spotcheck.rs` / `replay_hardening.rs` test suites without modification — they must remain green.
@@ -93,21 +93,27 @@ Expected: branch created off the latest `main` (post-v1.2a-merge).
 
 - [ ] **Step 2: Capture the pre-change Rust canary baseline**
 
+The labeler is in the workspace-excluded crate at `benchmarks/provbench/labeler/`; build and run from inside that directory OR via the manifest path. The subcommand is `run` (not `emit-corpus`). Every corpus row contains a `labeler_git_sha` field stamped from the labeler crate's build-time git SHA, so a raw `sha256sum` of the JSONL would change every commit even when the per-row content is byte-identical — strip that field before hashing.
+
 ```bash
-cargo build --release -p provbench-labeler
-./target/release/provbench-labeler emit-corpus \
+cd benchmarks/provbench/labeler && cargo build --release && cd -
+mkdir -p /tmp/canary-pre
+benchmarks/provbench/labeler/target/release/provbench-labeler run \
   --repo benchmarks/provbench/work/ripgrep \
-  --t0 af6b6c54  \
-  --out /tmp/canary-pre/corpus.jsonl
-sha256sum /tmp/canary-pre/corpus.jsonl
+  --t0   af6b6c543b224d348a8876f0c06245d9ea7929c5 \
+  --out  /tmp/canary-pre/corpus.jsonl
+jq -c 'del(.labeler_git_sha)' /tmp/canary-pre/corpus.jsonl \
+  | sha256sum | cut -d' ' -f1 \
+  > docs/superpowers/plans/work/2026-05-15-python-labeler-canary-pre.txt
+cat docs/superpowers/plans/work/2026-05-15-python-labeler-canary-pre.txt
 ```
 
-Expected: a SHA-256 you record in `docs/superpowers/plans/work/2026-05-15-python-labeler-canary-pre.txt`. This is the byte-identity anchor; Task 18 re-runs this command and asserts the SHA matches.
+Expected: a 64-char hex SHA-256 you record in `docs/superpowers/plans/work/2026-05-15-python-labeler-canary-pre.txt`. This is the byte-identity anchor; Task 18 re-runs the same strip-then-hash and asserts the SHA matches.
 
 If `work/ripgrep` is not present, clone it first:
 ```bash
 git clone https://github.com/BurntSushi/ripgrep benchmarks/provbench/work/ripgrep
-git -C benchmarks/provbench/work/ripgrep checkout af6b6c54
+git -C benchmarks/provbench/work/ripgrep checkout af6b6c543b224d348a8876f0c06245d9ea7929c5
 ```
 
 - [ ] **Step 3: Run all existing labeler tests green before any change**
@@ -314,16 +320,18 @@ Expected: PASS. If any existing test fails, the new walker is reordering Rust-on
 - [ ] **Step 6: Re-run the pre-baseline canary and confirm byte-identical SHA**
 
 ```bash
-cargo build --release -p provbench-labeler
-./target/release/provbench-labeler emit-corpus \
+cd benchmarks/provbench/labeler && cargo build --release && cd -
+mkdir -p /tmp/canary-post-task3
+benchmarks/provbench/labeler/target/release/provbench-labeler run \
   --repo benchmarks/provbench/work/ripgrep \
-  --t0 af6b6c54 \
-  --out /tmp/canary-post-task3/corpus.jsonl
-diff <(sha256sum /tmp/canary-post-task3/corpus.jsonl | cut -d' ' -f1) \
-     <(cut -d' ' -f1 docs/superpowers/plans/work/2026-05-15-python-labeler-canary-pre.txt)
+  --t0   af6b6c543b224d348a8876f0c06245d9ea7929c5 \
+  --out  /tmp/canary-post-task3/corpus.jsonl
+POST=$(jq -c 'del(.labeler_git_sha)' /tmp/canary-post-task3/corpus.jsonl | sha256sum | cut -d' ' -f1)
+PRE=$(cat docs/superpowers/plans/work/2026-05-15-python-labeler-canary-pre.txt)
+test "$POST" = "$PRE" && echo "canary stable: $POST" || { echo "DRIFT: pre=$PRE post=$POST"; exit 1; }
 ```
 
-Expected: empty diff. If the SHA changes, the refactor altered Rust-path behavior — STOP and bisect.
+Expected: `canary stable: <sha>`. If the script exits non-zero, the refactor altered Rust-path behavior — STOP and bisect.
 
 - [ ] **Step 7: Commit**
 
@@ -362,7 +370,7 @@ Expected: `0.25.0` exactly (or a 0.25.x patch — confirm patch versions are for
 - [ ] **Step 3: Build to confirm the crate links**
 
 ```bash
-cargo build --release -p provbench-labeler
+cd benchmarks/provbench/labeler && cargo build --release && cd -
 ```
 
 Expected: builds clean (the dep is present but unused — clippy `unused_crate_dependencies` is allowed by default).
@@ -573,7 +581,7 @@ Expected: all four tests PASS.
 cargo test -p provbench-labeler --release
 ```
 
-Expected: PASS. Re-run the canary SHA check from Task 3 Step 6 (`emit-corpus` on ripgrep) — SHA must still match the pre-baseline.
+Expected: PASS. Re-run the canary SHA check from Task 3 Step 6 (`run` on ripgrep + strip `labeler_git_sha` + sha256sum) — SHA must still match the pre-baseline.
 
 - [ ] **Step 8: Commit**
 
@@ -1097,16 +1105,18 @@ Expected: PASS. The pre-existing Rust replay tests must remain byte-identical; t
 - [ ] **Step 4: Re-run pre-baseline canary SHA check**
 
 ```bash
-cargo build --release -p provbench-labeler
-./target/release/provbench-labeler emit-corpus \
+cd benchmarks/provbench/labeler && cargo build --release && cd -
+mkdir -p /tmp/canary-post-task12
+benchmarks/provbench/labeler/target/release/provbench-labeler run \
   --repo benchmarks/provbench/work/ripgrep \
-  --t0 af6b6c54 \
-  --out /tmp/canary-post-task12/corpus.jsonl
-diff <(sha256sum /tmp/canary-post-task12/corpus.jsonl | cut -d' ' -f1) \
-     <(cut -d' ' -f1 docs/superpowers/plans/work/2026-05-15-python-labeler-canary-pre.txt)
+  --t0   af6b6c543b224d348a8876f0c06245d9ea7929c5 \
+  --out  /tmp/canary-post-task12/corpus.jsonl
+POST=$(jq -c 'del(.labeler_git_sha)' /tmp/canary-post-task12/corpus.jsonl | sha256sum | cut -d' ' -f1)
+PRE=$(cat docs/superpowers/plans/work/2026-05-15-python-labeler-canary-pre.txt)
+test "$POST" = "$PRE" && echo "canary stable: $POST" || { echo "DRIFT: pre=$PRE post=$POST"; exit 1; }
 ```
 
-Expected: empty diff. If it diverges, the Python-branch wiring leaked into the Rust path — STOP and bisect.
+Expected: `canary stable: <sha>`. If it diverges, the Python-branch wiring leaked into the Rust path — STOP and bisect.
 
 - [ ] **Step 5: Commit**
 
@@ -1368,16 +1378,18 @@ git commit -m "test(provbench-labeler): full-flask Python determinism (corpus/fa
 - [ ] **Step 1: Rebuild + re-run canary**
 
 ```bash
-cargo build --release -p provbench-labeler
-./target/release/provbench-labeler emit-corpus \
+cd benchmarks/provbench/labeler && cargo build --release && cd -
+mkdir -p /tmp/canary-final
+benchmarks/provbench/labeler/target/release/provbench-labeler run \
   --repo benchmarks/provbench/work/ripgrep \
-  --t0 af6b6c54 \
-  --out /tmp/canary-final/corpus.jsonl
-diff <(sha256sum /tmp/canary-final/corpus.jsonl | cut -d' ' -f1) \
-     <(cut -d' ' -f1 docs/superpowers/plans/work/2026-05-15-python-labeler-canary-pre.txt)
+  --t0   af6b6c543b224d348a8876f0c06245d9ea7929c5 \
+  --out  /tmp/canary-final/corpus.jsonl
+POST=$(jq -c 'del(.labeler_git_sha)' /tmp/canary-final/corpus.jsonl | sha256sum | cut -d' ' -f1)
+PRE=$(cat docs/superpowers/plans/work/2026-05-15-python-labeler-canary-pre.txt)
+test "$POST" = "$PRE" && echo "canary stable: $POST" || { echo "DRIFT: pre=$PRE post=$POST"; exit 1; }
 ```
 
-Expected: empty diff. This is the load-bearing assertion that no Plan A change leaked into the Rust path.
+Expected: `canary stable: <sha>`. This is the load-bearing assertion that no Plan A change leaked into the Rust path.
 
 - [ ] **Step 2: Re-run the existing Rust spot-check + hardening suites unchanged**
 
@@ -1407,20 +1419,21 @@ Expected: both clean. Per the user's standing rule (memory `feedback_format_befo
 - [ ] **Step 1: Emit the flask corpus**
 
 ```bash
-./target/release/provbench-labeler emit-corpus \
+SHA7=$(benchmarks/provbench/labeler/target/release/provbench-labeler stamp | cut -c1-7)
+benchmarks/provbench/labeler/target/release/provbench-labeler run \
   --repo benchmarks/provbench/work/flask \
-  --t0 2f0c62f5 \
-  --out benchmarks/provbench/corpus/flask-2f0c62f5-<labeler-sha>.jsonl
+  --t0   2f0c62f5e6e290843f03c1fa70817c7a3c7fd661 \
+  --out  benchmarks/provbench/corpus/flask-2f0c62f5-$SHA7.jsonl
 ```
 
-(The labeler stamps its own git SHA in the output filename — note it for the findings doc.)
+(`stamp` returns the labeler's build-time git SHA; the short form goes in the filename.)
 
 - [ ] **Step 2: Sample 200 Python facts with the spotcheck CLI**
 
 ```bash
-./target/release/provbench-labeler spotcheck \
+benchmarks/provbench/labeler/target/release/provbench-labeler spotcheck \
   --repo benchmarks/provbench/work/flask \
-  --corpus benchmarks/provbench/corpus/flask-2f0c62f5-<labeler-sha>.jsonl \
+  --corpus benchmarks/provbench/corpus/flask-2f0c62f5-$SHA7.jsonl \
   --out benchmarks/provbench/results/python-labeler-2026-05-15-spotcheck.csv \
   --lang python \
   --n 200 \
@@ -1495,7 +1508,7 @@ runtime is required.
 
 Usage:
 ```bash
-provbench-labeler emit-corpus --repo path/to/python/repo --t0 <sha> --out corpus.jsonl
+provbench-labeler run         --repo path/to/python/repo --t0 <sha> --out corpus.jsonl
 provbench-labeler emit-facts  --repo path/to/python/repo --t0 <sha> --out facts.jsonl
 provbench-labeler emit-diffs  --repo path/to/python/repo --t0 <sha> --out-dir diffs/
 provbench-labeler spotcheck   --lang python --corpus corpus.jsonl --out spotcheck.csv --n 200 --seed 13897750829054410479
@@ -1550,7 +1563,7 @@ gh pr create --base main \
 ## Test plan
 - [ ] CI green on the Plan A branch
 - [ ] Reviewer reproduces the §9.1 spot-check from the committed CSV + findings
-- [ ] Reviewer verifies the canary SHA file matches a fresh `emit-corpus` on ripgrep
+- [ ] Reviewer verifies the canary SHA file matches a fresh `provbench-labeler run` on ripgrep with `jq -c 'del(.labeler_git_sha)' | sha256sum` applied
 EOF
 )"
 ```
