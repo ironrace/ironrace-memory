@@ -5,11 +5,16 @@
 //! and optional return type) and stops before the body block — i.e. the
 //! trailing `:` is included, the body indentation is not.
 //!
-//! Task 5 only ships the leaf name. The full dotted-form
-//! `qualified_name` (e.g. `src.example.Greeter.greet`) lands in Task 6.
+//! Task 5 shipped the leaf-name [`iter`] used by [`crate::ast::python::PythonAst`]
+//! tests. Task 6 adds [`extract`] which emits full [`Fact::FunctionSignature`]
+//! rows with dotted module-qualified names (e.g. `src.example.Greeter.greet`).
+//! The two walkers are intentionally kept separate so `iter`'s leaf-name
+//! contract stays byte-stable for the AST-layer tests.
 
 use crate::ast::python::PythonAst;
-use crate::ast::spans::Span;
+use crate::ast::spans::{content_hash, Span};
+use crate::facts::Fact;
+use std::path::{Path, PathBuf};
 use tree_sitter::Node;
 
 pub fn iter(ast: &PythonAst) -> impl Iterator<Item = (String, Span)> + '_ {
@@ -29,6 +34,108 @@ fn walk(node: Node<'_>, src: &[u8], out: &mut Vec<(String, Span)>) {
     for child in node.children(&mut cursor) {
         walk(child, src, out);
     }
+}
+
+/// Yield one [`Fact::FunctionSignature`] per `def` / `async def`,
+/// qualified with the module path derived from `source_path` and any
+/// enclosing class. Signature span follows the same boundary as [`iter`]:
+/// from the start of the def keyword through (but excluding) the body,
+/// with trailing whitespace trimmed so the span ends on the `:`.
+///
+/// Nested defs (functions defined inside other functions) are NOT
+/// emitted — they are addressed by `symbol_existence` (Task 8).
+pub fn extract<'a>(ast: &'a PythonAst, source_path: &'a Path) -> impl Iterator<Item = Fact> + 'a {
+    let mut out = Vec::new();
+    let module_path = module_path_for(source_path);
+    walk_qualified(
+        ast.root(),
+        ast.source(),
+        &mut Vec::new(),
+        &module_path,
+        source_path,
+        &mut out,
+    );
+    out.into_iter()
+}
+
+fn walk_qualified(
+    node: Node<'_>,
+    src: &[u8],
+    class_path: &mut Vec<String>,
+    module_path: &str,
+    source_path: &Path,
+    out: &mut Vec<Fact>,
+) {
+    match node.kind() {
+        "class_definition" => {
+            let name = match node
+                .child_by_field_name("name")
+                .and_then(|n| n.utf8_text(src).ok())
+            {
+                Some(s) => s.to_string(),
+                None => return,
+            };
+            class_path.push(name);
+            if let Some(body) = node.child_by_field_name("body") {
+                let mut c = body.walk();
+                for child in body.children(&mut c) {
+                    walk_qualified(child, src, class_path, module_path, source_path, out);
+                }
+            }
+            class_path.pop();
+            return;
+        }
+        "function_definition" => {
+            if let Some(fact) = build_function_fact(node, src, class_path, module_path, source_path)
+            {
+                out.push(fact);
+            }
+            // Do NOT descend into the body — nested defs are owned by
+            // symbol_existence (Task 8), not function_signature.
+            return;
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_qualified(child, src, class_path, module_path, source_path, out);
+    }
+}
+
+fn build_function_fact(
+    node: Node<'_>,
+    src: &[u8],
+    class_path: &[String],
+    module_path: &str,
+    source_path: &Path,
+) -> Option<Fact> {
+    let (leaf, span) = extract_one(node, src)?;
+    let qualified_name = if class_path.is_empty() {
+        format!("{module_path}.{leaf}")
+    } else {
+        format!("{module_path}.{}.{leaf}", class_path.join("."))
+    };
+    let hash = content_hash(&src[span.byte_range.clone()]);
+    Some(Fact::FunctionSignature {
+        qualified_name,
+        source_path: PathBuf::from(source_path),
+        span,
+        content_hash: hash,
+    })
+}
+
+/// Compute a module path for a Python source file. Strips the trailing
+/// `.py` extension and replaces path separators with `.`.
+///
+/// **Note:** for Task 6 the path is preserved verbatim — a file at
+/// `src/example.py` becomes `src.example`. Task 11 (PythonResolver) may
+/// refine this when stripping repo-root prefixes / collapsing
+/// `__init__.py`; until then the fixture's expected qualified names
+/// (e.g. `src.example.Greeter.greet`) drive the policy here.
+fn module_path_for(source_path: &Path) -> String {
+    let s = source_path.to_string_lossy();
+    let stripped = s.strip_suffix(".py").unwrap_or(&s);
+    stripped.replace('/', ".")
 }
 
 fn extract_one(node: Node<'_>, src: &[u8]) -> Option<(String, Span)> {
